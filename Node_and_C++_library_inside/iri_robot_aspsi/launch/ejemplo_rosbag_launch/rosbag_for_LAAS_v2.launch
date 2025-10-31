@@ -1,0 +1,133 @@
+<!-- EXAMPLE FOR Dabo-ROBOT -->
+<!-- Note: This is just an example of what you can do to get results from the rosbags, but it may be necessary to change some topics or add something else from the robot model or map.  -->
+<launch>
+
+<param name="use_sim_time" value="true"/>
+
+    <node pkg="rosbag"
+        type="play"
+        name="rosbag"
+        args=" --clock -l /home/ubuntu18clarastay/rosbags/2023-08-17-11-44-35.bag"/> 
+
+<!-- Rosbags Comparación Side-by-Side y Vform !!! -->
+<!-- "Help": If you want, for comfortablenes include the launch's names here to only copy names and change in the previous node the rosbag. 
+
+Example: 2023-08-17-11-44-35.bag (person moving) person not move=> 2023-08-24-17-45-07.bag
+ -->
+ <!--<include file="$(find pr2_gazebo)/launch/pr2_localization.launch"/>-->
+ <!--<include file="$(find iri_dabo_gazebo)/launch/spawn.launch">
+    <arg name="ns"    value="$(arg ns)"/>
+    <arg name="model" value="$(arg robot_model)"/>
+    <arg name="x"     value="11.0"/>
+    <arg name="y"     value="22.0"/>
+    <arg name="yaw"   value="0.0"/>
+  </include>-->
+
+<!--<include file="$(find pr2_gazebo)/launch/pr2_no_arms.launch"/>-->
+
+
+<!-- Launch Dabo robot model: -->
+ <!--  <include file="$(find iri_dabo_gazebo)/launch/spawn.launch">
+    <arg name="ns"    value="$(arg ns)"/>
+    <arg name="model" value="$(arg robot_model)"/>
+    <arg name="x"     value="11.0"/>
+    <arg name="y"     value="22.0"/>
+    <arg name="yaw"   value="0.0"/>
+  </include>-->
+
+   <node pkg ="goal_publisher_aspsi"
+          type="goal_publisher_aspsi"
+          name="goal_pub_aspsi2"
+
+	  output="screen">
+       <remap from="/goal_pub_aspsi2/tracks"
+               to="/mht_2/tracks" />
+      <remap from="/goalASPSI"
+               to="/goal_pub_aspsi2/goalASPSI" />
+     <!-- <remap from="/$(env dabo)/state_mach_comp/people_tracks"
+               to="/$(env dabo)/mht/tracks" />
+      <remap from="/$(env dabo)/state_mach_comp/odom"
+               to="/$(env dabo)/segway/odom" />
+      <remap from="/$(env dabo)/state_mach_comp/companionState"
+               to="/$(env dabo)/companionState" />
+     <remap from="/$(env dabo)/tibi_akp_status"
+               to="/$(env dabo)/tibi_akp_status" /> 
+     <param name="~/threshold_max_dist_between_robot_and_person_conf"   value="5.0" />-->
+    </node>
+
+
+   <node pkg ="move_base"
+          type="move_base"
+          name="move_base2"      
+          output="screen">
+       <remap from="/cmd_vel"
+              to="/cmd_vel_unsafe" />
+      <remap from="/cost_map"
+             to="/move_base2/global_costmap/costmap" />
+      <remap from="/odom"
+              to="/base_odometry/odom" />
+      <remap from="/front_scan"
+              to="/base_scan" />
+      <remap from="/tracks"
+               to="/mht_2/tracks" />
+      <remap from="/tracked_humans"
+               to="/tracked_humans" />
+      <remap from="/move_base_simple/goal"
+               to="/pr2/move_base_simple/goal" />
+      <remap from="/planner_markers"
+               to="/plannermarkers2" />
+       <remap from="/move_base/cancel"
+               to="/move_base2/cancel" />
+      <!-- <remap from="/move_base2/goalASPSI"
+               to="/goal_pub_aspsi2/goalASPSI" />-->
+
+
+      
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2real/move_base_params.yaml"      command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2real/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2real/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2real/local_costmap_params.yaml"  command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2real/global_costmap_params.yaml" command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2real/akp_local_planner_params.yaml" command="load" />
+       <!--<rosparam file="$(find iri_pr2_rosnav)/params/amcl_companion_test_ely2021_mapFME.yaml" command="load" />-->
+      <param name="AkpLocalPlanner/destination_map_path" value="$(find iri_robot_aspsi)/maps/master_big_destinations_Gazebo_sim.txt" />
+	<param name="AkpLocalPlanner/results_filename_Zanlungo" value="name_file.txt" /> 
+      <param name="AkpLocalPlanner/robot" value="pr2"/>
+      <param name="AkpLocalPlanner/person_goal_id"  value="200"/> 
+      <param name="AkpLocalPlanner/speed_k"  value="1"/> 
+      <param name="AkpLocalPlanner/person_radi_amp"  value="0.2"/> 
+      <param name="AkpLocalPlanner/change_treshold_distance_between_steps"  value="0.3"/> 
+	<!-- for SIM-->
+ 	<param name="AkpLocalPlanner/change_sim"  value="False"/> 
+ 	<param name="AkpLocalPlanner/change_sim_target_per"  value="False"/> 
+        <param name="AkpLocalPlanner/frame_robot_footprint"  value="base_footprint"/> 
+    </node>
+
+  <arg name="config_file"   default="$(find iri_safe_cmd)/param/sample.yaml" />
+<!--  <arg name="node_name"     default="iri_safe_cmd" />-->
+<!--  <arg name="output"        default="screen" />-->
+  <arg name="launch_prefix" default="" />
+<node pkg ="iri_safe_cmd"
+        type="iri_safe_cmd"
+        name="iri_safe_cmd"
+        ns="pr2"
+        output="screen"
+        launch-prefix="$(arg launch_prefix)">
+    <rosparam file="$(find iri_safe_cmd)/param/sample.yaml" command="load" />
+    <param name="base_frame" value="base_link" />
+    <remap from="~cmd_vel_safe" to="/navigation/cmd_vel"/>
+    <remap from="~cmd_vel"      to="/cmd_vel_unsafe"/>
+    <remap from="/pr2/iri_safe_cmd/rear_scan"   to="/base_scan"/>
+    <remap from="/pr2/iri_safe_cmd/front_scan"  to="/base_scan"/>
+    <remap from="~joy"          to="/pr2/joy"/>
+  </node>
+
+  <node name="dr" pkg ="rqt_reconfigure" type="rqt_reconfigure" />
+
+
+
+
+ <node name="rviz" pkg="rviz" type="rviz" args="-d $(find iri_robot_aspsi)/rviz/pr2_real.rviz" />
+
+
+</launch>

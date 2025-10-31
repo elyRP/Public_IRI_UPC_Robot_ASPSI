@@ -1,0 +1,347 @@
+<?xml version="1.0"?>
+<!-- -->
+<launch>
+
+
+
+    <arg name="gui" default="true"/>
+    <arg name="world_name"      default="fme_door_open_v2"/>
+    <arg name="world_description" default="true"/>
+    <arg name="public_sim" default="false"/>
+  
+
+
+
+ 
+
+
+<!-- navegation IRI-->
+
+ <arg name="ns"                         default="robot"/>
+    <arg name="path"                     default="$(find iri_rosnav)/params"/>
+   <!-- <arg name="move_base_params"         default="move_base_params.yaml"/>-->
+   <!-- <arg name="costmap_common_params"    default="common_params.yaml"/>-->
+  <!--  <arg name="costmap_local_params"     default="local_params.yaml"/>-->
+   <!-- <arg name="costmap_global_params"    default="global_params.yaml"/>-->
+  <arg name="map_frame_id"               default="map"/>
+  <arg name="odom_frame_id"              default="odom"/>
+  <arg name="base_frame_id"              default="base_footprint"/>
+  <arg name="map_topic"                  default="/map"/>
+  <arg name="map_service"                default="/static_map"/>
+  <arg name="odom_topic"                 default="/mobile_base_controller/odom"/>
+  <arg name="cmd_vel_topic"              default="/mobile_base_controller/cmd_vel"/>
+  <arg name="scan_topic"                 default="/scan"/>
+  <arg name="use_map"                    default="true"/>
+  <arg name="use_map_server"             default="true"/>
+    <arg name="map_name"                 default="fme_door_open"/>
+  <arg name="use_amcl"                   default="true"/>
+    <arg name="amcl_config"              default="$(arg path)/amcl.yaml"/>
+    <arg name="initial_x"                default="-1.5"/>
+    <arg name="initial_y"                default="8.0"/>
+    <arg name="initial_yaw"              default="-1.57"/>
+ <!-- FME: initial_x=-1.5; initial_y=8.0; initial_yaw=-1.57-->
+ <!-- master_big: initial_x=20.0; initial_y=36.0; initial_yaw=0.0-->
+  <arg name="use_fake_loc"               default="false"/>
+  <arg name="use_gmapping"               default="false"/>
+    <arg name="gmapping_scan_topic"      default="/scan"/>
+    <arg name="gmapping_config"          default="$(arg path)/gmapping.yaml"/>
+    <arg name="resolution"               default="0.1"/>
+  <arg name="use_move_base"              default="true"/>
+    <!--<arg name="local_planner"            default="dwa"/>-->
+    <!--  <arg name="global_planner"           default="global_planner"/>-->
+  <arg name="output"                     default="screen" />
+  <arg name="launch_prefix"              default="" />
+ <!--<arg name="rviz"     default="true"/>-->
+ <!-- <arg name="sim_sufix" value="_public_sim"     if="$(arg public_sim)"/>-->
+   <!--<arg name="sim_sufix" value=""                unless="$(arg public_sim)"/>-->
+
+<group if="$(arg use_map)">
+   <group if="$(arg use_map_server)">
+      <include file="$(find iri_robot_aspsi)/launch/ivo_launch/launchs_internos_modificados/launchs_in_iri_rosnav_needed_for_tiago_robot/launchs_in_iri_rosnav_needed_for_tiago_robot/map_server_tiago.launch">
+        <arg name="ns"            value="$(arg ns)"/>
+        <arg name="map_frame_id"  value="$(arg map_frame_id)"/>
+        <arg name="map_name"      value="$(arg map_name)"/>
+        <arg name="map_topic"     value="$(arg map_topic)"/>
+        <arg name="map_service"   value="$(arg map_service)"/>
+        <arg name="output"        value="$(arg output)" />
+        <arg name="launch_prefix" value="$(arg launch_prefix)" />
+      </include>
+    </group>
+    
+    <group if="$(arg use_amcl)">
+      <include file="$(find iri_robot_aspsi)/launch/ivo_launch/launchs_internos_modificados/iri_rosnav/launch/include/amcl_ivo.launch">
+        <arg name="ns"            value="$(arg ns)"/>
+        <arg name="config"        value="$(arg amcl_config)"/>
+        <arg name="map_frame_id"  value="$(arg map_frame_id)"/>
+        <arg name="odom_frame_id" value="$(arg odom_frame_id)"/>
+        <arg name="base_frame_id" value="$(arg base_frame_id)"/>
+        <arg name="initial_x"     value="$(arg initial_x)"/>
+        <arg name="initial_y"     value="$(arg initial_y)"/>
+        <arg name="initial_yaw"   value="$(arg initial_yaw)"/>
+        <arg name="scan_topic"    value="$(arg scan_topic)"/>
+        <arg name="map_service"   value="$(arg map_service)"/>
+        <arg name="output"        value="$(arg output)" />
+        <arg name="launch_prefix" value="$(arg launch_prefix)" />
+	<!--  <arg name="use_map_topic" value="true"/>-->
+      </include>
+    </group>
+
+   <!-- <group if="$(arg use_gmapping)">
+      <include file="$(find iri_rosnav)/launch/include/gmapping.launch">
+        <arg name="ns"                     value="$(arg ns)"/>
+        <arg name="resolution"             value="$(arg resolution)"/>
+        <arg name="config"                 value="$(arg gmapping_config)"/>
+        <arg name="map_frame_id"           value="$(arg map_frame_id)"/>
+        <arg name="odom_frame_id"          value="$(arg odom_frame_id)"/>
+        <arg name="base_frame_id"          value="$(arg base_frame_id)"/>
+        <arg name="gmapping_scan_topic"    value="$(arg gmapping_scan_topic)"/>
+        <arg name="map_topic"              value="$(arg map_topic)"/>
+        <arg name="output"                 value="$(arg output)" />
+        <arg name="launch_prefix"          value="$(arg launch_prefix)" />
+      </include>
+    </group>-->
+  </group>
+
+<!-- args from pal -->
+ <arg name="namespace" default="/"/>
+ <!-- <arg name="public_sim"   default="false"/>-->
+
+  <arg name="end_effector_left"  default="pal-hey5"/>
+  <arg name="end_effector_right"  default="pal-hey5"/>
+  <arg name="ft_sensor_left"  default="schunk-ft"/>
+  <arg name="ft_sensor_right"  default="schunk-ft"/>
+  <arg name="laser_model"  default="sick-571"/>
+  <arg name="camera_model"  default="orbbec-astra"/>
+  <arg name="has_screen"    default="False"/>
+  <arg name="tuck_arm"  default="true"/>
+  <arg name="planner"        default="base"/>
+  <arg name="global_planner" default="global_planner"/>
+  <arg name="local_planner"  default="$(eval 'teb' if arg('public_sim') else 'pal')"/>
+  <arg name="mapping"        default="$(eval 'gmapping' if arg('public_sim') else 'karto')"/>
+  <arg name="recording" default="false"/>
+  <arg name="extra_gazebo_args" default=""/>
+<arg name="rgbd_sensors"   default="false"/>
+
+  <arg name="sim_sufix" value="_public_sim"     if="$(arg public_sim)"/>
+  <arg name="sim_sufix" value=""                unless="$(arg public_sim)"/>
+
+  <env name="PAL_HOST" value="tiago_dual" />
+
+
+<!-- args from iri -->
+  <arg name="rviz"                    default="true"/>
+  <arg name="rviz_file"               default="$(find iri_robot_aspsi)/rviz/navigation_public_sim_TiagoDual.rviz"/>
+  <arg name="move_base_params"        default="move_base_params.yaml"/>
+  <arg name="costmap_common_params"   default="common_params.yaml"/>
+  <arg name="costmap_local_params"    default="local_params.yaml"/>
+  <arg name="costmap_global_params"   default="global_params.yaml"/>
+  <!--<arg name="map_name"                default="fme"/>-->
+  <!--<arg name="initial_x"               default="20.0"/>
+  <arg name="initial_y"               default="36.0"/>
+  <arg name="initial_yaw"             default="0.0"/>-->
+ <!-- FME: initial_x=-1.5; initial_y=8.0; initial_yaw=-1.57-->
+ <!-- master_big: initial_x=20.0; initial_y=36.0; initial_yaw=0.0-->
+
+ <!-- <arg name="local_planner"           default="dwa"/>
+  <arg name="global_planner"          default="global_planner"/>-->
+  <!--  <arg name="output"                  default="screen" />-->
+ <!-- <arg name="launch_prefix"           default="" />-->
+
+<!-- (TiagoDual) navigation -->
+ <!--<include file="$(find tiago_2dnav_gazebo)/launch/navigation.launch">
+      <arg name="state"          value="mapping"/>
+      <arg name="mapping"        value="$(arg mapping)"/>
+      <arg name="planner"        value="$(arg planner)"/>
+      <arg name="global_planner" value="$(arg global_planner)"/>
+      <arg name="local_planner"  value="$(arg local_planner)"/>
+      <arg name="public_sim"     value="$(arg public_sim)"/>
+      <arg name="rgbd_sensors"   value="$(arg rgbd_sensors)"/>
+    </include>-->
+  <!-- pointcloud to laserscan (TiagoDual)-->
+  <group if="$(arg public_sim)">
+    <include file="$(find tiago_laser_sensors)/launch/rgbd_cloud_laser.launch">
+      <arg name="cloud" value="/xtion/depth_registered/points"/>
+    </include>
+  </group>
+
+
+
+
+ <!-- People Tracking MHT (remap) -->
+    <!-- published topics:  /$(env ROBOT)/mht/tracks -->
+    <!-- subscribed topics: /$(env ROBOT)/detections -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_people_tracking_mht"
+        type="iri_people_tracking_mht"
+        name="mht_2"      
+        output="screen"> 
+    <remap from="/mht_2/detections"
+              to="/lpd_2/peopleMapFiltered" /> <!-- este topic /lpd_2/peopleMapFiltered ha de contener las detecciones de ambos detectores (aunque sean en instantes de tiempo diferentes. -->        
+    <remap from="/mobile_base_controller/odom"
+              to="/mobile_base_controller/odom" /> <!-- /topic-odometry-of-the-robot -->
+    <remap from="/mht_2/odom_for_medium_velocity"
+              to="/mobile_base_controller/odom" /> <!-- /topic-odometry-of-the-robot -->
+              
+ <!-- People Tracking MHT parameters for outdoor environments with few false alarms-->
+  	<param name="~/frame_id"  type="string" value="map" /> <!-- tf of the map for the tracker -->
+    <param name="local_tracker"            type="bool"   value="false"/>
+    <param name="~/association_threshold"  type="double" value="1.0" />
+    <param name="~/confirmation_threshold" type="double" value="0.9" />
+    <param name="~/deletion_threshold"     type="double" value="0.4" />
+    <param name="~/laser_probability"      type="double" value="0.9" />
+    <param name="~/laser_false_alarm"      type="double" value="0.1" />
+    <param name="~/laser_new_track"        type="double" value="0.11" />
+    <param name="~/laser_no_detection"     type="double" value="0.97" />
+    <param name="~/laser_no_confirmed"     type="double" value="0.02" />
+    <param name="~/laser_no_confirmed_iteration" type="double" value="0.01" />
+    <param name="~/augment_covariance_track" type="double" value="0.5" />
+    <param name="~/mht_velocity_margin" type="double" value="1.0" />
+    <param name="~/covariance_no_track" type="double" value="5.0" />
+  </node>
+
+ <!-- Laser People Detector (remap) -->
+    <!-- published topics:  /$(env ROBOT)/people -->
+    <!-- subscribed topics: /$(env ROBOT)/sensors/front_laser_scan -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_laser_people_detection"
+        type="iri_laser_people_detection"
+        name="lpd"
+        output="screen"
+       	>
+
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-0.07" />
+	<param name="~/personRadius"        type="double" value="0.7" />
+	<param name="~/jumpDistance"        type="double" value="0.1" />
+	<param name="~/minPoints"        type="double" value="3" />
+      <!-- load different trained detectors (to switch at rangeThreshold) -->
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile.txt"  />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile2.txt" />
+      <!-- transform detections to base_link frame -->
+      <param name="~/selectPosesFrame"   type="bool"   value="false" />
+      <param name="~/posesFrame"         type="string" value="map" />  <!-- frame where you want the poses -->
+      <param name="~/selectScanFrame"    type="bool"   value="false" />
+      <param name="~/scanFrame"          type="string" value="base_laser_link" /> <!-- frame of the scan -->
+      <!-- visualization -->
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.4" />
+      <param name="~/markerR"            type="double" value="0.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.5" />
+      <param name="~/markerA"            type="double" value="0.5" />
+      <!-- filter detections by range/x/y -->
+      <param name="~/filterPosesMode"    type="bool"   value="True" />
+      <param name="~/filterR"            type="double" value="10.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+
+    <remap from="/lpd/scan"
+             to="/rear_scan" /> <!-- topic: scan del robot -->
+    <remap from="/lpd/people"
+             to="/lpd_2/people" />
+  </node>
+
+
+
+
+  <!-- Laser People Detector (remap) -->
+    <!-- published topics:  /$(env ROBOT)/people -->
+    <!-- subscribed topics: /$(env ROBOT)/sensors/front_laser_scan -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_laser_people_detection"
+        type="iri_laser_people_detection"
+        name="lpd_2"
+        output="screen"
+       	>
+
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-0.07" />
+	<param name="~/personRadius"        type="double" value="0.7" />
+	<param name="~/jumpDistance"        type="double" value="0.1" />
+	<param name="~/minPoints"        type="double" value="3" />
+      <!-- load different trained detectors (to switch at rangeThreshold) -->
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile.txt"  />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile2.txt" />
+      <!-- transform detections to base_link frame -->
+      <param name="~/selectPosesFrame"   type="bool"   value="false" />
+      <param name="~/posesFrame"         type="string" value="map" />  <!-- frame where you want the poses -->
+      <param name="~/selectScanFrame"    type="bool"   value="false" />
+      <param name="~/scanFrame"          type="string" value="base_laser_link" /> <!-- frame of the scan -->
+      <!-- visualization -->
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.4" />
+      <param name="~/markerR"            type="double" value="0.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.5" />
+      <param name="~/markerA"            type="double" value="0.5" />
+      <!-- filter detections by range/x/y -->
+      <param name="~/filterPosesMode"    type="bool"   value="True" />
+      <param name="~/filterR"            type="double" value="10.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+
+    <remap from="/lpd_2/scan"
+             to="/scan" /> <!-- topic: scan del robot -->
+    <remap from="/lpd_2/people"
+             to="/lpd_2/people" />
+  </node>
+  
+   
+  
+   <!-- Laser People map Filter -->
+    <!-- published topics:  /$(env ROBOT)/peopleFiltered -->
+    <!-- subscribed topics: /$(env ROBOT)/people -->
+    <!--                    /$(env ROBOT)map -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+     <node pkg ="iri_laser_people_map_filter"
+          type="iri_laser_people_map_filter"
+          name="laser_people_map_filter"
+ 	output="screen">
+
+   <param name="~/filter"   type="bool" value="True" /> <!-- true to enable filtering when we have a map -->
+      <param name="~/neighborRadius"   type="double" value="0.3" />
+      <param name="~/markerWidth"      type="double" value="0.7" />
+      <param name="~/markerHeight"     type="double" value="1.5" />
+      <param name="~/markerR"          type="double" value="1.0" />
+      <param name="~/markerG"          type="double" value="1.0" />
+      <param name="~/markerB"          type="double" value="0.0" />
+      <param name="~/markerA"          type="double" value="0.9" />
+      <param name="~/markerLifeTime"   type="double" value="0.1" />
+      
+
+      <remap from="/laser_people_map_filter/people"
+               to="/lpd_2/people" />
+      <remap from="/laser_people_map_filter/people_out"
+               to="/lpd_2/peopleMapFiltered" />
+      <remap from="/laser_people_map_filter/map"
+               to="/robot/map" /> <!-- topic of the map -->
+                          
+    </node> 
+
+
+   <!-- Ini Navigation Companion Nodes -->
+
+   <!-- pointcloud to laserscan-->
+ <!--  <group if="$(arg public_sim)">
+    <include file="$(find tiago_laser_sensors)/launch/rgbd_cloud_laser.launch">
+      <arg name="cloud" value="/xtion/depth_registered/points"/>
+    </include>
+  </group>-->
+
+
+
+<!-- <node name="dr" pkg ="rqt_reconfigure" type="rqt_reconfigure" />-->
+
+</launch>

@@ -1,0 +1,19 @@
+#ADD_EXECUTABLE(local_nav_example  local_nav_example.cpp)
+#TARGET_LINK_LIBRARIES(local_nav_example people_prediction)
+# TODO: ver porque no linca la nueva clase Cplan_local_nav_person_companion
+
+ADD_EXECUTABLE(prediction_example  prediction_example.cpp)
+TARGET_LINK_LIBRARIES(prediction_example people_prediction)
+
+#ADD_EXECUTABLE(generate_performance_from_data_example  generate_performance_from_data_example.cpp)
+#TARGET_LINK_LIBRARIES(generate_performance_from_data_example people_prediction)
+
+#ADD_EXECUTABLE(generate_performance_from_data_exampleIROS2019  generate_performance_from_data_exampleIROS2019.cpp)
+#TARGET_LINK_LIBRARIES(generate_performance_from_data_exampleIROS2019 people_prediction) # es de zanlungo. sale fuera.
+
+#ADD_EXECUTABLE(generate_performance_from_data_example_humanoids_side_by_side_2people  generate_performance_from_data_example_humanoids_side_by_side_2people.cpp)
+#TARGET_LINK_LIBRARIES(generate_performance_from_data_example_humanoids_side_by_side_2people people_prediction) # es de two people companion. sale fuera!
+
+
+
+

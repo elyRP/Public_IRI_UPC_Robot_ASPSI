@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="laser_model"  default="sick-561"/>
+
+  <include file="$(find iri_robot_aspsi)/launch/ivo_launch/launchs_internos_modificados/ivo_gazebo/launch/ivo_gazebo_ely_aspsi_fme_obst.launch" pass_all_args="true"/>
+  
+</launch>

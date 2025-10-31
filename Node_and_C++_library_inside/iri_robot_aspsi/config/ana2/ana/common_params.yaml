@@ -1,0 +1,137 @@
+#*  All rights reserved.
+#*/*
+# * common_params.yaml  (for ASPSI)
+# *
+# *  Created on: Dec 22, 2013. Last Modified by Ely Repiso on 2025 (migration to ros-Noetic and in the middle of 
+# *  ros2- humble migration)
+# *      Author: Initial code of the Robot alone AKP navigation is from Gonzalo Ferrer (2013).
+# *      Author: Additions and new codes of ASPSI for people accompaniment code of Ely Repiso (from 2015 and currently).
+# *
+# *      License (for other authors that will not be the original ones): CC BY-NC-ND 4.0 
+# *      (Attribution-NonCommercial-NoDerivatives 4.0 International)
+# *        https://creativecommons.org/licenses/by-nc-nd/4.0/deed.en
+# *
+# *      This license does not allow other authors to modify or to take profit from these works. 
+# *      Then, for modifications or derivative works, please contact ely.repiso@upc.edu to try to agree on 
+# *  collaborations (for journals with other researchers, formal collaborations between UPC and companies, and so on).
+# *
+# *  Please to only use it cite: Repiso, Ely, Anaís Garrell, and Alberto Sanfeliu. "Adaptive social planner to accompany people in real-life dynamic environments." International Journal of Social Robotics 16.6 (2024): 1189-1221.
+# */
+
+#*  Redistribution and use in source and binary forms, without
+#*  modification, are permitted provided that the following conditions
+#*  are met:
+#*
+#*   * Redistributions of source code must retain the above copyright
+#*     notice, this list of conditions and the following disclaimer.
+#*   * Redistributions in binary form must reproduce the above
+#*     copyright notice, this list of conditions and the following
+#*     disclaimer in the documentation and/or other materials provided
+#*     with the distribution.
+#*   * Neither the name of the Willow Garage nor the names of its
+#*     contributors may be used to endorse or promote products derived
+#*     from this software without specific prior written permission.
+#*   * Additionally, remember that the derivatives without collaboration 
+#*     Of the original authors are prohibited
+#*
+#*  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+#*  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+#*  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+#*  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+#*  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+#*  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+#*  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+#*  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+#*  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+#*  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+#*  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+#*  POSSIBILITY OF SUCH DAMAGE.
+#***********************************************************
+# footprint parameters
+#footprint: [[0.35, 0.35], [0.35, -0.35], [-0.35,-0.35 ], [-0.35, 0.35]]
+#footprint: [[0.3, 0.3], [0.3, -0.3], [-0.3,-0.3 ], [-0.3, 0.3]]
+footprint: [[0.25,0.25],[0.25,-0.25],[-0.25,-0.25],[-0.25,0.25]]
+#robot_radius: 0.35
+footprint_padding: 0.01
+footprint_topic: /ana/footprint
+published_footprint_topic: false
+
+robot_base_frame: ana/base_footprint
+robot_radius: 0.4
+track_unknown_space: false
+always_send_full_costmap: false
+transform_tolerance: 1.0
+width: 10.0
+height: 10.0
+resolution: 0.1
+origin_x: 0.0
+origin_y: 0.0
+   
+
+obstacle_layer:
+  enabled: true
+  track_unknown_space: true
+  transform_tolerance: 0.2
+  max_obstacle_height: 1.0
+  footprint_clearing_enabled: false
+  combination_method: 1
+  observation_sources: velodyne front_laser rear_laser #depth_cam
+
+  velodyne:  {
+    sensor_frame: ana/velodyne,
+    data_type: PointCloud2,
+    topic: /ana/sensors/velodyne_points,
+    observation_persistence: 0.0,
+    marking: true,
+    clearing: true,
+    min_obstacle_height: 0.05,
+    max_obstacle_height: 1.0,
+    expected_update_rate: 1,
+    obstacle_range: 30.0,
+    raytrace_range: 40.0
+  }
+
+ front_laser: {
+    sensor_frame: ana/sensors/scan,
+    data_type: LaserScan,
+    topic: /ana/sensors/scan,
+    observation_persistence: 0.0,
+    marking: true,
+    clearing: true,
+    min_obstacle_height: 0.1,
+    max_obstacle_height: 2.0,
+    expected_update_rate: 0
+    }
+
+  rear_laser: {
+    sensor_frame: ana/sensors/scan,
+    data_type: LaserScan,
+    topic: /ana/sensors/scan,
+    observation_persistence: 0.0,
+    marking: true,
+    clearing: true,
+    min_obstacle_height: 0.1,
+    max_obstacle_height: 2.0,
+    expected_update_rate: 0
+    }
+
+  depth_cam:  {
+    sensor_frame: ana/camera_color_optical_frame,
+    data_type: PointCloud2,
+    topic: /ana/sensors/nav_cam/depth_registered/points,
+    observation_persistence: 0.0,
+    marking: true,
+    clearing: false,
+    min_obstacle_height: 0.05,
+    max_obstacle_height: 1.0,
+    expected_update_rate: 1,
+    obstacle_range: 9.0,
+    raytrace_range: 10.0
+  }
+
+inflation_layer:
+  enabled: true
+  inflate_unknown: false
+  inflation_radius: 2.0
+  cost_scaling_factor:  5.0
+  inflation_radius:     1.0

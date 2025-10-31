@@ -1,0 +1,13098 @@
+/*
+ * plan_local_nav_person_companion.cpp
+ *
+ * Created on: Jan 5, 2019  by Ely Repiso to separate the elements of the Scene_sim for the person companion, from the planner elements of the robot. Entirelly created by Ely to have an intelligent person in simulation.
+ *=> es para la simulacion de la persona que acompaña al robot, que se mueva un poco más inteligente que las otras personas,
+ *=> al usar un akp-planner para moverse.
+ */
+ /*
+ *
+ *  Created on: Dec 22, 2013 by Gonzalo Ferrer. 
+ *  Last Modified by Ely Repiso on 2025 (migration to ros-Noetic and in the middle of ros2-humble migration)
+ *      Author: Initial code of the Robot alone AKP navigation is from Gonzalo Ferrer (2013).
+ *      Author: Additions and new codes of ASPSI for people accompaniment code of Ely Repiso (from 2015 and currently).
+ *
+ *      License (for other authors that will not be the original ones): CC BY-NC-ND 4.0 
+ *              (Attribution-NonCommercial-NoDerivatives 4.0 International)
+ *              https://creativecommons.org/licenses/by-nc-nd/4.0/deed.en
+ *
+ *      This license does not allow other authors to modify or to take profit from these works. 
+ *      Then, for modifications or derivative works, please contact ely.repiso@upc.edu to try to agree on 
+ *   collaborations (for journals with other researchers, formal collaborations between UPC and companies, and so on).
+ *
+ *  Please to only use it cite: Repiso, Ely, Anaís Garrell, and Alberto Sanfeliu. "Adaptive social planner to accompany people in real-life dynamic environments." International Journal of Social Robotics 16.6 (2024): 1189-1221.
+ *
+ *  Redistribution and use in source and binary forms, without
+ *  modification, are permitted provided that the following conditions
+ *  are met:
+ *
+ *   * Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above
+ *     copyright notice, this list of conditions and the following
+ *     disclaimer in the documentation and/or other materials provided
+ *     with the distribution.
+ *   * Neither the name of the Willow Garage nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission. 
+ *   * Additionally, remember that the derivatives without collaboration 
+ *     Of the original authors are prohibited
+ *
+ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ *  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ *  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ *  POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "nav/plan_local_nav_person_companion.h"
+#include <algorithm>
+#include <iostream>
+#include <time.h>
+#include <math.h>
+
+// mirar todo lo de con target o goal (para la target person)
+// ojo con las fuerzas repulsivas respecto a la target person.
+// group_go_to_interact_with_other_person_
+// id_target_person o id_goal_person o permutados los dos nombres.
+
+
+Cplan_local_nav_person_companion::Cplan_local_nav_person_companion(double horizon_time, unsigned int max_iter,
+		plan_mode mode, bool robot_or_person) :
+//Cprediction_behavior(horizon_time),
+Cprediction_behavior(horizon_time,false, Cperson_abstract::Linear_regression_filtering),
+//Cprediction_behavior(horizon_time,false, Cperson_abstract::Low_pass_linear_regression_filtering),
+bool_change_ct_and_cr_with_vel_(false),
+bool_new_velocity_system_(true),
+No_change_ids_(false),
+plan_mode_(mode), distance_mode_(Cplan_local_nav_person_companion::Euclidean), global_mode_(Cplan_local_nav_person_companion::Scalarization),
+max_iter_(max_iter), workspace_radii_(0.0), std_goal_workspace_(1.0), max_v_by_system_(0.8), cost_angular_(0.25), // max_v_by_system_(0.8)
+xy_2_goal_tolerance_(0.04), v_goal_tolerance_(0.05), distance_to_stop_(1.0),
+alpha_(1.0), gamma_(1.0), delta_(1.0),
+last_pose_command_(Spose()),
+std_cost_int_forces_(1.0),
+std_cost_robot_(1.0),
+std_cost_obstacles_(1.0),
+std_cost_past_traj_(1.0),
+std_cost_distance_(1.0),
+std_cost_orientation_(1.0),
+gaussian_constant_( 2.0/(2.0*PI) ),
+ppl_collision_mode_(0),
+pr_force_mode_(0),
+debug_companion_(false),
+calc_goal_companion_with_group_path_(true),
+min_next_companion_angle_(120), // va a 90
+min_next_companion_cost_(0),
+before_initial_angle_(120), // va a 90
+before_initial_cost_(0),
+debug_comanion_good_(false),
+id_person_companion_(1), // a definir desde fuera luego...
+change_id_person_companion_(1),
+person_colision_radi_(0.3), // antes era 0.5
+robot_person_proximity_distance_(1.5), // ANTES 1.5; ANTES 2 antes 1.5 (pruevas con valor 3 iban bien, pero choca con obstaculos)
+robot_person_proximity_tolerance_(0.25), //  0.25, para evitar oscilaciones por posición muy exacta.  ANTES 0.75 antes 0.5 (pruevas con valor 3 iban bien, pero choca con obstaculos)
+robot_person_proximity_goals_x_(0.75), // ANTES x=(1.5)/2
+robot_person_proximity_goals_y_(0.75), // ANTES y=(1.5)/2
+case_robot_companion_(true),
+debug_antes_subgoals_entre_AKP_goals_(false),
+actual_debug_(false),
+actual_debug2_(false),
+offset_atractive_(1),  // antes era => offset_atractive_=1.
+time_act_(0),
+//time_ant_(0),
+robot_adition_complete_esphere_companion_distance_(1.0),//( [antes_ valor BUENO a 6.5] [antes_ valor a 3.5] antes 2.25; 2=1+1.0 de seguridad por cada lado)faltaria un metro de distancia más para los 0.5 y 0.5 más de persona y robot para no chocar.
+f_obst_max_x_(0.5),
+f_obst_max_y_(0.5),
+companion_same_person_goal_(false), // if true, infiere para el robot el mismo goal de la persona. el goal es la prediccion de hacia donde va la persona.
+angle_companion_(120), // by default, the angle companion is 90 degrees
+person_goal_percent_(0.5),
+marge_angle_companion_(10),
+//angle_companion_temp_movil_(90),
+debug_nadal_(false),
+debug_nadal2_(false),
+vel_per_max_caso_robot_a_0_o_180_grados_(0),
+debug_real_test_companion_(false),
+debug_real_test_companion2_(false),
+debug_real_test_companion3_(false),
+debug_real_test_companion4_(false),
+marge_in_distance_(0.3),
+overpas_obstacles_behind_person_(true), // true== the robot pass obstacles behind person => is changed on dynamic reconfigure!
+we_have_cost_companion_(false),
+anisotropy_threshold_(0.2), /// anisotropy_threshold_=0.5 SIMULACION, real=> anisotropy_threshold_=0.2
+check_execution_times_(false),
+little_augmented_collision_margin_(0.75), // SIMULACION: sim= 1.5 Final: 1.5/2=0.75=> +0.25 de robot_person_proximity_tolerance_ +0.5 de colchon entre obstaculos que ayude a poder maniobrar y no chocar.     Antes: +1, para tener en cuenta colision con radio de obstaculos por cada lado. +0.25 de colchon más por cada lado de la circunferencia para no rozar.
+person_radi_(0.5), //simulacion: person_radi_amp_=0.5 ; real=0.4
+person_radi2_(0.5), // simulacion: person_radi_amp_=0.4 ; real=0.3
+person_radi_amp_(0.5), // simulacion: person_radi_amp_=0.6 ; real=0.4
+person_radi_per_comp_(0.5),// simulacion: person_radi_amp_=0.5 ; real=0.4
+see_forces_(false),
+obstacle_radi_(0.4), // en simulacion este y el siguiente estan a 0.3 // en real es 0.0
+obstacle_radi2_(0.4), // en simulacion este y el siguiente estan a 0.3 // en real es 0.0
+obstacle_radi_amp_(0.4),  // en simulacion sim=0.4, en real= 0.0 OJO! se cambia en el cfg del nodo!!!
+u_forces_robot_actual_(Sedge_tree_pcomp(1)),
+sim(false), // simulacion=> sim=true. REAL => sim=false
+sim_target_per(false), // =true only simulation. False is for real experiments.  // simulacion=> sim_target_per=true. REAL => sim_target_per=false
+iteration_(1),
+experiment_(24),
+inc_distance_ant_(0),
+acum_time_(0),
+time_ant_(0),
+save_results_in_file_(true),
+meters_goal_to_save_results_in_file_(1.0), // 5 m for simulation. In real is better put 0 m to save every thing and then cut the files when we want.
+mode_velocity_(true),
+reduce_max_vel_dist_(1.0), // antes era 1! ojo!
+debug_file_robot_(false),
+debug_cout_robot_(false),
+only_comp_people_vel_and_robot_poses_(true),
+debug_angles_(false),
+ini_vel_to_increment_angle_(0.2),
+debug_person_companion_general_(false),
+debug_person_companion_increment_angle_(false),
+debug_init_robot_plan2_person_companion_(false),
+debug_robot_plan_anticipative_krrt_companion_person_companion_(false),
+debug_calculate_edge_person_companion_akp_(false),
+debug_correct_angle_person_init_robot2_(false),
+debug_correct_angle_person_replan_min_cost_branch_(false),
+debug_correct_angle_person_replan_last_step_(false),
+debug_correct_angle_person_calculate_edge_(false),
+debug_correct_angle_person_get_best_planned_pose_(false),
+debug_correct_angle_person_vel_robot_companion_(false),
+debug_correct_angle_person_calculate_actual_angle_person_robot_(false),
+debug_correct_angle_person_print_to_matlab_(false),
+bool_case_person_companion_(false), // por defecto false para el robot
+num_steps_orientation_(15),
+alpha_companion_(0.5), // antes era 0.1. (modelo companion side-by-side= 0.2; modelo zanlungo =0.5 )
+beta_companion_(0.5), // antes era 0.6. (modelo companion side-by-side= 0.8; modelo zanlungo =0.5 )
+gamma_companion_(1.0), // antes era 5!!! pero es demasiado reactivo con las personas en el companion!
+delta_companion_(0.5),
+threshold_dintace_select_person_side_to_go_(robot_person_proximity_distance_/2), // al principio esta distancia minimo ha de ser 0.5 metros al lado de la persona.
+debug_select_person_side_to_go_with_more_free_space_(false),
+chose_better_side_to_acompani_person_(false), // es true, para que se posicione bien.
+iter_act_multiple_paths_and_best_path_(),
+planner_iterations_(0),
+debug_file_evaluate_costs_(false),
+iter_d_(0),
+next_companion_angle_save_(120),
+before_act_companion_angle_(120),
+calculate_complete_group_path_var_(person_prediction),
+first_(true),
+Action_(Cplan_local_nav_person_companion::ITER),
+global_iter_to_change_simulation_case_(1),
+first_in_itter_(true),
+first_time_case1_(true),
+first_time_case2_(true),
+is_act_person_companion_(false),
+go_behid_comp_person_(true),
+restart_real_(false),
+max_dist_to_go_behind_(2),  // real=2  ;   sim=1.5
+case_stop_giro_(true),
+incremento_giro_positivo_(0.1),
+incremento_giro_negativo_(-0.1),
+complete_traj_prediction_to_goal_(false),// TODO: out, only companion
+save_results_on_files_for_person_companion_(false),
+save_results_on_files_for_robot_(false),
+save_in_file_(false),
+multiply_person_companion_force_to_persons_(7),
+final_debug_journal_(false),
+threshold_min_vel_person_to_obtain_destination_(0.1),
+firts_iter_obtain_angle_person_companion_(true),
+debug_gazebo_journal_(false),
+debug_gazebo_journal2_(false),
+clocks_per_sec_my_var_(1000000),
+final_goal_reached_in_node_(false),
+change_final_robot_orientation_(false),
+change_goal_of_the_error_(2),
+companion_angle_peopl_in_group_(120),
+real_distance_between_people_of_group_(2.0),
+constante_multiplicar_fuerza_goal_(1),
+bool_distance_margin_(false),
+dis_tol_(0.3),
+dis_tol_side_(0.3),
+threshold_vel_pers_to_stop_(0.1),
+dist_bet_rob_ext_goal_to_stop_(0.4),
+treshold_distance_between_steps_(0.1),
+threshold_max_total_force_(0.2),
+change_k_robot_(true),
+change_k_person_(false),
+change_k_person_comp_(false),
+change_k_obst_(false),
+initial_goal_case_bool_(true),
+initial_not_set_last_people_dest_(false),
+minimun_velocity_case_stop_initial_(0.15),
+initial_limit_distance_goal_to_person_robot_stop_(0.3),
+bool_out_init_pose_robot_(false),
+ideal_max_robot_velocity_(0.9), //max ideal robot velocity
+bool_tes_prop1(false),
+bool_tes_prop2(false),
+metros_al_dynamic_goal_Vform_(3.0)
+{
+
+	if(overpas_obstacles_behind_person_){ // hay que compensar el que el robot va por detras. (sería mejor usar la distancia real para la colision, pero en el caso de ir delante no va bien, pq entonces es distancia fija!)
+		robot_adition_complete_esphere_companion_distance_=2.5;
+	}
+	Action_=Cplan_local_nav_person_companion::ITER;
+    edge_.reserve((size_t)max_iter_);
+    cost_int_forces_.reserve((size_t)max_iter_);
+    cost_robot_.reserve((size_t)max_iter_);
+    cost_obstacles_.reserve((size_t)max_iter_);
+    //cost_local_minima_.reserve((size_t)max_iter_);
+    cost_distance_.reserve((size_t)max_iter_);
+    cost_orientation_.reserve((size_t)max_iter_);
+    cost_past_traj_.reserve((size_t)max_iter_);
+    nodes_in_branch_.reserve((size_t)max_iter_);
+	random_goals_.reserve( (size_t)max_iter_ );
+
+	cost_companion_.reserve( (size_t)max_iter_ ); // companion variables (ely)
+	orientation_person_robot_angles_.reserve( (size_t)max_iter_ );
+	parent_index_vector_.reserve( (size_t)max_iter_ );
+	min_distance_collision_vector_.reserve( (size_t)max_iter_ );
+
+    //Initialization of robot: there is always a robot if planning
+	robot_in_the_scene_ = true;
+	person_companion_in_the_scene_ = true;
+	robot_ = new Crobot(0,Crobot::Differential,scene_force_type_);
+	person_companion_ = new Crobot(1,Crobot::Differential,scene_force_type_);
+	person_companion_->reserve_planning_trajectory(max_iter_);
+
+    //random generator
+    generator_.seed();
+
+    //planner cost paramters
+    cost_parameters_.reserve(7);
+    cost_parameters_.push_back(1.0);// [0] Goal cost
+    cost_parameters_.push_back(1.0);// [1] orientation cost
+    cost_parameters_.push_back(1.0);// [2] Robot cost
+    cost_parameters_.push_back(1.0);// [3]Interacting people cost
+    cost_parameters_.push_back(0.25);// [4] potential time
+    cost_parameters_.push_back(1.0);// [5] obstacles cost
+    cost_parameters_.push_back(1.0);// [6] past trajectory function cost
+    cost_parameters_.push_back(1.0);// [7] local minima scape cost
+
+
+    // all ppl time
+    filtering_time_window_ =  horizon_time;
+
+    if(debug_real_test_companion_){
+    std::cout << "angle_companion_ ="<<angle_companion_<< std::endl;
+    }
+
+    if(robot_or_person==false){
+    	std::cout << " (INI robot_planner)  max_iter_ ="<<max_iter_<<"; horizon_time="<<horizon_time_<< std::endl;
+    }else{
+    	std::cout << " (INI akp_companion_person planner)  max_iter_ ="<<max_iter_<<"; horizon_time="<<horizon_time_<< std::endl;
+    }
+
+
+    std::string data_file;
+	std::string data_file2="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_cost_robot_case2.txt";
+	evaluate_costs_file_=data_file2;
+	std::string data_file3="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_distance_and_angle_robot_case2.txt";
+	evaluate_change_distance_and_angle_companion_file_=data_file3;
+
+	new_matlab_file();
+
+	data_file2="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_cost_robot_case1.txt";
+	evaluate_costs_file_=data_file2;
+	data_file3="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_distance_and_angle_robot_case1.txt";
+	evaluate_change_distance_and_angle_companion_file_=data_file3;
+
+	new_matlab_file();
+	//new_matlab_file_To_evaluate_change_distance_and_angle(); // generar archivo y ya en esa iter ira bien!
+	//new_matlab_file_To_evaluate_costs();
+
+
+	data_file2="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_cost_robot_case0.txt";
+	evaluate_costs_file_=data_file2;
+	data_file3="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_distance_and_angle_robot_case0.txt";
+	evaluate_change_distance_and_angle_companion_file_=data_file3;
+
+	new_matlab_file();
+	//new_matlab_file_To_evaluate_change_distance_and_angle(); // generar archivo y ya en esa iter ira bien!
+	//new_matlab_file_To_evaluate_costs();
+
+
+	SIM_initial_robot_pose2_=Spose(1.0,-0.83,0.0,0.0,0.0,0.0);  // antes -1.25
+	SIM_initial_robot_pose1_=Spose(-8.5,-1.25,0.0,0.0,0.0,0.0); //Spose( double x_ , double y_ , double time_stamp_ , double theta_ , double v_, double w_) -4.5,-1.25
+
+	//SIM_initial_robot_pose3_=Spose(16.5,10.5,0.0,0.0,0.0,0.0);
+	//SIM_initial_robot_pose4_=Spose(16.5,-15.5,0.0,0.0,0.0,0.0);
+	SIM_initial_robot_pose4_=Spose(13.5,7.5,0.0,0.0,0.0,0.0);
+	SIM_initial_robot_pose3_=Spose(13.5,-8.5,0.0,0.0,0.0,0.0);  // ES YA EL PARA RESTART!
+
+	SIM_initial_person_companion_pose1_=Spose(-7.0,0.5,0.0,0.0,0.0,0.0);
+	SIM_initial_person_companion_pose2_=Spose(1.0,0.5,0.0,0.0,0.0,0.0);
+	//8, -2.0, 0, 0.5, 1, 9 (person companion goals.)
+	//9, 27.0, 0, 0.5, 1, 8
+
+	SIM_initial_person_goal_pose1_=Spoint(27.0, 20.5,0.0); // SIM_initial_person_goal_pose1_=Spoint(30.0, 10.5,0.0);
+	//SIM_initial_person_goal_pose1_=Spoint(20.0, 17.5,0.0); // Spoint( double x_ , double y_ , double time_stamp_) :
+	// 0, 17.0, 10.5, 0.5, 1, 1   DESTS pose1 (INITIAL)
+	// 1, 1.0, -10.5, 0.5, 1, 0
+	//Sdestination_person_goal_pose1_=Sdestination(1,1.0,-20.5);
+	//Sdestination_person_goal_pose1_=Sdestination(1,20.0,-17.5);
+
+	SIM_initial_person_goal_pose2_=Spoint(27.0, -17.5, 0.0); // SIM_initial_person_goal_pose2_=Spoint(30.0, -10.5, 0.0);
+	//SIM_initial_person_goal_pose2_=Spoint(20.0, -17.5, 0.0);
+	// 0, 17.0, -10.5, 0.5, 1, 1   DESTS pose2 (INITIAL)
+	// 1, 1.0, +10.5, 0.5, 1, 0
+	//Sdestination_person_goal_pose2_=Sdestination(1,1.0,20.5);
+	//Sdestination_person_goal_pose2_=Sdestination(1,20.0, 17.5);
+
+	SIM_initial_person_goal_pose3_=Spoint(27,0.0,0.0); // SIM_initial_person_goal_pose3_=Spoint(30,0.0,0.0);
+	//Sdestination_person_goal_pose3_=Sdestination(1,1.0,0.0);
+
+	//SIM_initial_person_goal_pose4_=Spoint(20,0.0,0.0);
+	//SIM_initial_person_goal_pose5_=Spoint(30,0.0,0.0);
+
+	//8, -2.0, 0, 0.5, 1, 9 (person companion goals.== persona goal en la misma direccion que ellos en frente)
+	//9, 27.0, 0, 0.5, 1, 8
+
+}
+
+Cplan_local_nav_person_companion::~Cplan_local_nav_person_companion()
+{
+	//all memory allocations are freed in Cprediction_behavior/bhmip
+}
+
+
+/* akp on person_companion*/
+bool Cplan_local_nav_person_companion::person_companion_plan_companion(Spose& pose_command, Cperson_abstract::companion_reactive& reactive,double dt, std::vector<Sdestination>* person_best_dest)
+{
+
+	//std::cout << "7777 ?????? IN!!! person_companion_plan_companion (1) ; person_list_.size()="<< person_list_.size()<<"; id_person_companion_="<<id_person_companion_ << std::endl;
+	change_set_id_person_companion();
+
+	Cperson_abstract* person_obj_companion_person;
+	find_person(id_person_companion_ , &person_obj_companion_person); //bool finded_companion_person=find_person(id_person_companion_ , &person_obj_companion_person);
+	pointer_to_person_companion_=person_obj_companion_person; // TODO: solucion provisional para que no pete simulador PERSON COMP
+
+	//std::cout << "MUY IMPORTANTE!!! 77777 finded_companion_person="<<finded_companion_person<<"; id_person_companion_="<<id_person_companion_<< std::endl;
+
+
+	// get the trajectory of the other person companion of the group, for the companion force between them.
+	initial_person_companion_point_=robot_->get_current_pointV();
+
+
+	clock_t robot_plan_companion2_start, robot_plan_companion2_end; // clocks, pueden ser utiles... pero cambiando nombres, al menos en los scouts.
+	robot_plan_companion2_start = clock();
+
+	//if(iit->get_id()==id_person_companion_){
+		actual_person_Companion_SpointV_=person_companion_->get_current_pointV();
+		actual_person_Companion_destination_=person_companion_->get_best_dest();
+		max_desired_person_Companion_velocity_=person_companion_->get_desired_velocity();
+		actual_person_Companion_pointer_=person_companion_;
+	//}
+
+
+	//	std::cout << "person_companion_plan_companion (2) "<< std::endl;
+	 //std::cout << "(in akp person_companion) robot_->get_current_pointV().x="<<robot_->get_current_pointV().x<<"; robot_->get_current_pointV().y="<<robot_->get_current_pointV().y << std::endl;
+
+	is_act_person_companion_=true;
+
+	//std::cout << " (1) !!! person_companion_plan_companion; person_list_.size()="<< person_list_.size()  << std::endl;
+	//person_companion_->get_best_dest().print();
+
+	if(first_in_itter_){
+		std::string data_file2="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_cost_person_companion_case1.txt";
+		evaluate_costs_file_=data_file2;
+		new_matlab_file_To_evaluate_costs();
+		 data_file2="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_cost_person_companion_case2.txt";
+		evaluate_costs_file_=data_file2;
+		new_matlab_file_To_evaluate_costs();
+		 data_file2="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs/results_evaluate_cost_person_companion_case0.txt";
+		evaluate_costs_file_=data_file2;
+		new_matlab_file_To_evaluate_costs();
+		first_in_itter_=false;
+	}
+
+	if(actual_case_==Cplan_local_nav_person_companion::case0){
+		std::string data_file="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/1_data_results/results_person_companion_and_approaching_case1.txt";
+		results_file_=data_file;
+		std::string data_file2="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_cost/results_evaluate_cost_person_companion_case0.txt";
+		evaluate_costs_file_=data_file2;
+		//std::string data_file3="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_cost/results_evaluate_distance_and_angle_robot_case0.txt";
+		//evaluate_costs_file_=data_file3;
+
+	}else if(actual_case_==Cplan_local_nav_person_companion::case1){
+		std::string data_file="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/1_data_results/results_person_companion_case1.txt";
+		results_file_=data_file;
+		std::string data_file2="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_cost/results_evaluate_cost_person_companion_case1.txt";
+		evaluate_costs_file_=data_file2;
+		//std::string data_file3="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_cost/results_evaluate_distance_and_angle_robot_case1.txt";
+		//evaluate_costs_file_=data_file3;
+
+	}else if(actual_case_==Cplan_local_nav_person_companion::case2){
+		std::string data_file="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/1_data_results/results_person_companion_case2.txt";
+		results_file_=data_file;
+		std::string data_file2="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_cost/results_evaluate_cost_person_companion_case2.txt";
+		evaluate_costs_file_=data_file2;
+		//std::string data_file3="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_cost/results_evaluate_distance_and_angle_robot_case1.txt";
+		//evaluate_costs_file_=data_file3;
+	}
+
+
+	//std::cout << " (2) !!! person_companion_plan_companion ; person_list_.size()="<< person_list_.size()  << std::endl;
+	//person_companion_->get_best_dest().print();
+
+	//TODO. Set companion person velocity to 0.8!!!
+	person_companion_->set_desired_velocty(robot_->get_desired_velocity());
+	//std::cout << " robot_->get_desired_velocity()="<<robot_->get_desired_velocity()<< std::endl;
+	ini_point_person_companion_akp_=person_companion_->get_current_pointV();
+	ini_spose_person_companion_akp_=person_companion_->get_current_pose();
+	//std::cout << " (3) !!! person_companion_plan_companion ; person_list_.size()="<< person_list_.size()  << std::endl;
+	//person_companion_->get_best_dest().print();
+	bool_case_person_companion_=true;
+	//obstacle_radi_=0;
+	//person_radi_=0;
+
+	//std::cout << " horizon_time_!!!!!!!!!!! (INI akp_companion_person planner)  max_iter_ ="<<max_iter_<<"; horizon_time_="<<horizon_time_<< std::endl;
+
+		if(debug_person_companion_general_){
+			std::cout << std::endl<< std::endl<< std::endl;
+			std::cout << " (2!!!) (person companion) !!!INI person_companion_plan_companion!!!" << std::endl;
+			std::cout << " (INI akp_companion_person planner)  max_iter_ ="<<max_iter_<<"; horizon_time_="<<horizon_time_<< std::endl;
+
+			//std::cout << std::endl<< std::endl<< std::endl;
+			std::cout << " (2!!!) (person companion) !!!INI person_companion_plan_companion!!!  ;  obstacle_radi_="<<obstacle_radi_<<"; person_radi_="<<person_radi_<<"; robot_->get_platform_radii()="<<robot_->get_platform_radii()<<std::endl<< std::endl;
+			std::cout << " (2!!!) (person companion) !!!INI person_companion_plan_companion!!!  ;  id_person_companion_="<<id_person_companion_<<std::endl<< std::endl;
+		}
+
+
+	robot_companion_case_=reactive; //el reactive tiene que ser el plan companion, para que vaya bien.
+	// OJO!! dt NO es incremento de t, sino el tiempo actual!
+
+	before_initial_robot_spoint_.x=-10000;
+	before_initial_robot_spoint_.y=-10000;
+	//std::cout << " (4) !!! person_companion_plan_companion" << std::endl;
+	//person_companion_->get_best_dest().print();
+	//std::cout << "dt="<<dt<< std::endl;
+	//std::cout << "pose_command.time_stamp="<<pose_command.time_stamp<< std::endl;
+	//std::cout << "time_act_="<<time_act_<< std::endl;
+	//time_act_=dt;
+	//inct_=time_ant_-time_act_;
+	//std::cout << "inct_="<<inct_<< std::endl;
+	//dt=0; //ha de ser 0, para que vayan bien las funciones siguientes.
+	//ini_increment_angle(); // for robot companion
+
+	// Needed, but with the coal of the person companion. Similar to this, but can be a little different.
+	/*if(companion_same_person_goal_){
+		Cperson_abstract* person_obj;
+		bool finded_person=find_person(id_person_companion_ , &person_obj);
+
+		Spose robot=robot_->get_current_pose();
+		SpointV_cov person = person_obj->get_current_pointV();
+		Sdestination external_goal_same_person=person_obj->get_best_dest();
+
+		double theta=theta = atan2(person_obj->get_best_dest().y-person.y,person_obj->get_best_dest().x-person.x);
+		double angle=atan2(robot.y-person.y , robot.x-person.x);
+
+		if( diffangle(theta, angle) < 0 ){
+			external_goal_same_person.x=external_goal_same_person.x+robot_person_proximity_goals_x_*cos(theta+angle);
+			external_goal_same_person.y= external_goal_same_person.y+robot_person_proximity_goals_y_*sin(theta+angle);
+		}else{
+			external_goal_same_person.x=external_goal_same_person.x+robot_person_proximity_goals_x_*cos(theta-angle);
+			external_goal_same_person.y= external_goal_same_person.y+robot_person_proximity_goals_y_*sin(theta-angle);
+		}
+		//set_robot_external_goal(external_goal_same_person);
+	}*/
+
+
+	clock_t scene_prediction_start, scene_prediction_end;
+	scene_prediction_start=clock();
+	if(debug_person_companion_general_){
+		std::cout << " (1) antes scene_prediction()"<< std::endl;
+	}
+	bool person_or_robot=true; //case, person_companion
+	//std::cout << " (5) !!! person_companion_plan_companion" << std::endl;
+	person_companion_->get_best_dest().print();
+	//std::cout << " (5.1) !!! person_or_robot="<<person_or_robot<<"; person_list_.size()="<< person_list_.size() << std::endl;
+
+	this->Cprediction_behavior::scene_prediction(person_or_robot,person_best_dest); // scene prediction, needed, pero sin la person cmpanion y hará falta el robot en colisiones.
+
+
+	/*for( auto iit : person_list_)
+	{
+		std::cout << " (5.2) !!! (planning traj size people) iit->size"<<iit->get_planning_trajectory()->size() <<", id=" <<iit->get_id()<< std::endl;
+	}*/
+
+	//std::cout << " (5.2) !!! before robot prediction; horizon_time_="<<horizon_time_<<", person_companion_->get_best_dest().x="<<person_companion_->get_best_dest().x<<", person_companion_->get_best_dest().y="<<person_companion_->get_best_dest().y<<
+	//		" person_companion_->get_id()"<< person_companion_->get_id()<< std::endl;
+	robot_trajectory_prediction_for_group_Zanlungo( horizon_time_, person_companion_->get_best_dest(), id_person_companion_);
+	//std::cout << " (5.2) !!! after robot prediction, robo_-> pred_trajsize_with_target_pers= "<<robot_->get_prediction_trajectory_with_target_person()->size()<<"or pred trak_size="<< robot_->get_prediction_trajectory()->size()<< std::endl;
+
+	//std::cout << " (5.2) !!! person_companion_plan_companion" << std::endl;
+
+
+	//std::cout << " (6) !!! person_companion_plan_companion" << std::endl;
+//	person_companion_->get_best_dest().print();
+	// only for prediction of persons with id!=id_person_companion.
+	scene_prediction_end=clock();
+	if(debug_real_test_companion_){
+		std::cout << "time_prediction=scene_prediction_start-scene_prediction_end="<<(scene_prediction_end-scene_prediction_start)/1000<< std::endl;
+	}
+	//kinodynamic rrt
+	if(debug_person_companion_general_){
+		std::cout << " (1) 3 "<< std::endl;
+	}
+
+	bool result; // para no entrar a variables bacias.
+	//std::cout << " (5.3) !!! person_companion_plan_companion" << std::endl;
+
+	robot_initial_pose_=robot_->get_current_pose(); // alguna de estas irá bien para coger la pose act del robot.
+	//std::cout << " (5.4) !!! person_companion_plan_companion" << std::endl;
+	//std::cout << " IMPORTANTE!!! 7777 333 => robot_initial_pose_.x="<<robot_initial_pose_.x<<"; robot_initial_pose_.y="<<robot_initial_pose_.y<<"; robot_initial_pose_.time_stamp="<<robot_initial_pose_.time_stamp<< std::endl;
+
+	if(!robot_->get_time_stamp_plan().empty()){
+		std::cout <<"time_stamp_plan="<<robot_->get_time_stamp_plan().at(0)<< std::endl;
+	}
+
+	//SpointV_cov centro_robot_spoint=robot_->get_current_pointV();
+	initial_robot_spoint_=robot_->get_current_pointV();
+
+
+
+	//std::cout << " (5.5) !!! person_companion_plan_companion" << std::endl;
+
+	/* Inicio, get person_robot_distance.*/
+	double robot_person_distance=calc_robot_person_companion_distance_companion_person_akp(); // puede que haga falta para la circunferencia.
+	robot_person_distance_=robot_person_distance;
+	/* fin, get person_robot_distance.*/
+
+	Cperson_abstract* person_obj;
+	find_person(id_person_companion_ , &person_obj); // no se si hará falta...
+
+	if(debug_person_companion_general_){
+		std::cout << " (2) 4"<< std::endl;
+	}
+	/*if(only_comp_people_vel_and_robot_poses_){
+		std::cout << " PERSON SpointV_cov: "<< std::endl;
+		person_obj->print();
+		SpointV_cov actual_person1=person_obj->get_current_pointV();
+		std::ofstream fileMatlab2;
+		fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+		fileMatlab2 << " PERSON SpointV_cov: "<< " \n";
+		fileMatlab2 << "person_spoint_.time_stamp="<<actual_person1.time_stamp<<" \n";
+		fileMatlab2 << "person_spoint_.x="<<actual_person1.x<<" \n";
+		fileMatlab2 << "person_spoint_.y="<<actual_person1.y<<" \n";
+		fileMatlab2 << "person_spoint_.vx="<<actual_person1.vx<<" \n";
+		fileMatlab2 << "person_spoint_.vy="<<actual_person1.vy<<" \n";
+		fileMatlab2.close();
+
+	}*/
+    //esta hará falta.
+	robot_person_companion_distance_=(robot_person_proximity_distance_+2*robot_->get_platform_radii()+little_augmented_collision_margin_)/2;
+
+	if(debug_person_companion_general_){
+		std::cout << " (3) 5"<< std::endl;
+	}
+	if(debug_antes_subgoals_entre_AKP_goals_){
+		std::cout << "person_obj->print() out, robot_plan_companion:"<< std::endl;
+		std::cout << "(iteration=actual) robot_person_companion_distance_="<<robot_person_companion_distance_<< std::endl;
+		std::cout << "(ha de ser menor de 3.5)(out)robot_person_distance_="<<robot_person_distance_<< std::endl;
+	}
+	if(debug_person_companion_general_){
+		std::cout << " (3.1) "<< std::endl;
+	}
+	clock_t init_robot_plan2_start, init_robot_plan2_end; //clocks!
+	init_robot_plan2_start=clock();
+//std::cout << " (7) !!! person_companion_plan_companion" << std::endl;
+//person_companion_->get_best_dest().print();
+	init_robot_plan2_person_companion(robot_person_distance); // MIRAR!!! cambian cosas al usarla con la persona.
+//std::cout << " (8) !!! person_companion_plan_companion" << std::endl;
+//person_companion_->get_best_dest().print();
+	init_robot_plan2_end=clock();
+
+	if(debug_person_companion_general_){
+		std::cout << " (4) 7"<< std::endl;
+	}
+	//calc_area_workspace_arround_person_companion(); // Creo que no hace falta. Comprobar!
+
+	if(debug_real_test_companion_){
+		std::cout << "time_init_robot_plan2=init_robot_plan2_start-init_robot_plan2_end="<<(init_robot_plan2_end-init_robot_plan2_start)/1000<< std::endl;
+	}
+
+	if(debug_person_companion_general_){
+		std::cout << " DESIRED_VELOCITY=person_companion_->get_desired_velocity()"<<person_companion_->get_desired_velocity()<< std::endl;
+		std::cout << " person_companion_->get_best_dest().print(): "<< std::endl;
+		person_companion_->get_best_dest().print();
+	}
+	//std::cout << " (9) !!! person_companion_plan_companion" << std::endl;
+	person_companion_->get_best_dest().print();
+	ini_increment_angle_person_companion_akp(); // (hace falta para el coste incremental solo) for robot companion
+	//std::cout << " (10) !!! person_companion_plan_companion" << std::endl;
+	person_companion_->get_best_dest().print();
+	if(debug_person_companion_general_){
+		std::cout << " (5) "<< std::endl;
+	}
+	//if( ((robot_person_proximity_distance_-robot_person_proximity_tolerance_)<robot_person_distance) && (robot_person_distance<(robot_person_proximity_distance_+robot_person_proximity_tolerance_+offset_atractive_))){  //TODO: falta tener en cuenta al principio la posición inicial de la persona.
+	//if(robot_person_distance<(robot_person_proximity_distance_+robot_person_proximity_tolerance_+offset_atractive_)){  //TODO: falta tener en cuenta al principio la posición inicial de la persona.
+
+	// SIEMPRE es el del akp_planning_companion.
+
+	reactive=Cperson_abstract::Akp_planning;
+	robot_companion_case_=reactive;
+
+	if(debug_person_companion_general_){
+		std::cout << " (6) antes  robot_plan_anticipative_krrt_companion_person_companion(reactive) "<< std::endl;
+	}
+
+
+
+	//std::cout << " (11) !!! person_companion_plan_companion" << std::endl;
+//	person_companion_->get_best_dest().print();
+	if ( robot_plan_anticipative_krrt_companion_person_companion(reactive) )  //mirar la robot_plan_anticipative_krrt_companion a ver si hay k cambiarla por lo del robot.
+	{
+
+//	std::cout << " (12) !!! person_companion_plan_companion" << std::endl;
+//	person_companion_->get_best_dest().print();
+		if(debug_person_companion_general_){
+			std::cout << " in kkrrt 2"<< std::endl;
+		}
+
+		//TODO. return! companion person velocity to 0.2 o lo que se ponga en el Cscene_sim!!! + replan_last_step a 0.2 velocity
+
+		clock_t end_part_start, end_part_end;
+		end_part_start=clock();
+
+		last_pose_command_ = get_best_planned_pose_person_companion_akp( dt );// TENDRA QUE CAMBIAR, pq es solo goal de la persona.
+
+		double other_people_cost_due_to_robot;
+		double companion_person_cost_due_to_robot;
+
+		// para visualización, ok e incluirlo en el simulador, para que se vea el planing de la persona.
+		//std::cout << " (13) !!! person_companion_plan_companion" << std::endl;
+//		person_companion_->get_best_dest().print();
+		this->Cprediction_behavior::calculate_current_forces_companion2_for_person_companion_akp( pr_force_mode_ ,id_person_companion_,false, reactive, min_next_companion_angle_,u_forces_robot_actual_.f_goal,u_forces_robot_actual_.f_people,u_forces_robot_actual_.f_obs,u_forces_robot_actual_.f_persongoal,other_people_cost_due_to_robot,companion_person_cost_due_to_robot);//for plotting purposes
+
+	//	std::cout << " (13) !!! size="<<saved_tree_forces_to_see_companion_Force_Zanlungo_.size()<<", actual_best_path_index_="<<actual_best_path_index_ << std::endl;
+
+		person_companion_->set_forces_person_companion( saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_goal,  saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_people, Sforce(), saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_obs, saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_persongoal);
+		//std::cout << " (14) !!! person_companion_plan_companion; size()="<<saved_tree_forces_to_see_companion_Force_Zanlungo_.size()<<", actual_best_path_index_=" <<actual_best_path_index_<< std::endl;
+		//std::cout << " x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_goal.fx<<"; y="<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_goal.fy<< std::endl;
+
+//		person_companion_->get_best_dest().print();
+
+		other_people_due_to_robot_cost_=other_people_cost_due_to_robot; //estas en teoria no harian falta.
+		companion_person_due_to_robot_cost_=companion_person_cost_due_to_robot;
+
+		if(debug_person_companion_general_){
+			std::cout << " last_pose_command_.print(): "<< std::endl;
+			last_pose_command_.print();
+
+			std::cout << " last_pose_command_.v"<<last_pose_command_.v<< std::endl;
+			std::cout << " last_pose_command_.w"<<last_pose_command_.w<< std::endl;
+		}
+
+		if(debug_antes_subgoals_entre_AKP_goals_){ // cambiar por ver el foal de la person companion.
+			std::cout << " Planing FINAL GOAL (NO collision, reactive_repulsive) ( last_pose_command_ and robot_):"<< std::endl;
+			last_pose_command_.print();
+			//robot_->print();
+		}
+			result = true;
+		/*if(!final_collision_check_){ // necesarias.
+			 std::cout << " if(!final_collision_check_)=> final_collision_check_="<<final_collision_check_<< std::endl;
+			result = true;
+		}else{
+			//if(debug_cout_robot_){
+				 std::cout << " else if(!final_collision_check_)=> final_collision_check_="<<final_collision_check_<< std::endl;
+			//}
+
+			last_pose_command_ = Spose();
+			result = false;
+		}*/
+		end_part_end=clock();
+		if(check_execution_times_){
+			 std::cout << " time_end_part=end_part_start-end_part_end="<<((end_part_end-end_part_start)/clocks_per_sec_my_var_)*1000<< std::endl;
+		}
+	}
+	else
+	{
+		//std::cout << " else... robot_plan_anticipative_krrt_companion_person_companion="<< std::endl;
+		//last_pose_command_ = Spose();
+		last_pose_command_.v = 0;
+		last_pose_command_.w = 0;
+		result = false;
+	}
+	//std::cout << " last_pose_command_.print(): "<< std::endl;
+	//last_pose_command_.print();
+
+
+	if(debug_person_companion_general_){
+		std::cout << "u last_pose_command_.v"<<last_pose_command_.v<< std::endl;
+		std::cout << "u last_pose_command_.w"<<last_pose_command_.w<< std::endl;
+	}
+
+	pose_command = last_pose_command_; // nueva pose de trayectoria calculada.
+
+
+	//pose_command.w=0.0;
+
+	final_pose_robot_=pose_command;
+
+	if(debug_person_companion_general_){
+		std::cout << "(FINAL AKP POSE) pose_command.x="<<pose_command.x<< std::endl;
+		std::cout << "(FINAL AKP POSE) pose_command.y="<<pose_command.y<< std::endl;
+		std::cout << "(FINAL AKP POSE) pose_command.v="<<pose_command.v<< std::endl;
+		std::cout << "(FINAL AKP POSE) pose_command.w="<<pose_command.w<< std::endl;
+	}
+
+	// TODO: para el companion desde esta pose, se han de calcular las colisiones, en t+1 y calcular el angulo para el companion ahí.
+	if(debug_antes_subgoals_entre_AKP_goals_){
+		std::cout << "FIN robot_plan_companion!!! "<< std::endl<< std::endl<< std::endl;
+	}
+
+
+	/*if(debug_goal_go_to_person_in_person_companion_){
+		std::cout << "FIN [robot_plan_companion person companion] pose_command.print();!!! "<< std::endl;
+		pose_command.print();
+	}*/
+
+	// *** Return robot max vel to really máx velocity ***/
+	return_max_velocity_systemRobot_to_max_value();// esto quizas va fuera, porque tendría que ser con la velocidad de la persona to_do!
+	robot_plan_companion2_end = clock();
+
+	if(check_execution_times_){
+		std::cout << "(FIN) time_tot=robot_plan_companion2_start-robot_plan_companion2_end="<<((robot_plan_companion2_end-robot_plan_companion2_start)/clocks_per_sec_my_var_)*1000<< std::endl;
+	}
+
+
+	before_initial_robot_spoint_=initial_robot_spoint_;  // mirar si necesario...
+	time_ant_=actual_time_;
+
+
+/*	std::cout << " vector_of_companion_collisions_.size()="<<vector_of_companion_collisions_.size()<< std::endl;
+	std::cout << " min_step_collision_distance_.size()="<<min_step_collision_distance_.size()<< std::endl;
+	std::cout << " angles_colisions_.size()="<<angles_colisions_.size()<< std::endl;
+	std::cout << " min_angles_colisions_.size()="<<min_angles_colisions_.size()<< std::endl;
+	std::cout << " random_goals2_.size()="<<random_goals2_.size()<< std::endl;
+	std::cout << " BEST_path_parent_index_vector_.size()="<<BEST_path_parent_index_vector_.size()<< std::endl;
+	std::cout << " person_companion_nearby_person_list_.size()="<<person_companion_nearby_person_list_.size()<< std::endl;
+
+	std::cout << " cost_companion_.size()="<<cost_companion_.size()<< std::endl;
+	std::cout << " parent_index_vector_.size()="<<parent_index_vector_.size()<< std::endl;
+	std::cout << " min_distance_collision_vector_.size()="<<min_distance_collision_vector_.size()<< std::endl;
+	std::cout << " orientation_person_robot_angles_.size()="<<orientation_person_robot_angles_.size()<< std::endl;
+*/
+	Crobot* robot_act=person_companion_;
+
+	if((Action_==Cplan_local_nav_person_companion::ITER)&&(sim)&&(save_results_on_files_for_person_companion_)){ // si estamos en caso iter, no reiniciar.
+		evaluate_costs_printToMatlab(robot_act);
+	}
+
+	//std::cout << " FIN PLAN PERSON COMPANION"<< std::endl;
+
+
+	//////////// INI  MOMENTARILY output mesages of Zanlungo save in file here to see them for debug!!!
+	//debug_output_screen_mesages_=true;
+	/*if(debug_output_screen_mesages_){
+		std::cout << "(save in file PERSON_COMPANION) 2"<< std::endl;
+	}
+		debug_output_screen_mesages_=true;
+	if((!orientation_person_robot_angles_.empty())&&(debug_output_screen_mesages_)){
+
+			std::cout << "(save in file) get_orientation_person_robot_angles_pred().at(0)= "<<orientation_person_robot_angles_.at(0)<< std::endl;
+			//std::cout << "(save in file) get_orientation_person_robot_angles_pred().at(1)= "<<orientation_person_robot_angles_.at(1)<< std::endl;
+
+		}
+		if(debug_output_screen_mesages_){ // en esta companion_person_ se corresponde con el robot!, por eso no sale bien ahora mismo!
+			std::cout << "(save in file PERSON_COMPANION) dt= "<<dt_<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) real_computation_time_dt= "<<final_compt_time_<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) actual_best_path_index_= "<<actual_best_path_index_<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) companion_person_x= "<<initial_person_companion_point_.x<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) companion_person_y= "<<initial_person_companion_point_.y<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) companion_person_vx= "<<initial_person_companion_point_.vx<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) companion_person_vy= "<<initial_person_companion_point_.vy<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) companion_person_theta= "<<atan(initial_person_companion_point_.vy/initial_person_companion_point_.vx)*180/3.14<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) desired_vel (first comp pers== robot now)= "<<robot_->get_desired_velocity()<< std::endl;
+
+			if(we_have_pointer_to_second_person_){
+				SpointV_cov sec_pers_point=second_group_companion_person_obj_->get_current_pointV();
+				std::cout << "(save in file PERSON_COMPANION) 2companion_person_x= "<<sec_pers_point.x<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) 2companion_person_y= "<<sec_pers_point.y<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) 2companion_person_vx= "<<sec_pers_point.vx<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) 2companion_person_vy= "<<sec_pers_point.vy<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) 2companion_person_theta= "<<atan(sec_pers_point.vy/sec_pers_point.vx)*180/3.14<< std::endl;
+			}
+
+
+
+		}
+	if(debug_output_screen_mesages_){
+		std::cout << "(save in file PERSON_COMPANION; ahora robot es person_companion_)" << std::endl;
+		std::cout << "(save in file PERSON_COMPANION) initial_robot_x= "<<person_companion_->get_current_pose().x<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) initial_robot_y= "<<person_companion_->get_current_pose().y<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) initial_robot_spoint_.vx= "<<person_companion_->get_current_pointV().vx<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) initial_robot_spoint_.vy= "<<person_companion_->get_current_pointV().vy<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) initial_robot_theta= "<<person_companion_->get_current_pose().theta*180/3.14<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) robot_initial_pose_.v= "<<person_companion_->get_current_pose().v<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) robot_initial_pose_.w= "<<person_companion_->get_current_pose().w<< std::endl;
+	}
+
+	if(debug_output_screen_mesages_){
+			std::cout << "(save in file PERSON_COMPANION) robot_final_goal_x= "<<person_companion_->get_best_dest().x<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) robot_final_goal_y= "<<person_companion_->get_best_dest().y<< std::endl;
+		}
+	if(Zanlungo_model_){
+		if((!preferred_paths_Zanlungo_.empty())&&(preferred_paths_Zanlungo_.size()>actual_best_path_index_)){
+
+					if(debug_output_screen_mesages_){
+						if(!Zanlungo_model3_){
+
+						}else{
+							//std::cout << "(save in file) preferred_x= "<<preferred_paths_Zanlungo_.at(actual_best_path_index_).x<< std::endl;
+							//std::cout << "(save in file) preferred_y= "<<preferred_paths_Zanlungo_.at(actual_best_path_index_).y<< std::endl;
+							//std::cout << "(save in file) preferred_m= "<<preferred_paths_Zanlungo_.at(actual_best_path_index_).m<< std::endl;
+							//std::cout << "(save in file) preferred_th= "<<preferred_paths_Zanlungo_.at(actual_best_path_index_).th*180/3.14<< std::endl;
+						}
+
+					}
+
+				}else{
+					if(Zanlungo_model_){
+						//std::cout << "(save in file) preferred_x= "<<preferred_paths_Zanlungo_.back().x<< std::endl;
+						//std::cout << "(save in file) preferred_y= "<<preferred_paths_Zanlungo_.back().y<< std::endl;
+						//std::cout << "(save in file) preferred_m= "<<preferred_paths_Zanlungo_.back().m<< std::endl;
+						//std::cout << "(save in file) preferred_th= "<<preferred_paths_Zanlungo_.back().th*180/3.14<< std::endl;
+					}
+
+				}
+
+	}
+
+	debug_output_screen_mesages_=true;
+
+	if(Zanlungo_model_){
+		std::cout << "(save in file PERSON_COMPANION) IN  Zanlungo_model_:"<< std::endl;
+		if((!saved_tree_forces_to_see_companion_Force_Zanlungo_.empty())&&(saved_tree_forces_to_see_companion_Force_Zanlungo_.size()>actual_best_path_index_)){
+
+			std::cout << "(save in file PERSON_COMPANION) IN  if((!saved_tree_forces_to_see_companion_Force_Zanlungo_.empty())&&(saved_tree_forces_to_see_companion_Force_Zanlungo_.size()>actual_best_path_index_)){"<< std::endl;
+
+				if(debug_output_screen_mesages_){
+
+					if(!Zanlungo_model3_){
+						std::cout << "(save in file PERSON_COMPANION) IN  !Zanlungo_model3_:"<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_companion_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_persongoal.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_companion_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_persongoal.fy<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_goal_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_goal.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_goal_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_goal.fy<< std::endl;
+
+
+						std::cout << "(save in file PERSON_COMPANION) f_people_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_people.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_people_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_people.fy<< std::endl;
+
+						std::cout << "(save in file PERSON_COMPANION) f_obs_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_obs.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_obs_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f_obs.fy<< std::endl;
+
+						std::cout << "(save in file PERSON_COMPANION) f_total_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_total_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f.fy<< std::endl;
+						std::cout << "alpha_companion_="<<alpha_companion_<<"; beta_companion_="<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<< std::endl;
+						std::cout <<"; 1 actual_best_path_index_="<<actual_best_path_index_<< "alpha_companion_="<<alpha_companion_<<"; beta_companion_="<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<< std::endl;
+
+					}else{
+						std::cout << "(save in file PERSON_COMPANION) IN  Zanlungo_model3_:"<< std::endl;
+						if(Zanlungo_model_){
+
+						}
+						std::cout << "(save in file PERSON_COMPANION) f_companion_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_persongoal.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_companion_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_persongoal.fy<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_goal_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_goal.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_goal_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_goal.fy<< std::endl;
+
+						std::cout << "(save in file PERSON_COMPANION) f_people_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_people.fx<< std::endl;
+					    std::cout << "(save in file PERSON_COMPANION) f_people_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_people.fy<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_obs_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_obs.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_obs_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_obs.fy<< std::endl;
+
+						std::cout << "(save in file PERSON_COMPANION) f_total_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f.fx<< std::endl;
+						std::cout << "(save in file PERSON_COMPANION) f_total_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f.fy<< std::endl;
+						std::cout << "alpha_companion_="<<alpha_companion_<<"; beta_companion_="<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<< std::endl;
+						std::cout <<"; 2 actual_best_path_index_="<<actual_best_path_index_<< "alpha_companion_="<<alpha_companion_<<"; beta_companion_="<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<< std::endl;
+
+					}
+
+
+				}
+
+				//ant_final_force_total_=saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f;
+			}else{
+				std::cout << "(save in file PERSON_COMPANION) f_companion_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_persongoal.fx<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) f_companion_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_persongoal.fy<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) f_goal_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_goal.fx<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) f_goal_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_goal.fy<< std::endl;
+
+				std::cout << "(save in file PERSON_COMPANION) f_people_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_people.fx<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) f_people_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_people.fy<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) f_obs_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_obs.fx<< std::endl;
+																				//std::cout << "(save in file) f_obs_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f_obs.fy<< std::endl;
+
+				std::cout << "(save in file PERSON_COMPANION) f_total_x= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f.fx<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) f_total_y= "<<saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f.fy<< std::endl;
+				std::cout <<";3 actual_best_path_index_="<<actual_best_path_index_<< "alpha_companion_="<<alpha_companion_<<"; beta_companion_="<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<< std::endl;
+
+			}
+	}else{ //only side-by-side
+		std::cout << "(save in file PERSON_COMPANION) IN  only side-by-side:"<< std::endl;
+
+		std::cout << "(save in file PERSON_COMPANION) f_companion_x= "<<u_forces_robot_actual_.f_persongoal.fx<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) f_companion_y= "<<u_forces_robot_actual_.f_persongoal.fy<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) f_goal_x= "<<u_forces_robot_actual_.f_goal.fx<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) f_goal_y= "<<u_forces_robot_actual_.f_goal.fy<< std::endl;
+
+		std::cout << "(save in file PERSON_COMPANION) f_people_x= "<<u_forces_robot_actual_.f_people.fx<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) f_people_y= "<<u_forces_robot_actual_.f_people.fy<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) f_obs_x= "<<u_forces_robot_actual_.f_obs.fx<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) f_obs_y= "<<u_forces_robot_actual_.f_obs.fy<< std::endl;
+
+		std::cout << "(save in file PERSON_COMPANION) f_total_x= "<<u_forces_robot_actual_.f.fx<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) f_total_y= "<<u_forces_robot_actual_.f.fy<< std::endl;
+		std::cout << "alpha_companion_="<<alpha_companion_<<"; beta_companion_="<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<< std::endl;
+
+	}
+
+	//debug_output_screen_mesages_=false;
+
+
+
+
+	if((debug_output_screen_mesages_)&&(!person_companion_->get_actual_random_goal_x().empty())&&(person_companion_->get_actual_random_goal_x().size()>actual_best_path_index_)){
+				std::cout << "(save in file PERSON_COMPANION) actual_random_goal_x_= "<<person_companion_->get_actual_random_goal_x().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) actual_random_goal_y_= "<<person_companion_->get_actual_random_goal_y().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_desired_x= "<<person_companion_->get_v_desired_robot_x().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_desired_y= "<<person_companion_->get_v_desired_robot_y().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_current_x= "<<person_companion_->get_v_current_robot_x().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_current_y= "<<person_companion_->get_v_current_robot_y().at(actual_best_path_index_)<< std::endl;
+			}
+
+	debug_output_screen_mesages_=false;
+
+	if(((!robot_desired_vel_calc_Zanlungo_.empty())&&(robot_desired_vel_calc_Zanlungo_.size()>actual_best_path_index_))&&(debug_output_screen_mesages_)){
+		std::cout << "(save in file) robot_desired_vel_calc_Zanlungo_= "<<robot_desired_vel_calc_Zanlungo_.at(actual_best_path_index_)<< std::endl;
+
+
+
+	}
+
+
+	//std::cout <<"ATR COMPANION robot_plan_companion3; debug 19"<< std::endl;
+
+	debug_output_screen_mesages_=false;
+
+	if((!dist_per_rob_path_.empty())&&(dist_per_rob_path_.size()>actual_best_path_index_)){
+
+			if(debug_output_screen_mesages_){
+				std::cout << "(save in file) dist_robot_person= "<<dist_per_rob_path_.at(actual_best_path_index_)<< std::endl;
+			}
+
+		}
+
+	if(debug_output_screen_mesages_){
+		std::cout << "(save in file) ant_final_force_total_.fx= "<<ant_final_force_total_.fx<<"; ant_final_force_total_.fy="<<ant_final_force_total_.fy<< std::endl;
+		std::cout << "alpha_companion_="<<alpha_companion_<<"; beta_companion_="<<beta_companion_<<"; k="<<get_sfm_params(robot_)->at(0)<< std::endl;
+	}
+	if(debug_output_screen_mesages_){
+			std::cout << "(save in file PERSON_COMPANION) person_companion_->get_v_desired_robot_x().empty()= "<<person_companion_->get_v_desired_robot_x().empty()<< std::endl;
+			std::cout << "(save in file PERSON_COMPANION) person_companion_->get_v_desired_robot_x().size()= "<<person_companion_->get_v_desired_robot_x().size()<< std::endl;
+		}
+
+	debug_output_screen_mesages_=false;
+
+	//if(debug_output_screen_mesages_){
+		std::cout << "(save in file PERSON_COMPANION) final_pose_robot_x= "<<final_pose_robot_.x<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) final_pose_robot_y= "<<final_pose_robot_.y<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) final_pose_robot_v= "<<final_pose_robot_.v<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) final_pose_robot_w= "<<final_pose_robot_.w<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) final_pose_robot_theta= "<<final_pose_robot_.theta<< std::endl;
+	//}
+
+
+	if((debug_output_screen_mesages_)&&(!person_companion_->get_actual_random_goal_x().empty())&&(person_companion_->get_actual_random_goal_x().size()>actual_best_path_index_)){
+				std::cout << "(save in file PERSON_COMPANION) actual_random_goal_x_= "<<person_companion_->get_actual_random_goal_x().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) actual_random_goal_y_= "<<person_companion_->get_actual_random_goal_y().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_desired_x= "<<person_companion_->get_v_desired_robot_x().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_desired_y= "<<person_companion_->get_v_desired_robot_y().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_current_x= "<<person_companion_->get_v_current_robot_x().at(actual_best_path_index_)<< std::endl;
+				std::cout << "(save in file PERSON_COMPANION) v_current_y= "<<person_companion_->get_v_current_robot_y().at(actual_best_path_index_)<< std::endl;
+			}
+
+	if(Zanlungo_model_){
+		if(((!robot_desired_vel_calc_Zanlungo_.empty())&&(robot_desired_vel_calc_Zanlungo_.size()>actual_best_path_index_))&&(debug_output_screen_mesages_)){
+				std::cout << "(save in file PERSON_COMPANION) robot_desired_vel_calc_Zanlungo_= "<<robot_desired_vel_calc_Zanlungo_.at(actual_best_path_index_)<< std::endl;
+			}
+	}
+
+	debug_output_screen_mesages_=false;
+
+	if(!Zanlungo_model_){
+		std::cout << "(save in file PERSON_COMPANION) companion_force_my_model_to_compare_with_zanlungo_.fx= "<<beta_companion_*companion_force_my_model_to_compare_with_zanlungo_.fx<<"; fy="<<beta_companion_*companion_force_my_model_to_compare_with_zanlungo_.fy<< std::endl;
+		std::cout << "(save in file PERSON_COMPANION) goal_force_my_model_to_compare_with_zanlungo_.fx= "<<alpha_companion_*goal_force_my_model_to_compare_with_zanlungo_.fx<<"; fy="<<alpha_companion_*goal_force_my_model_to_compare_with_zanlungo_.fy<< std::endl;
+
+	}*/
+	//std::cout <<"ATR COMPANION robot_plan_companion3; debug 20"<< std::endl;
+	////////////
+	//robot_desired_vel_calc_Zanlungo_.clear();
+
+	///////////////////////
+	//debug_output_screen_mesages_=false;
+	/*if(Zanlungo_model_){
+		if((!saved_tree_forces_to_see_companion_Force_Zanlungo_.empty())&&(saved_tree_forces_to_see_companion_Force_Zanlungo_.size()>actual_best_path_index_)){
+				ant_final_force_total_=saved_tree_forces_to_see_companion_Force_Zanlungo_.at(actual_best_path_index_).f;
+			}else if(!companion_person_theta_path_.empty()){
+				companion_person_theta_path_.back();
+
+				if(!saved_tree_forces_to_see_companion_Force_Zanlungo_.empty()){
+					ant_final_force_total_=saved_tree_forces_to_see_companion_Force_Zanlungo_.back().f;
+				}else{
+					ant_final_force_total_=Sforce();
+				}
+
+			}
+	}*/
+
+	//////////// FIN MOMENTARILY output mesages of Zanlungo save in file here to see them for debug!!!
+
+
+	return result;
+}
+
+
+
+void Cplan_local_nav_person_companion::set_robot_external_goal( const Spoint& goal )
+{
+
+	Sdestination dest_goal(0,goal.x,goal.y,1.0);
+	extern_robot_goal_=dest_goal;
+	//std::vector<Sdestination> robot_dest(1,dest_goal);
+	//robot_->set_destinations( robot_dest );
+	//robot_->set_best_dest( dest_goal );
+	//robot_->get_best_dest();
+
+	if(debug_real_test_companion2_){
+		std::cout << std::endl  << std::endl  << std::endl<< " (function: set_robot_external_goal) [Cperson_abstract::Akp_planning/Reactiva_repulsive/Reactive_atractive] (set_robot_external_goal)  extern_robot_goal_.x"<<extern_robot_goal_.x<<"; extern_robot_goal_.y="<<extern_robot_goal_.y<< std::endl<< std::endl<< std::endl<< std::endl<< std::endl;
+	}
+
+	if(robot_companion_case_==Cperson_abstract::Akp_planning){
+		goal_ = goal;
+		//std::cout << "(function: set_robot_external_goal) [case akp_planning] goal_.x="<<goal_.x<<"; goal_.y="<<goal_.y << std::endl;
+
+		if(debug_real_test_companion2_){
+			std::cout << std::endl  << std::endl  << std::endl<< " [Cperson_abstract::Akp_planning] (set_robot_external_goal)  extern_robot_goal_.x=goal_.x"<<goal_.x<<"; extern_robot_goal_.y=goal_.y="<<goal.y<< std::endl<< std::endl<< std::endl<< std::endl<< std::endl;
+		}
+	}
+
+}
+
+void Cplan_local_nav_person_companion::set_robot_external_goal_fix( const Spoint& goal )
+{ // guardar siempre SOLO el goal externo sin cambiarlo cuando vas hacia la persona pq te alejaste demasiado.
+	Sdestination dest_goal(0,goal.x,goal.y,1.0);
+	extern_robot_goal_fix_=dest_goal;
+
+	//std::cout << "[function: set_robot_external_goal_fix] extern_robot_goal_fix_.x="<<extern_robot_goal_fix_.x<<"; extern_robot_goal_fix_.y="<<extern_robot_goal_fix_.y << std::endl;
+}
+
+
+
+void Cplan_local_nav_person_companion::set_robot_goal( const Spoint& goal )
+{
+
+	Sdestination dest_goal(0,goal.x,goal.y,1.0);
+	std::vector<Sdestination> robot_dest(1,dest_goal);
+	robot_->set_destinations( robot_dest );
+	robot_->set_best_dest( dest_goal );
+	//robot_->get_best_dest();
+	if(debug_real_test_companion2_){
+		//std::cout << std::endl  << std::endl  << std::endl<< " (function: set_robot_goal) [ robot_->set_best_dest]  (set_robot_goal)  robot dest=goal.x"<<goal.x<<"; goal.y="<<goal.y<< std::endl<< std::endl<< std::endl<< std::endl<< std::endl;
+	}
+
+	if((robot_companion_case_==Cperson_abstract::Reactive_atractive)||(robot_companion_case_==Cperson_abstract::Reactiva_repulsive)){
+		goal_ = goal;
+		//std::cout << "[(function: set_robot_goal), case atrative and repulsive] goal_.x="<<goal_.x<<"; goal_.y="<<goal_.y << std::endl;
+
+		if(debug_real_test_companion2_){
+			std::cout << std::endl  << std::endl  << std::endl<< " [Cperson_abstract::Reactive_atractive/Reactiva_repulsive] (set_robot_goal)  goal_=goal.x"<<goal.x<<"; goal_=goal.y="<<goal.y<< std::endl<< std::endl<< std::endl<< std::endl<< std::endl;
+		}
+	}else{
+		//goal_ = goal; // arreglar mal calculo caminos
+	}
+}
+
+
+// esta al usar al robot, he de cambiarla.
+void Cplan_local_nav_person_companion::set_robot_goal_person_companion_akp( const Spoint& goal )
+{
+
+	Sdestination dest_goal(0,goal.x,goal.y,1.0);
+	std::vector<Sdestination> robot_dest(1,dest_goal);
+	person_companion_->set_destinations( robot_dest );
+	person_companion_->set_best_dest( dest_goal );
+	//robot_->get_best_dest();
+	if(debug_real_test_companion2_){
+		std::cout << std::endl  << std::endl  << std::endl<< " [Cperson_abstract::Akp_planning/Reactiva_repulsive/Reactive_atractive]  (set_robot_goal)  robot dest=goal.x"<<goal.x<<"; goal.y="<<goal.y<< std::endl<< std::endl<< std::endl<< std::endl<< std::endl;
+	}
+
+	if((robot_companion_case_==Cperson_abstract::Reactive_atractive)||(robot_companion_case_==Cperson_abstract::Reactiva_repulsive)){
+		goal_ = goal;
+		//std::cout << "[set_robot_goal_person_companion_akp, case atrative and repulsive] goal_.x="<<goal_.x<<"; goal_.y="<<goal_.y << std::endl;
+		if(debug_real_test_companion2_){
+			std::cout << std::endl  << std::endl  << std::endl<< " [Cperson_abstract::Reactive_atractive/Reactiva_repulsive] (set_robot_goal)  goal_=goal.x"<<goal.x<<"; goal_=goal.y="<<goal.y<< std::endl<< std::endl<< std::endl<< std::endl<< std::endl;
+		}
+	}
+}
+
+void Cplan_local_nav_person_companion::set_robot_goal_person_goal_global_plan( const Spoint& goal )
+{
+	goal_ = goal;
+	Sdestination dest_goal(0,goal.x,goal.y,1.0);
+	std::vector<Sdestination> robot_dest(1,dest_goal);
+	person_companion_->set_destinations( robot_dest );
+	person_companion_->set_best_dest( dest_goal );
+}
+
+
+void Cplan_local_nav_person_companion::set_robot_goal_person_goal_global_plan_IN_robot_VERSION( const Spoint& goal )
+{
+	goal2_ = goal;
+	//std::cout << "[set_robot_goal_person_goal_global_plan_IN_robot_VERSION] goal_.x="<<goal_.x<<"; goal_.y="<<goal_.y << std::endl;
+	Sdestination dest_goal(0,goal.x,goal.y,1.0);
+	std::vector<Sdestination> robot_dest(1,dest_goal);
+	robot_->set_destinations( robot_dest );
+	robot_->set_best_dest( dest_goal );
+}
+
+
+
+/********************************************************************++++++*********+****************/
+/* Ini_robot_companion, para caso person companion akp*/
+
+bool Cplan_local_nav_person_companion::init_robot_plan2_person_companion(double robot_person_distance)
+{
+	// clear all data structures and push back the initial state : current state
+	if(debug_real_test_companion4_){
+		std::cout << "[INIIIIIIIII] horizon_time_="<<horizon_time_ << std::endl;
+		std::cout << "[INIIIIIIIII] max_iter_=***"<<max_iter_ << std::endl;
+		std::cout << "[INIIIIIIIII] workspace_radii_=***"<<workspace_radii_<< std::endl;
+	}
+
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "IMPORTANTE! (1) init_robot_plan2_person_companion; print best dest:" << std::endl;
+		person_companion_->get_best_dest().print();
+		std::cout << "(1) init_robot_plan2_person_companion; print desired velocity:"<< person_companion_->get_desired_velocity()<< std::endl;
+	}
+
+	vector_of_companion_collisions_.clear();
+
+	v_alpha_.clear();
+	v_gamma_.clear();
+	v_delta_.clear();
+    edge_.clear();
+    cost_int_forces_.clear();
+    cost_robot_.clear();
+    cost_obstacles_.clear();
+    //cost_local_minima_.clear();
+    cost_distance_.clear();
+    cost_orientation_.clear();
+    nodes_in_branch_.clear();
+    random_goals_.clear();
+    random_goals2_.clear();
+    edge_.push_back( Sedge_tree_pcomp(0) );
+    cost_int_forces_.push_back( 0.0 );
+    cost_robot_.push_back(0.0);
+    cost_obstacles_.push_back( 0.0 );
+    //cost_local_minima_.push_back(0.0);
+    cost_distance_.push_back( 0.0 );
+    cost_orientation_.push_back( 0.0 );
+    cost_past_traj_.resize( max_iter_ , 0.0 );//no clear is needed, only the i-th iteration end of branch will contain a value
+    nodes_in_branch_.push_back(1.0);
+
+    cost_companion_.clear();  // new cost companion, added. (ely)
+    cost_companion_.push_back( before_initial_cost_ );
+    orientation_person_robot_angles_.clear();  // new variable, orientation companion (ely)
+    //orientation_person_robot_angles_.push_back( before_initial_angle_ ); // el orientation angle inicial asumimos que es angle_companion_=90grad
+    //angles_colisions_.clear();
+   // min_step_collision_distance_.clear();
+
+    parent_index_vector_.clear();
+    parent_index_vector_.push_back( 0 );
+    min_distance_collision_vector_.clear();
+    min_distance_collision_vector_.push_back(4);
+
+
+    double theta, angle;
+
+    bool scene_empty = get_scene()->empty();
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(2) init_robot_plan2_person_companion" << std::endl;
+    	std::cout << "(2.1) init_robot_plan2_person_companion" << std::endl;
+    	std::cout << "(2.2) (print person_list) + scene_empty="<<scene_empty << std::endl;
+    	for( auto iit: person_list_ )
+    	{
+    		iit->print();
+    	}
+    }
+
+	//Cperson_abstract* person_obj;
+	//bool find_person_bool=find_person(id_person_companion_ , &person_obj);
+
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "(2.2) init_robot_plan2_person_companion, id_person_companion_="<<id_person_companion_ << std::endl;
+	}
+
+	SpointV_cov person = person_companion_->get_current_pointV(); // person companion spoint
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "(2) init_robot_plan2_person_companion (person_companion_->get_current_pointV()):" << std::endl;
+		person.print();
+		std::cout << "(2.2) init_robot_plan2_person_companion (person_companion_->get_best_dest().print()):" << std::endl;
+		person_companion_->get_best_dest().print();
+	}
+
+
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "(2.3) init_robot_plan2_person_companion" << std::endl;
+	}
+	theta = atan2(person_companion_->get_best_dest().y-person.y ,person_companion_->get_best_dest().x-person.x);
+
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "(2.4) init_robot_plan2_person_companion" << std::endl;
+	}
+	Spose robot=robot_->get_current_pose();
+
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "(2.5) init_robot_plan2_person_companion" << std::endl;
+	}
+	angle=atan2(robot.y-person.y , robot.x-person.x);
+
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "(3) init_robot_plan2_person_companion" << std::endl;
+	}
+    Spose person_companion_Spose_act = person_companion_->get_current_pose();
+    double theta_robot_person_companion=person_companion_Spose_act.theta;
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << " (estas dos tendrían que ser iguales! o muy similares) theta="<<theta<<" theta_robot_person_companion="<<theta_robot_person_companion<< std::endl;
+    }
+
+    Spoint goal_person_companion;
+  //  const std::list<Cperson_abstract *>* person_list = get_scene( );
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(4) init_robot_plan2_person_companion" << std::endl;
+    }
+
+
+     Sdestination person_companion_goal;
+     person_companion_goal=person_companion_->get_best_dest();
+     goal_person_companion=Spoint(person_companion_goal.x,person_companion_goal.y,person_companion_goal.time_stamp);
+        	//companion_person_position_=(*iit)->get_current_pointV();
+     if(debug_init_robot_plan2_person_companion_){
+    	 std::cout << "(5)  goal_person_companion:" << std::endl;
+    	 goal_person_companion.print();
+     }
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(5) init_robot_plan2_person_companion" << std::endl;
+    }
+     // goal robot es al lado del goal inferido de la persona, para el caso person companion!!!
+    // TODO: importante!!! ver si estos set external goal hacen falta o no al cojer los goals desde fuera...
+    // set_robot_external_goal(goal_person_companion);
+    // set_robot_goal_person_companion_akp(goal_person_companion);
+////// the group goes to talk with other person. //////////////////////////////////
+
+///////////////////////////////////
+
+     if(debug_init_robot_plan2_person_companion_){
+    	 std::cout << "(6) init_robot_plan2_person_companion" << std::endl;
+     }
+     double ini_angle_act;
+     //double ant_ini_angle;
+
+     if( diffangle(theta, angle) < 0 ){
+    	 ini_angle_act=(theta + angle)*(180/3.14);
+    	 //std::cout << " (1) !!!!!!!! ini_angle_act (case: (theta + angle)); theta="<<theta*(180/3.14)<<"; angle="<<angle*(180/3.14) << std::endl;
+    	// ant_ini_angle=(robot_->get_current_pointV().angle_heading_point((Spoint) companion_person_position_))*(180/3.14);
+     }else{
+    	 ini_angle_act=(theta - angle)*(180/3.14);
+    	 //std::cout << " (1) !!!!!!!! ini_angle_act (case: (theta - angle)); theta="<<theta*(180/3.14)<<"; angle="<<angle*(180/3.14) << std::endl;
+    	// ant_ini_angle=(robot_->get_current_pointV().angle_heading_point((Spoint) companion_person_position_))*(180/3.14);
+     }
+
+     if(debug_init_robot_plan2_person_companion_){
+    	 std::cout << "(7) init_robot_plan2_person_companion" << std::endl;
+     }
+    // std::cout << " (1) !!!!!!!! ini_angle_act="<<ini_angle_act << std::endl;
+
+     if((ini_angle_act>=0)&&(ini_angle_act<=180)){
+      	ini_angle_act=ini_angle_act;
+      //	std::cout << " (2) !!!!!!!! ini_angle_act (case: (ini_angle_act>=0)&&(ini_angle_act<=180))"<< std::endl;
+     }else if((ini_angle_act<0)&&(ini_angle_act>=(-180))){
+      	ini_angle_act=sqrt(ini_angle_act*ini_angle_act);
+    	//std::cout << " (2) !!!!!!!! ini_angle_act (case: (ini_angle_act<0)&&(ini_angle_act>=(-180)))"<< std::endl;
+     }else if((ini_angle_act>180)&&(ini_angle_act<=360)){
+    	 ini_angle_act=360-ini_angle_act;
+    		//std::cout << " (2) !!!!!!!! ini_angle_act (case: (ini_angle_act>180)&&(ini_angle_act<=360))"<< std::endl;
+     }else if((ini_angle_act<(-180))&&(ini_angle_act>=(-360))){
+     	ini_angle_act=sqrt(ini_angle_act*ini_angle_act);
+     	ini_angle_act=360-ini_angle_act;
+    	//std::cout << " (2) !!!!!!!! ini_angle_act (case: (ini_angle_act<(-180))&&(ini_angle_act>=(-360))"<< std::endl;
+     }else if(ini_angle_act>360){
+    	 unsigned int n_360_g=ini_angle_act/360;
+    	 ini_angle_act=ini_angle_act-n_360_g*360;
+    	 // std::cout << " OJO!!! caso mayor 360 ; ini_angle_act=ini_angle_act-n_360_g*360="<<ini_angle_act<<"; n_360_g="<<n_360_g<< std::endl;
+     }else{
+        std::cout << " OJO!!! caso NO contemplado ; ini_angle_act="<<ini_angle_act<< std::endl;
+     }
+
+     if(debug_init_robot_plan2_person_companion_){
+    	 std::cout << "(8) init_robot_plan2_person_companion" << std::endl;
+     }
+     initial_angle_=ini_angle_act;
+     orientation_person_robot_angles_.push_back( initial_angle_ );
+
+    // std::cout << " (3) !!!!!!!! ini_angle_act="<<ini_angle_act << std::endl;
+
+     if(debug_init_robot_plan2_person_companion_){
+    	 std::cout << "(9) init_robot_plan2_person_companion" << std::endl;
+     }
+    //Correct current robot location and state: hypothesis the current robot state and the past robot action may differ.
+    //So we must take into account the delay and the system platform control, specially for the w, and propagate an estimation
+    //of the state at time t_now to time t_now + t_processing and sending command
+    person_companion_->correct_state_to_delay( last_pose_command_,  now_ , dt_ ); //mirar si necesario o no... (cambiar robot, por person companion)
+    person_companion_->clear_planning_trajectory();//first pose is inserted in the trajectory vector
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(10) init_robot_plan2_person_companion" << std::endl;
+    }
+    // ----------------------------------------------------------------------
+    // set navigation goals
+
+   // person_companion_->set_a_v_max(robot_->get_v_max());
+
+    workspace_radii_ = horizon_time_ * person_companion_->get_v_max(); //(ver si esta bien para la person companion)
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(11) init_robot_plan2_person_companion" << std::endl;
+    }
+    if(debug_real_test_companion4_){
+    std::cout << " (RADIIII) workspace_radii_= "<< workspace_radii_ << "; horizon_time_= "<< horizon_time_<<"; robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+    }
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(12) init_robot_plan2_person_companion" << std::endl;
+    }
+    //if ( workspace_radii_ < 0.1 ) return false;
+    local_v_goal_tolerance_ = person_companion_->get_v_max()+0.1; //sets the tolerance to the max value to always return true
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(12) person_companion_->get_v_max()="<<person_companion_->get_v_max() << std::endl;
+    }
+    reaching_goal_ = false;
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(13)person_companion_->get_current_pointV().distance( goal_)="<<person_companion_->get_current_pointV().distance( goal_) << std::endl;
+       	std::cout << "print goal:" << std::endl;
+    	goal_.print();
+    	std::cout << "(12) print local_goal" << std::endl;
+    }
+
+    if (workspace_radii_ > person_companion_->get_current_pointV().distance( goal_) )
+	{
+		local_goal_ = goal_;
+		// New mode entering subgoals, the radius should be the maximum
+		//workspace_radii_ = robot_->get_current_pointV().distance( goal_) + 0.5;
+		//Set velocity to tolerance when reaching the final goal, only very near
+		if( person_companion_->get_current_pointV().distance2( goal_) < xy_2_goal_tolerance_*2.0 )
+		{
+			//the velocity tolerance depends on the parameter, and the algorithm will check this condition in order to consider
+			//a goal properly reached
+			local_v_goal_tolerance_ = v_goal_tolerance_;
+			reaching_goal_ = true;
+		}
+
+	}
+	else
+	{
+		// In this case the final velocity is not an issue because the plan will never reach it final goal
+		Spoint diff = goal_ - (Spoint)person_companion_->get_current_pointV();
+		double r = sqrt(diff.x*diff.x +  diff.y * diff.y);
+		local_goal_ = Spoint( person_companion_->get_current_pointV().x + workspace_radii_ * diff.x / r ,
+				person_companion_->get_current_pointV().y + workspace_radii_ * diff.y / r );
+	}
+
+	/*if(debug_goal_go_to_person_in_person_companion_){
+		std::cout << " [PERSON] local_goal_.x= "<<local_goal_.x << "; local_goal_.y= "<< local_goal_.y<<"; goal_.x="<<goal_.x<<"; goal_.y="<<goal_.y<< std::endl;
+	}*/
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(12) print local_goal" << std::endl;
+    	local_goal_.print();
+    }
+
+	person_companion_->set_rnd_local_goal( local_goal_ );
+    //now_ = set when updated
+	if(debug_init_robot_plan2_person_companion_){
+		std::cout << "(13) init_robot_plan2_person_companion" << std::endl;
+	}
+    // ----------------------------------------------------------------------
+    //select persons considered in the scene and reserve memory for planning
+    Spoint robot_position = (Spoint) person_companion_->get_current_pointV(); //ojo! esta es más interna todabia! (hay que cambiarla tambien)
+    double d_ini,d_end,radii_2(workspace_radii_*workspace_radii_),d_min(1e10);
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(14) init_robot_plan2_person_companion" << std::endl;
+    }
+    nearby_person_list_.clear();
+    //std::cout << " [fallo] person_list_= "<< person_list_.size() << std::endl;
+    for( auto iit: person_list_ ) // guardas las personas cercanas a la person companion. (OJO!, quitar a la person companion!!!)
+    {
+    	//It requires prior trajectory prediction, careful...
+    	d_ini = iit->get_prediction_trajectory()->front().distance2( robot_position );
+    	d_end = iit->get_prediction_trajectory()->back().distance2( robot_position );
+    	if(( d_ini < radii_2 || d_end < radii_2 ) && (iit->get_id()!=id_person_companion_))
+    	{
+    		nearby_person_list_.push_back( iit );
+    		iit->clear_planning_trajectory();
+    		iit->reserve_planning_trajectory( max_iter_ );//if already of this size, does nothing
+
+    	}
+    	//iit->print();
+    	//check for the neares obstacle in order to calculate velocities
+    	if ( d_ini < d_min)
+    		d_min = d_ini;
+
+    }
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(15) init_robot_plan2_person_companion" << std::endl;
+    }
+    // ----------------------------------------------------------------------
+    //number of nearby obstacles: first approach, just count them...
+    clock_t obstacles_start, obstacles_end;
+    obstacles_start=clock();
+    int number_of_obstacles(0);
+    for( auto iit: laser_obstacle_list_ )
+    {
+    	d_ini = iit.distance2( robot_position );
+    	//d_ini = iit.distance( robot_position );
+
+    	//std::cout << " radii_2= "<< radii_2<< " d_ini="<<d_ini << std::endl;
+
+    	if( d_ini < radii_2  )
+    	//if( d_ini < radii  )
+    	{
+    		//std::cout << " in if( d_ini < radii_2  ) "<< std::endl;
+    		number_of_obstacles++;
+    	}
+    	if ( d_ini < d_min )
+    		d_min = d_ini;
+
+    }
+    number_of_obstacles_=number_of_obstacles;
+
+   if(debug_init_robot_plan2_person_companion_){
+    	std::cout << " number_of_obstacles_= "<<number_of_obstacles_<< " number_of_obstacles="<<number_of_obstacles<< "; workspace_radii_="<<workspace_radii_ << std::endl;
+   }
+
+    obstacles_end=clock();
+    if(check_execution_times_){
+    	std::cout << " number_of_obstacles= "<< number_of_obstacles << std::endl;
+    	std::cout << " time_obstacles_=obstacles_start-obstacles_end= "<< ((obstacles_end-obstacles_start)/clocks_per_sec_my_var_)*1000<< std::endl;
+    }
+
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(16) init_robot_plan2_person_companion" << std::endl;
+    }
+    d_min_global_=d_min;
+    dmin_global_=d_min;
+
+   Spoint robot_act_goal=get_robot_goal(); // TODO: mirar k hace esta funcion. (retorna goal_)
+   if(debug_nadal_){
+	   std::cout << " (ini_robot_plan2) robot_act_goal.x="<<robot_act_goal.x<<"robot_act_goal.y="<<robot_act_goal.y<< std::endl;
+   }
+  /***************Fin copia seguridad velocidades*******************************/
+    //depending on the number of persons considered, set the std of the std_goal_workspace [rad]
+
+   int obstacles=(int)nearby_person_list_.size()-1 + number_of_obstacles;
+
+   if(debug_init_robot_plan2_person_companion_){
+	   std::cout << "(17) init_robot_plan2_person_companion" << std::endl;
+   }
+   if(obstacles<0){
+	   obstacles=0;
+   }
+
+    switch( obstacles )  // std_goal_workspace_ ha de ser siempre muy cercano a 1, has de intentar ir siempre hacia el goal de la persona que acompañas y NO desviarte con un planning alternativo que evite mucho los obstaculos!
+    {
+      case 0:
+		std_goal_workspace_ = 0.4;
+		break;
+      case 1:
+		std_goal_workspace_ = 0.5;
+		break;
+      case 2:
+		//std_goal_workspace_ = 1.4;
+    	 std_goal_workspace_ = 0.6; // mirar si la std, se habre un poco para la persona simulada, también.
+		break;
+      case 3:
+		//std_goal_workspace_ = 1.6;
+    	 std_goal_workspace_ = 0.7;
+		break;
+      case 4:
+		//std_goal_workspace_ = 1.8;
+    	  std_goal_workspace_ = 0.8;
+		break;
+      case 5:
+		//std_goal_workspace_ = 2.0;
+    	 std_goal_workspace_ = 0.9;
+		break;
+      default:
+      case 6:
+  		//std_goal_workspace_ = 2.1;
+    	 std_goal_workspace_ = 1.0;
+  		break;
+    }
+		/*if(debug_goal_go_to_person_in_person_companion_){
+		std::cout << " IIIIIIIIIIIIII std_goal_workspace_="<<std_goal_workspace_<< std::endl;
+		}*/
+   // std::cout << "FIN ="<< std::endl;
+    if(debug_init_robot_plan2_person_companion_){
+    	std::cout << "(18) init_robot_plan2_person_companion" << std::endl;
+    }
+
+    return true;
+}
+
+/* fin Ini_robot companion, para caso person companion akp*/
+
+bool Cplan_local_nav_person_companion::robot_plan_anticipative_krrt_companion_person_companion( Cperson_abstract::companion_reactive reactive)
+{
+	if(debug_robot_plan_anticipative_krrt_companion_person_companion_){
+		std::cout << " (1) INI robot_plan_anticipative_krrt_companion"<< std::endl;
+	}
+
+	saved_tree_forces_to_see_companion_Force_Zanlungo_.clear();
+
+	person_robot_actual_real_distance_=calc_robot_person_companion_distance_companion_person_akp();
+
+	clock_t krrt_companion_start, krrt_companion_end;
+	krrt_companion_start=clock();
+	clock_t bucle_krrt_companion_start, bucle_krrt_companion_end;
+	bucle_krrt_companion_start=clock();
+
+	Sedge_tree_pcomp input(0);
+	Spoint random_goal;
+	unsigned int parent_vertex_index(0),previous_parent_vertex(0), number_of_cost_to_go(0);
+	//first goal is the main goal
+	random_goal = local_goal_;
+
+	//std::cout << " (1) local_goal_.x="<<local_goal_.x<<"; local_goal_.y="<<local_goal_.y<< std::endl;
+	//std::cout << " (1) person_list_.size()="<<person_list_.size()<<"; nearby_person_list_.size()="<<nearby_person_list_.size()<< std::endl;
+
+	if(debug_real_test_companion4_){
+		std::cout << "(IN robot_plan_anticipative_krrt_companion) random_goal.x="<<random_goal.x<<"; random_goal.y="<<random_goal.y<< std::endl;
+	}
+	random_goals_.push_back( random_goal );
+	collision_detected_.resize(max_iter_,false);
+	collision_detected_[0] = false;
+	double distance2_to_goal(1.0);
+
+	if(debug_robot_plan_anticipative_krrt_companion_person_companion_){
+		std::cout << "(IN robot_plan_anticipative_krrt_companion) max_iter_="<<max_iter_<< std::endl;
+		std::cout << "a_v_break="<<person_companion_->get_a_v_break()<<"; a_v_max()="<<person_companion_->get_a_v_max()<<"; a_w_max="<<person_companion_->get_a_w_max()<< std::endl;
+		std::cout << "v_max="<<person_companion_->get_v_max()<<"; w_max()="<<person_companion_->get_w_max()<<"; desired_velocity="<<person_companion_->get_desired_velocity()<< std::endl;
+	}
+
+	//person_companion_->get_a_v_break()
+	//person_companion_->get_a_v_max()
+	//person_companion_->get_a_w_max()
+	//person_companion_->get_v_max()
+	//person_companion_->get_w_max()
+	//person_companion_->get_desired_velocity()
+
+	//std::cout << " (2) robot_plan_anticipative_krrt_companion; person_list_.size()="<<person_list_.size()<<"; nearby_person_list_.size()="<< nearby_person_list_.size()<< std::endl;
+
+	for( unsigned int i = 1; i<max_iter_ && number_of_cost_to_go < max_iter_/5; ++i )
+	{
+		//std::cout << "for 1n"<< std::endl;
+		distance2_to_goal = person_companion_->get_robot_planning_trajectory()->back().distance2( local_goal_ );
+		//std::cout << " (3) robot_plan_anticipative_krrt_companion"<< std::endl;
+		/*std::cout << " (3) robot_plan_anticipative_krrt_companion"<< std::endl;
+		std::cout << "time="<<person_companion_->get_robot_planning_trajectory()->back().time_stamp - now_<<"> horizon_time_="<<horizon_time_<< std::endl;
+		std::cout <<" collision_detected_[i-1]=" <<collision_detected_[i-1]<< std::endl;
+		std::cout <<"; person_companion_->get_robot_planning_trajectory()->back().v="<<person_companion_->get_robot_planning_trajectory()->back().v<<"< local_v_goal_tolerance_="<<local_v_goal_tolerance_<< std::endl;
+		std::cout <<"xy_2_goal_tolerance_"<<xy_2_goal_tolerance_<<" > distance2_to_goal="<<distance2_to_goal<<"; local_goal:"<< std::endl;
+		local_goal_.print();*/
+		/*if(!person_companion_->get_robot_planning_trajectory()->empty()){
+			std::cout << "person_companion_->get_robot_planning_trajectory()->back().time_stamp= "<<person_companion_->get_robot_planning_trajectory()->back().time_stamp<< std::endl;
+			std::cout << "current diff time "  << person_companion_->get_robot_planning_trajectory()->back().time_stamp - now_ << std::endl;
+		}else{
+			std::cout << "person_companion_->get_robot_planning_trajectory()->empty()="<<person_companion_->get_robot_planning_trajectory()->empty()<< std::endl;
+		}
+		std::cout << "now_"<<now_<< std::endl;
+		std::cout << "horizon_time_"<<horizon_time_<< std::endl;
+		std::cout << "collision_detected_[i-1]="<<collision_detected_[i-1]<< std::endl;
+		 	*/
+
+
+		if( (person_companion_->get_robot_planning_trajectory()->back().time_stamp - now_ > horizon_time_) || (collision_detected_[i-1])
+				|| (distance2_to_goal  < xy_2_goal_tolerance_ && //distance to goal and velocity
+						person_companion_->get_robot_planning_trajectory()->back().v < local_v_goal_tolerance_ )) //this local tolerance depends if the goal is reachable before h
+		{
+			//std::cout << " (4) robot_plan_anticipative_krrt_companion"<< std::endl;
+			//std::cout << "(entro if largo...)"<< std::endl;
+			// add end of branch, either horizon time is reached or goal is reached
+			if (!collision_detected_[i-1] )
+			{
+				//std::cout << " (4.1) robot_plan_anticipative_krrt_companion"<< std::endl;
+				end_of_branches_index_.push_back( i-1 );
+				//distance to last trajectory calculated: only last calculated position in both paths... simplified version
+				if ( best_planning_trajectory_.empty() )
+					cost_past_traj_[i-1] = 0.0;
+				else
+					cost_past_traj_[i-1] = best_planning_trajectory_.front().distance2( person_companion_->get_robot_planning_trajectory()->back()  );
+
+				//std::cout << " collision detected; best_planning_trajectory_.empty()=" <<best_planning_trajectory_.empty()<<"; end_of_branches_index_.empty()="<<end_of_branches_index_.empty()<< std::endl;
+			}
+			//colisions are discarted
+			else {
+				//std::cout << " (4.2) collision detected; best_planning_trajectory_.empty()=" <<best_planning_trajectory_.empty()<<"; end_of_branches_index_.empty()="<<end_of_branches_index_.empty()<< std::endl;
+				//person_companion_->get_robot_planning_trajectory()->back().print();
+			}
+			//std::cout << " (5) robot_plan_anticipative_krrt_companion"<< std::endl;
+		//2- Sample workspace
+			//std::cout << "for 2n"<< std::endl;
+			random_goal = sample_workspace_for_person_companion_akp();
+			random_goals_.push_back( random_goal );
+			person_companion_->set_rnd_local_goal( random_goal );
+			//std::cout << " (6) robot_plan_anticipative_krrt_companion"<< std::endl;
+			//std::cout << "(IN robot_plan_anticipative_krrt_companion) random_goal.x="<<random_goal.x<<"; random_goal.y="<<random_goal.y<<"; random_goals2_.size()="<<random_goals2_.size()<< std::endl;
+			//std::cout << "for 3n"<< std::endl;
+		//3- find nearest vertex to expand the tree
+			parent_vertex_index = find_nearest_vertex_person_companion_akp( random_goal ); // dentro de esta esta el cost_to_go!!!
+			//std::cout << " (6.1) robot_plan_anticipative_krrt_companion"<< std::endl;
+			++number_of_cost_to_go;
+			previous_parent_vertex = i;
+			//std::cout << " (6.2) robot_plan_anticipative_krrt_companion"<< std::endl;
+			reset_scene_persons_propagation_flag(); //ok, the same!
+			//std::cout << "for 4n"<< std::endl;
+			//std::cout << " (7) robot_plan_anticipative_krrt_companion"<< std::endl;
+		}
+		else
+		{
+			parent_vertex_index = previous_parent_vertex;
+			previous_parent_vertex = i;
+		}
+		//std::cout << " (8) robot_plan_anticipative_krrt_companion"<< std::endl;
+
+
+		//std::cout << "for 5n"<< std::endl;
+		//check to see if goal is currently the local goal; in that case, the velocity has to be adjusted to stop
+		if ( reaching_goal_ )
+		{
+			//set robot desired velocity to 0 when inside the goal ball
+			if( distance2_to_goal < xy_2_goal_tolerance_ )
+			{
+				person_companion_->set_desired_velocty( 0.0 );
+
+			}
+			else // robot desired velocity is again max velocity
+				person_companion_->set_desired_velocty( person_companion_->get_v_max () );//robot always tries to be at max velocity, modified by nearby ppl
+		}
+		//std::cout << " (8.1) robot_plan_anticipative_krrt_companion"<< std::endl;
+		//std::cout << "for 6n"<< std::endl;
+		//4-calculate the input u to propagate towards the random goal
+		random_goals2_.push_back(random_goal);
+		//std::cout << " (8.2) robot_plan_anticipative_krrt_companion"<< std::endl;
+		input = calculate_edge_person_companion_akp(parent_vertex_index, Sdestination(0,random_goal.x,random_goal.y),reactive);
+		//std::cout << " (8.3) robot_plan_anticipative_krrt_companion"<< std::endl;
+		//5- Propagate tree.
+		collision_detected_[i] = propagate_vertex_person_companion_akp( parent_vertex_index, input );
+		//std::cout << " (9) robot_plan_anticipative_krrt_companion"<< std::endl;
+		/*if(collision_detected_[i]){
+			std::cout << "% collision_detected_["<<i<<"]"<<collision_detected_[i] << std::endl;
+		}*/
+		//std::cout << "for 7n"<< std::endl;
+		if(!collision_detected_[i]){
+			// si no hay colision!!! guardas los parametros!
+			v_alpha_.push_back(alpha_);
+			v_gamma_.push_back(gamma_);
+			v_delta_.push_back(delta_);
+		}
+		//std::cout << " (10) robot_plan_anticipative_krrt_companion"<< std::endl;
+		calculate_cost_person_companion_akp(parent_vertex_index, input,reactive);
+		//6-calculate the propagation cost
+		edge_.push_back( input );
+	}
+
+	//std::cout << " (11) robot_plan_anticipative_krrt_companion"<< std::endl;
+	bucle_krrt_companion_end=clock();
+
+	if(debug_real_test_companion_){
+		std::cout << "% time_bucle_krrt_companion=bucle_krrt_companion_start-bucle_krrt_companion_end"<<(bucle_krrt_companion_end-bucle_krrt_companion_start)/1000 << std::endl;
+	}
+
+	if(debug_nadal_){
+		std::cout << " [ANTES CAMBIAR ANGULOS] orientation_person_robot_angles_[0]="<<orientation_person_robot_angles_[0]<< std::endl;
+	}
+	//7- return tree. Seek for the minimum cost branch of the tree
+	//std::cout << "out for 8n"<< std::endl;
+	//only_angle_in_final_tree_calculate_companion_path_angle_and_cost(); //(companion ely)change path of angle companion between robot and person.
+	Crobot* robot_act=person_companion_;
+
+
+
+	unsigned int min_branch_index = global_min_cost_index(robot_act , reactive);
+
+
+		//std::cout << " (12) robot_plan_anticipative_krrt_companion"<< std::endl;
+	if(reactive==Cperson_abstract::Akp_planning){
+		//only_angle_in_final_tree_calculate_companion_path_angle_and_cost(min_branch_index);
+		if(overpas_obstacles_behind_person_){
+			//go_behind_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost2(min_branch_index);
+			go_behind_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost3(min_branch_index);
+
+		}else{
+			//only_angle_in_final_tree_calculate_companion_path_angle_and_cost2(min_branch_index);
+			go_in_front_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost3(min_branch_index);
+		}
+
+
+	}
+	//std::cout << " (13) robot_plan_anticipative_krrt_companion"<< std::endl;
+	//return_next_robot_position_companion_cost_and_angle(min_branch_index);
+	//std::cout << "out for 9n"<< std::endl;
+	// Esta luego habra que comentar el IF para ver que los angulos en el path los haga bien.
+	if((reactive==Cperson_abstract::Akp_planning)&&(we_have_cost_companion_) && debug_real_test_companion4_){//&&(actual_debug2_)){
+		see_companion_path_angle_and_cost_of_min_cost_paths(min_branch_index);
+	}
+
+	if(debug_real_test_companion2_){
+		std::cout << "min_next_companion_angle_= " <<min_next_companion_angle_<< std::endl;
+		std::cout << "min_next_companion_cost_= " <<min_next_companion_cost_<< std::endl;
+
+	}
+	// cout best candidate paths and costs
+	//std::cout << "best path candidate = " << min_branch_index << std::endl;
+	//std::cout  << 	cost_int_forces_[min_branch_index] << " , " << cost_robot_[min_branch_index] << " , " <<  cost_obstacles_[min_branch_index] << " , " <<
+	//		cost_distance_[min_branch_index] << " , " << cost_orientation_[min_branch_index] << std::endl;
+	min_branch_index_save_=min_branch_index;
+	//std::cout << "out for 10n"<< std::endl;
+
+
+	best_plan_vertex_index_.clear();
+	best_planning_trajectory_.clear();
+	//saved_tree_forces_to_see_companion_Force_Zanlungo_best_path_.clear();
+
+	if ( end_of_branches_index_.empty() ){
+		//std::cout << "(return false) end_of_branches_index_.empty()="<<end_of_branches_index_.empty() << std::endl;
+		return false;
+	}
+	//std::cout << "out for 11n"<< std::endl;
+	//8- calculate vector of vertex. In reverse order the vertexes of the best path (initial not
+	// included as it doesn't provide information)
+	//std::cout << "% distance, orientation, robot, int, obstacles" << std::endl;
+	unsigned int y=0;
+	do
+	{
+		if(debug_antes_subgoals_entre_AKP_goals_){
+			std::cout << "% ("<<y<<") min_branch_index="<<min_branch_index << std::endl;
+		}
+		best_plan_vertex_index_.push_back( min_branch_index);
+		best_planning_trajectory_.push_back( person_companion_->get_robot_planning_trajectory()->at(min_branch_index) );
+
+		if(debug_antes_subgoals_entre_AKP_goals_){
+			std::cout << "> robot.x="<<person_companion_->get_robot_planning_trajectory()->at(min_branch_index).x <<"; robot.y="<<person_companion_->get_robot_planning_trajectory()->at(min_branch_index).y <<"; robot.time_stamp="<<person_companion_->get_robot_planning_trajectory()->at(min_branch_index).time_stamp << std::endl;
+			std::cout << "> parent="<<edge_[ min_branch_index ].parent<< std::endl;
+		}
+
+		min_branch_index = edge_[ min_branch_index ].parent;
+		y++;
+
+	}while( min_branch_index > 0 );
+
+	//std::cout << " (14) robot_plan_anticipative_krrt_companion"<< std::endl;
+	//std::cout << "out for 12n"<< std::endl;
+	//replan_min_cost_branch();
+
+	if(debug_antes_subgoals_entre_AKP_goals_){
+		std::cout << "% best_planning_trajectory_.size()="<<best_planning_trajectory_.size() << std::endl;
+	}
+
+	// clear data structures. Out of this function, there is no guarantee that data has not changed
+    nearby_person_list_.clear();
+    //end of trajectories indexes
+    end_of_branches_index_.clear();
+	krrt_companion_end=clock();
+
+	if(debug_real_test_companion4_){
+		std::cout << "% (FIN) time_krrt_companion=krrt_companion_start-krrt_companion_end"<<(krrt_companion_end-krrt_companion_start)/1000 << std::endl;
+	}
+	//std::cout << "out for 13n"<< std::endl;
+	//std::cout << " (15) robot_plan_anticipative_krrt_companion"<< std::endl;
+    return true;
+}
+
+
+Spose Cplan_local_nav_person_companion::replan_last_step_person_companion(unsigned int index, Spose robot_pose_ini, SpointV robot_Spoint_ini, Sdestination robot_goal, double dt, Sdestination robot_final_goal)
+{ // retorna la Spose final.  // index es solo para la el angulo y para la posición de la persona, el goal de la persona.
+	std::cout << "7777777777 IN!!!!!!!!!!!! replan_last_step_person_companion; index="<<index<< std::endl;
+
+	std::cout << "robot_pose_ini.print:"<< std::endl;
+	robot_pose_ini.print();
+
+	akp_out_path_goal_=robot_final_goal;
+	akp_out_companion_goal_=robot_goal;
+	std::cout << "akp_out_path_goal_.print:"<< std::endl;
+	akp_out_path_goal_.print();
+	std::cout << "akp_out_companion_goal_.print:"<< std::endl;
+	akp_out_companion_goal_.print();
+
+
+	//std::cout << "final_v_robot_max_="<<final_v_robot_max_<< std::endl;
+	double fobos_Xmod;
+	double fobos_Ymod;
+	double signo_x;
+	double signo_y;
+
+	Sforce f_goal, f_int, f_obs, f,f_person_goal, f_goal_final;
+
+	if(debug_antes_subgoals_entre_AKP_goals_){
+		std::cout << "replan_last_step_person_companion -> min_branch_index="<<index << std::endl;
+	}
+
+//	Spose robot_pose=robot_pose_ini;//best_planning_trajectory_.at(index);
+
+	if(debug_antes_subgoals_entre_AKP_goals_){
+		std::cout << "> (ant) robot_pose=robot_pose_ini.x="<<robot_pose_ini.x <<"; robot_pose_ini.y="<<robot_pose_ini.y<< std::endl;
+	}
+		// replan the min_cost_branch to do the planing taking into account the angle respect to the person.
+		//caso planning, normal Gonzalo.
+	Sdestination final_goal=robot_final_goal;
+
+	//std::cout << "> caso 3 force_goal_near"<< std::endl;
+	f_goal = person_companion_->force_goal_near( final_goal, get_sfm_params(person_companion_),&robot_Spoint_ini,0.5,false,real_vel_per); // 2.0 = distance reduce velocity and force when goal is near!
+
+	Sdestination companion_goal=robot_goal;
+
+	//f_goal = person_companion_->force_goal( robot_goal, get_sfm_params(person_companion_),&robot_Spoint_ini);
+	//std::cout << "> caso 1 force_goal_near"<< std::endl;
+	f_person_goal=person_companion_->force_goal_near( companion_goal, get_sfm_params(person_companion_),&robot_Spoint_ini,2.0,false,real_vel_per);
+
+	if(debug_real_test_companion3_){
+		std::cout << "> (INI replan_last_step) robot_pose=robot_pose_ini.x="<<robot_pose_ini.x <<"; robot_pose_ini.y="<<robot_pose_ini.y<< std::endl;
+		std::cout << "> robot_goal.x="<<robot_goal.x <<"; robot_goal.y="<<robot_goal.y<< std::endl;
+		std::cout << "> f_goal.fx="<<f_goal.fx <<"; f_goal.fy="<<f_goal.fy<< std::endl;
+	}
+
+	f_int = force_persons_int_planning_virtual_robot_companion_propagation(person_companion_,index);//force_persons_int_planning_virtual( robot_, index);
+	SpointV robot = person_companion_->get_planning_trajectory()->at(index);
+	// TEST: person_companion include force with the tibi=robot
+	SpointV robot_tibi_point=SpointV(robot_->get_current_pointV().x,robot_->get_current_pointV().y,robot_->get_current_pointV().time_stamp,robot_->get_current_pointV().vx,robot_->get_current_pointV().vy);
+	Sforce f_person_comp_to_tibi=person_companion_->force(robot_tibi_point,get_sfm_int_params(person_companion_,robot_),&robot);
+	//f_person_comp_to_tibi.fx=f_person_comp_to_tibi.fx/2;
+	//f_person_comp_to_tibi.fy=f_person_comp_to_tibi.fy/2;
+	f_int +=f_person_comp_to_tibi;
+	force_int_between_person_comp_and_robot_=f_person_comp_to_tibi;
+
+	//map force, used for simulations
+	if( read_force_map_success_ )
+		f_obs = get_force_map(person_companion_->get_robot_planning_trajectory()->at(index).x,
+				person_companion_->get_robot_planning_trajectory()->at(index).y);
+			//obstacles due to laser scans. for real environments has priority over map forces
+
+	//std::cout << " (1) f_obs.fx= "<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<"; v_gamma_[index]="<<v_gamma_[index]<< std::endl;
+
+	if(read_laser_obstacle_success_)
+		f_obs = force_objects_laser_int_planning_virtual( person_companion_, index, 25.0, true );
+
+	//std::cout << "(2) f_obs.fx= "<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<"; v_gamma_[index]="<<v_gamma_[index]<< std::endl;
+
+
+	//std::cout << " IN :calculate_edge (antes limitar f_obs); f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<"; delta_="<<delta_<<std::endl;
+		// INICION Limitar fuerza obstaculos cuando hay muchos solapados
+		fobos_Xmod=sqrt(f_obs.fx*f_obs.fx);
+		fobos_Ymod=sqrt(f_obs.fy*f_obs.fy);
+
+		if (f_obs.fx > 0){
+			signo_x=1;
+		}else{
+			signo_x=-1;
+		}
+		if (f_obs.fy > 0){
+			signo_y=1;
+		}else{
+			signo_y=-1;
+		}
+
+		if((fobos_Xmod>f_obst_max_x_)||(fobos_Ymod>f_obst_max_y_)){
+			f_obs.fx=signo_x*f_obst_max_x_;
+			f_obs.fy=signo_y*f_obst_max_y_;
+		}
+		//std::cout << "(FINAL FORCE) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+		// FIN Limitar fuerza obstaculos cuando hay muchos solapados
+		//std::cout << "(3) f_obs.fx= "<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<"; v_gamma_[index]="<<v_gamma_[index]<< std::endl;
+
+	last_step_robot_obstacles_cost_=f_obs.module2();
+
+	if(debug_real_test_companion4_){
+		std::cout << " f_obs.fx= "<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+		std::cout << " f_int.fx= "<<f_int.fx<<"; f_int.fy="<<f_int.fy<< std::endl;
+	}
+	//	std::cout << " alpha_= "<<alpha_<<"; gamma_"<<gamma_<<"; delta_"<<delta_<< std::endl;
+
+	//f=f_goal_final*alpha_ + f_int*gamma_ + f_obs*delta_;
+		double alpha_a=0.8; // 0.1
+		double beta_a=0.2;  // 0.6 Parametros segun paper de Gonzalo
+		double gamma_a=5.0;
+		double delta_a=0.5;
+
+		//f=f_goal*v_alpha_[index] + f_int*v_gamma_[index] + f_obs*v_delta_[index]; // prueba, con parametros articulo revista robot companion
+		f=f_goal*alpha_a + f_person_goal*beta_a + f_int*gamma_a + f_obs*delta_a; // prueba, con parametros articulo revista robot companion
+
+	//	f_goal_final=f_goal*alpha_a+f_person_goal*beta_a;
+		std::cout << " f_goal.fx= "<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<<"; alpha_a="<<alpha_a<<"; v_alpha_[index]="<<v_alpha_[index]<< std::endl;
+		std::cout << " f_person_goal.fx= "<<f_person_goal.fx<<"; f_person_goal.fy="<<f_person_goal.fy<<"; beta_a="<<beta_a<< std::endl;
+		std::cout << " f_int.fx= "<<f_int.fx<<"; f_int.fy="<<f_int.fy<<"; gamma_a="<<gamma_a<< std::endl;
+		std::cout << " f_obs.fx= "<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<"; delta_a="<<delta_a<< std::endl;
+		std::cout << "[fuerza final] f.fx= "<<f.fx<<"; f.fy="<<f.fy<< std::endl;
+
+	if(debug_real_test_companion3_){
+	std::cout << " (Akp_planning, fuerza final y parametros):  f.fx="<<f.fx<<"; f.fy="<<f.fy<<"; alpha_="<<alpha_<<"; gamma_"<<gamma_<<"; delta_="<<delta_<<std::endl;//"; f_int.fx"<<f_int.fx<<"; f_int.fy="<<f_int.fy<<std::endl;
+	}
+
+	Sedge_tree_pcomp u( index, f, f_goal, f_int, f_obs,f_person_goal);
+	u_forces_robot_actual_=u;
+
+	//std::cout << "> robot_pose_ini.x="<<robot_pose_ini.x <<"; robot_pose_ini.y="<<robot_pose_ini.y<< std::endl;
+	//std::cout << "> robot_pose_ini.v="<<robot_pose_ini.v <<"; robot_pose_ini.w=s"<<robot_pose_ini.w<<"; robot_pose_ini.theta="<<robot_pose_ini.theta<< std::endl;
+	//std::cout << "(ANT) dt="<<dt<< std::endl;
+
+	//std::cout << " (replan_last_step) robot_->robot_propagation_companion_position"<< std::endl;
+	//Spose robot_propagation = person_companion_->robot_propagation( dt_, 0 , u.f );
+	Spose robot_propagation=person_companion_->robot_propagation_companion_position( dt, u.f ,robot_pose_ini,false); // le doy la pose que quiero que me propague y la fuerza con la que quiero que haga la propagacion y me da la siguiente pose!
+	//std::cout << "> (final pose robot) robot_propagation.x="<<robot_propagation.x <<"; robot_propagation.y="<<robot_propagation.y<< std::endl;
+	//std::cout << "> robot_propagation.v="<<robot_propagation.v <<"; robot_propagation.w="<<robot_propagation.w<<"; robot_propagation.theta="<<robot_propagation.theta<< std::endl;
+
+	//if(debug_real_test_companion3_){
+		//std::cout << "> (neW replan_last_step) robot_propagation.x="<<robot_propagation.x <<"; robot_propagation.y="<<robot_propagation.y<< std::endl;
+		//std::cout << "> (neW replan_last_step) robot_propagation.v="<<robot_propagation.v <<"; robot_propagation.w="<<robot_propagation.w<<"; robot_propagation.theta="<<robot_propagation.theta*(180/3.14)<< std::endl;
+		//std::cout << "> robot_initial_pose_.theta="<<robot_initial_pose_.theta*(180/3.14)<< std::endl;
+	//}
+
+	if(debug_antes_subgoals_entre_AKP_goals_){
+		std::cout << "> (ant_neW_pose) robot_->get_robot_planning_trajectory()->at(index).x="<<robot_->get_robot_planning_trajectory()->at(index).x <<"; robot_->get_robot_planning_trajectory()->at(index).y="<<robot_->get_robot_planning_trajectory()->at(index).y<< std::endl;
+		std::cout << "> (neW) robot_propagation.x="<<robot_propagation.x <<"; robot_propagation.y="<<robot_propagation.y<< std::endl;
+	}
+
+	//check if the propagation is valid
+	bool collision_check = check_collision_final( robot_propagation, index ); // ver si hay colision en esa propagación. (en teoría no haria falta, porque ya las comprobaste antes!)
+
+	if(actual_debug2_){
+		std::cout << "> collision_check="<<collision_check << std::endl;
+	}
+
+	final_collision_check_=collision_check;
+
+	/*
+	Spoint robot_propagation_spoint(robot_propagation.x,robot_propagation.y,robot_propagation.time_stamp);
+
+	double distance_to_goal_act = robot_->get_current_pointV().distance( robot_propagation_spoint);
+
+	double vel_teoric= max_v_by_system_ * distance_to_goal_act / distance_to_stop_;
+	if(debug_nadal_){
+	std::cout << "(Replan last step function) distance_to_goal_act="<<distance_to_goal_act<<"; vel_teoric="<<vel_teoric<< std::endl;
+	}
+	double vel_teoric2=distance_to_goal_act/0.2;
+	if(debug_nadal_){
+	std::cout << "(Replan last step function) vel_teoric2=distance_to_goal_act/inct_="<<vel_teoric2<< std::endl;
+	}
+
+	//std::cout << "final_v_real_robot_max_="<<final_v_real_robot_max_<< std::endl;
+	if(debug_real_test_companion_){
+		std::cout << "(ANT) robot_propagation.theta="<<robot_propagation.theta*(180/3.14)<< std::endl;
+		std::cout << "(ANT) robot_propagation.w="<<robot_propagation.w<< std::endl;
+	}
+
+	double error_in_orientation_between_person_and_robot=(person_orient_-robot_propagation.theta)*(180/3.14);
+
+	if(debug_real_test_companion_){
+		std::cout << "error_in_orientation_between_person_and_robot_="<<error_in_orientation_between_person_and_robot<< std::endl;
+		std::cout << "w=(theta_persona-theta_robot)/0.2="<<error_in_orientation_between_person_and_robot/0.2<< std::endl;
+		std::cout << "(DESPUES) robot_propagation.theta=person_orient_="<<person_orient_*(180/3.14)<< std::endl;
+		std::cout << "(DESPUES) robot_propagation.theta=person_orient_="<<robot_propagation.theta*(180/3.14)<< std::endl;
+		std::cout << "(DESPUES) robot_propagation.w=person_orient_="<<robot_propagation.w<< std::endl;
+	}
+
+
+	double distance_act_r=initial_robot_spoint_.distance(robot_propagation);
+	last_step_robot_distance_cost_=distance_act_r;
+	double dx=robot_propagation.x-initial_robot_spoint_.x;
+	double dy=robot_propagation.y-initial_robot_spoint_.y;
+	double local_orientation=fabs(diffangle( robot_initial_pose_.theta ,
+			atan2( dy, dx )  ));
+	last_step_robot_orientation_cost_local_=local_orientation;
+	dx=extern_robot_goal_.x-initial_robot_spoint_.x;
+	dy=extern_robot_goal_.y-initial_robot_spoint_.y;
+	double global_orientation_=fabs(diffangle( robot_initial_pose_.theta ,
+			atan2( dy, dx )  ));
+	last_step_robot_orientation_cost_global_=global_orientation_;
+	last_step_robot_control_cost_mix_=f_goal_final.module2(cost_angular_);
+	last_step_robot_control_cost_goal_traj_=f_goal.module2(cost_angular_);
+	last_step_robot_control_cost_goal_person_=f_person_goal.module2(cost_angular_);
+*/
+
+	return robot_propagation;
+}
+
+
+Spoint Cplan_local_nav_person_companion::sample_workspace_for_person_companion_akp(  )
+{
+	Spoint sample;
+	double theta(0.0);
+	std::uniform_real_distribution<double> sample_x( person_companion_->get_current_pose().x - workspace_radii_,
+			person_companion_->get_current_pose().x + workspace_radii_ );
+	std::uniform_real_distribution<double> sample_y( person_companion_->get_current_pose().y - workspace_radii_,
+			person_companion_->get_current_pose().y + workspace_radii_ );
+	//std::cout << " [SAMPLE workspace PERSON COMPANION] goal_.x="<<goal_.x <<"; goal_.y="<<goal_.y<< std::endl;
+	double dx = goal_.x - person_companion_->get_current_pose().x;
+	double dy = goal_.y - person_companion_->get_current_pose().y;
+	std::normal_distribution<double> sample_g( atan2(dy,dx), std_goal_workspace_ );
+	switch(plan_mode_)
+	{
+	  case F_RRT_Uniform :
+		sample = Spoint( sample_x(generator_), sample_y(generator_)  );
+		break;
+	  case F_RRT_Gauss_Circle :
+	  case F_RRT_GC_alpha :
+	  default:
+		theta = sample_g(generator_);
+		sample = Spoint( person_companion_->get_current_pose().x + workspace_radii_*cos(theta),
+				person_companion_->get_current_pose().y + workspace_radii_*sin(theta));
+		break;
+	}
+
+	//robot parameters sampling if required
+	//set the random alpha variable, if necessary
+	if( plan_mode_ == F_RRT_GC_alpha )
+	{
+
+		std::uniform_int_distribution<int> sample_behavior( 0 , 2 );
+		double epsilon(0.4);
+		switch( sample_behavior(generator_) )
+		{
+		case 0://robot unaware  // OJO! eliminado robot unaware para person companion, pq me la lia!
+			alpha_ = 1.0-epsilon;gamma_ = 1.0+epsilon;delta_ = 1.0+epsilon;
+			//alpha_ = 1.0+epsilon;gamma_ = 1.0-epsilon;delta_ = 1.0-epsilon;
+			//std::cout << "case 0 :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		case 1://robot aware
+			alpha_ = 1.0-epsilon;gamma_ = 1.0+epsilon;delta_ = 1.0+epsilon;
+			//std::cout << "case 1 :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		case 2://robot balanced
+		default:
+			alpha_ = 1.0;gamma_ = 1.0;delta_ = 1.0;
+			//std::cout << "case 2(default) :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		}
+
+		//std::cout << alpha_ << " , " << gamma_ << " , " << delta_ << std::endl;
+	}
+
+	return sample;
+}
+
+
+void Cplan_local_nav_person_companion::reset_scene_persons_propagation_flag()
+{
+	for( Cperson_abstract* iit : nearby_person_list_  )
+	{
+		iit->reset_propagation_flag();
+	}
+}
+
+
+unsigned int Cplan_local_nav_person_companion::find_nearest_vertex_person_companion_akp( const Spoint& random_goal )
+{
+	//std::cout << "find_nearest_vertex (1)" << std::endl;
+	double min_dist(1e10), result;
+	unsigned int nearest_vertex_index = 0;
+	for( unsigned int i = 0 ; i < person_companion_->get_robot_planning_trajectory()->size() ; i+=2 )
+	{
+		//std::cout << "robot_->get_robot_planning_trajectory()->size()="<<person_companion_->get_robot_planning_trajectory()->size()<<"i="<<i << std::endl;
+		if ( !collision_detected_[i] )
+		{//std::cout << "find_nearest_vertex (1.1)" << std::endl;
+			result = cost_to_go_person_companion_akp(random_goal,i);
+			//std::cout << "find_nearest_vertex (1.2)" << std::endl;
+			if ( result  < min_dist  )
+			{
+				min_dist = result;
+				nearest_vertex_index = i;
+			}
+		}
+
+	}
+	/*std::cout << "find_nearest_vertex (2) robot_->get_robot_planning_trajectory()->at( nearest_vertex_index ).time_stamp="<<person_companion_->get_robot_planning_trajectory()->at( nearest_vertex_index ).time_stamp << std::endl;
+	std::cout << "find_nearest_vertex (2) horizon_time_="<<horizon_time_ << std::endl;
+	std::cout << "find_nearest_vertex (2) now_="<<now_ << std::endl;
+*/
+	//std::cout << "find_nearest_vertex (2)" << std::endl;
+	if ( person_companion_->get_robot_planning_trajectory()->at( nearest_vertex_index ).time_stamp > horizon_time_ + now_ )
+		return 0;
+	//std::cout << "find_nearest_vertex (3)" << std::endl;
+	return nearest_vertex_index;
+}
+
+
+
+Sedge_tree_pcomp Cplan_local_nav_person_companion::calculate_edge_person_companion_akp( unsigned int parent_vertex, const Sdestination& random_goal, Cperson_abstract::companion_reactive reactive )
+{ // bool reactive  is to approximate to the person when robot is far. (Modificated by ely. For person companion.)
+
+	//std::cout << " calculate_edge_person_companion_akp= "<< std::endl;
+	Sforce f_goal, f_int, f_obs, f,f_companion_robot_goal, f_goal_final, f_companion_Zanlungo;
+	double signo_x;
+	double signo_y;
+	double fobos_Xmod;
+	double fobos_Ymod;
+
+	//Sforce f_goal_companion=Sforce();
+	//caso planning akp, para person_companion como robot
+	if(debug_calculate_edge_person_companion_akp_){
+		std::cout << " IN :calculate_edge case(Akp_planning); reactive= "<<reactive <<"; parent_vertex="<<parent_vertex<<"; random_goal.x="<<random_goal.x<<"; random_goal.y="<<random_goal.y<<  std::endl;
+	}
+
+	//std::cout << " second_group_companion_person_obj_->get_planning_trajectory()->empty()="<<second_group_companion_person_obj_->get_planning_trajectory()->empty()<<"; size="<<second_group_companion_person_obj_->get_planning_trajectory()->size()<<std::endl;
+	// force of companion for the other person of the group.
+	//Cperson_abstract* person_obj_companion_person2;
+
+	//std::cout << ";id_SECOND_person_companion_"<<id_SECOND_person_companion_<< " find_person="<<(find_person(id_SECOND_person_companion_ , &person_obj_companion_person2))<<"; second_group_companion_person_obj_->get_prediction_trajectory()->size()="<<second_group_companion_person_obj_->get_prediction_trajectory()->size()<<"; get_plan_traj_robot="<<robot_->get_prediction_trajectory_with_target_person()->size() <<  std::endl;
+
+	//if((find_person(id_SECOND_person_companion_ , &person_obj_companion_person2))&&(!robot_->get_prediction_trajectory()->empty())){
+	/*if((!plan_create_fake_fixed_second_person_companion_)&&(find_person(id_SECOND_person_companion_ , &person_obj_companion_person2))&&(!second_group_companion_person_obj_->get_prediction_trajectory()->empty())){
+
+		//std::cout <<" (IN FORCES) id_other pers comp="<< second_group_companion_person_obj_->get_id()<<" IN primer if;  second_group_companion_person_obj_->get_prediction_trajectory()->empty()="<<second_group_companion_person_obj_->get_prediction_trajectory()->empty()<<"; plan_create_fake_fixed_second_person_companion_="<<plan_create_fake_fixed_second_person_companion_<< std::endl;
+		//std::cout << " IN primer if;  second_group_companion_person_obj_->get_prediction_trajectory()->size()="<<second_group_companion_person_obj_->get_prediction_trajectory()->size()<<"; parent_vertex="<<parent_vertex<< std::endl;
+
+		if((!second_group_companion_person_obj_->get_prediction_trajectory()->empty())&&(second_group_companion_person_obj_->get_prediction_trajectory()->size()>parent_vertex)){
+
+			//std::cout << " IN segundo if "<< std::endl;
+			// TODO: translate the trajectory of the person to the position for the companion person. To one of the sides of the person beeing accompanied.
+			///////////////
+			SpointV_cov robot_act=person_companion_->get_current_pointV();
+			//std::cout << " robot_act_point.print:" <<  std::endl;
+			//robot_act.print();
+
+			SpointV_cov person=second_group_companion_person_obj_->get_prediction_trajectory()->at(parent_vertex);//second_group_companion_personSpoint_;
+			//std::cout << " person.print:" <<  std::endl;
+			//person.print();
+
+			SpointV_cov robot_person_act=person;
+			double angle=atan2(robot_act.y-person.y , robot_act.x-person.x);
+			if(angle<0){
+				angle=(2*3.14)+angle;
+			}
+			double theta=second_group_companion_personSpose_.theta;//calc_person_companion_orientation(); // TODO: mirar
+
+			if(theta<0){
+				theta=(2*3.14)+theta;
+			}
+
+			if(debug_real_test_companion4_){
+				std::cout << "(**** FINAL *****) theta="<<theta*(180/3.14)<<"; angle="<<angle*(180/3.14)<<"diffangle(theta, angle)="<<(diffangle(theta, angle))*(180/3.14)<< std::endl;
+				std::cout << "theta+angle="<<(theta+angle)*(180/3.14)<<"; theta-angle="<<(theta-angle)*(180/3.14)<< std::endl;
+				std::cout << "min_next_companion_angle_=" <<min_next_companion_angle_<<"; theta+min_next_companion_angle_="<<(theta+(min_next_companion_angle_*3.14/180))*(180/3.14)<<"; theta-min_next_companion_angle_="<<(theta-(min_next_companion_angle_*3.14/180))*(180/3.14)<< std::endl;
+
+			}
+
+
+			//double real_distance_between_people=second_group_companion_personSpoint_.distance(robot_act);
+			if( diffangle(theta, angle) < 0 ){  // angle = 180 grados... o 0... si cambia el goal de lado da un salto... (como arreglarlo)
+
+				if(debug_real_test_companion4_){
+					std::cout << " diffangle(theta, angle) theta="<<theta<<"; angle="<<angle<< std::endl;
+				}
+
+				robot_person_act.x=robot_person_act.x+((real_distance_between_people_of_group_))*cos(theta+(companion_angle_peopl_in_group_*3.14/180));//1.5*cos(theta+(min_next_companion_angle_*3.14/180));
+				robot_person_act.y=robot_person_act.y+((real_distance_between_people_of_group_))*sin(theta+(companion_angle_peopl_in_group_*3.14/180));//1.5*sin(theta+(min_next_companion_angle_*3.14/180));
+
+			}else{
+
+				robot_person_act.x=robot_person_act.x+(real_distance_between_people_of_group_)*cos(theta-(90*3.14/180));//1.5*cos(theta-(min_next_companion_angle_*3.14/180));
+				robot_person_act.y=robot_person_act.y+(real_distance_between_people_of_group_)*sin(theta-(90*3.14/180));//1.5*sin(theta-(min_next_companion_angle_*3.14/180));
+
+			}
+
+
+			Sdestination companion_goal(1,robot_person_act.x,robot_person_act.y,0.5);
+
+			////////////
+
+			//Sdestination companion_goal=Sdestination(1,second_group_companion_person_obj_->get_planning_trajectory()->at(parent_vertex).x,second_group_companion_person_obj_->get_planning_trajectory()->at(parent_vertex).y,0.5);
+
+			// TODO: incluir aqui una fuerza hacia la prediccion de la otra persona del grupo que acompaña robot.
+			//double threshold_apply_companion_force_with_other_person_of_group_=1.5;
+			//if(robot_person_act.distance(person_companion_->get_current_pointV())<threshold_apply_companion_force_with_other_person_of_group_){
+			//	f_goal_companion = person_companion_->force_goal_near(companion_goal , get_sfm_params(person_companion_),&(person_companion_->get_planning_trajectory()->at(parent_vertex)), 5.0  );
+			//}else{
+			//	f_goal_companion =Sforce();
+			//}
+
+			// TODO:faltaria prediccion de la person companion.
+				//////////////////////////
+			//std::cout << " Zanlungo_model_= "<<Zanlungo_model_<< std::endl;
+				if(Zanlungo_model_){ //GroupForce(int nothers,State2D *Others,Vector2D preferred)
+					//std::cout << " breack_medium 1 ! "<< std::endl;
+					//std::cout << " enter zanlungo!="<<std::endl;
+
+					Sdestination actual_group_goal=person_companion_->get_best_dest();//random_goal;;//robot_->get_best_dest();//random_goal;
+					//std::cout << " Zanlungo actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<std::endl;
+
+					//Sdestination actual_group_goal=random_goal; //(id, x, y , pd); Sdestination(1,0.0,0.0, 0.5);//
+
+					double actual_personComp_vel=sqrt((pointer_to_person_companion_->get_current_pointV().vx*pointer_to_person_companion_->get_current_pointV().vx)+(pointer_to_person_companion_->get_current_pointV().vy*pointer_to_person_companion_->get_current_pointV().vy));
+					if(actual_personComp_vel<0.15){ // TODO: provisional, pensar mejor.
+						actual_group_goal=before_person_comp_goal_Zalungo_formation_;
+					}else{
+						actual_group_goal=robot_->get_best_dest();
+						before_person_comp_goal_Zalungo_formation_=robot_->get_best_dest();
+					}
+					//std::cout << " breack_medium 2 ! "<< std::endl;
+
+					//std::cout << " Zanlungo 1; robot_initial_pose_.x="<<robot_initial_pose_.x<<"; robot_initial_pose_.y="<<robot_initial_pose_.y<<"; initial_person_companion_point_.x="<<initial_person_companion_point_.x<<"; initial_person_companion_point_.y="<<initial_person_companion_point_.y<<std::endl;
+					//std::cout << " best_plan.size="<<best_planning_trajectory_.size()<<std::endl;
+					SpointV_cov pose_of_the_robot=person_companion_->get_planning_trajectory( )->at(parent_vertex);
+					//std::cout << " breack_medium 3 ! "<< std::endl;
+					//std::cout << " breack_medium 2 ! "<< std::endl;
+					double robot_actual_time_stamp=person_companion_->get_planning_trajectory( )->at(parent_vertex).time_stamp-person_companion_->get_current_pointV().time_stamp;
+					//std::cout << " breack_medium 4 ! "<< std::endl;
+					//std::cout << " robot_actual_time_stamp="<<robot_actual_time_stamp<<std::endl;
+					double index_person_pred=(robot_actual_time_stamp/dt_)+1;
+					//std::cout << " breack_medium 5 ! "<< std::endl;
+					//std::cout << " index_person_pred="<<index_person_pred<<std::endl;
+					//std::cout << " person_dt="<<robot_->get_time_stamp_plan().at(parent_vertex)<<std::endl;
+					//std::cout << " breack_medium 3 ! "<< std::endl;
+					//std::cout << " Zanlungo 2; robot_->get_planning_trajectory( ).size()="<<robot_->get_planning_trajectory( )->size()<<std::endl;
+					Vector2D robot_pose(pose_of_the_robot.vx,pose_of_the_robot.vy,atan(pose_of_the_robot.vy/pose_of_the_robot.vx)); // theta en rads, chec if is ok.
+					//std::cout << " Zanlungo 3"<<std::endl;
+					//std::cout << " breack_medium 4 ! "<< std::endl;
+					//std::cout << " breack_medium 6 ! "<< std::endl;
+					Companion_Zanlungo_Model_.set_Self(pose_of_the_robot.x,pose_of_the_robot.y,pose_of_the_robot.vx,pose_of_the_robot.vy,robot_pose.th);
+					//std::cout << " breack_medium 7 ! "<< std::endl;
+					//std::cout << " breack_medium 5 ! "<< std::endl;
+					State2D *Others=new State2D[number_of_group_people_];
+					//std::cout << " Zanlungo 4; pointer_to_person_companion_->get_prediction_trajectory().size()="<<pointer_to_person_companion_->get_prediction_trajectory()->size()<<"; parent_vertex="<<parent_vertex<<std::endl;
+					//std::cout << " breack_medium 8 ! "<< std::endl;
+
+					//std::cout << " breack_medium 6 ! robot_="<< std::endl;
+					robot_->get_current_pointV();
+					//std::cout << " breack_medium 6 ! robot_.pred_traj_size="<<robot_->get_prediction_trajectory_with_target_person()->size()<<"; robot_.plan_traj="<<robot_->get_planning_trajectory()->size()<< std::endl;
+				//	std::cout << " breack_medium 9 ! "<< std::endl;
+					SpointV_cov actual_first_person_companion_point;
+					if(robot_->get_prediction_trajectory_with_target_person()->size()>index_person_pred){
+						actual_first_person_companion_point=robot_->get_prediction_trajectory_with_target_person()->at(index_person_pred);
+					}else{
+						actual_first_person_companion_point=robot_->get_prediction_trajectory_with_target_person()->back();
+					}
+					//std::cout << " robot_->get_planning_trajectory( ).size()="<<robot_->get_planning_trajectory( )->size()<<std::endl;
+					//std::cout << " breack_medium 7 ! "<< std::endl;
+					//std::cout << " pointer_to_person_companion_->get_prediction_trajectory().size()="<<pointer_to_person_companion_->get_prediction_trajectory()->size()<<std::endl;
+					//std::cout << " breack_medium 10 ! "<< std::endl;
+					State2D first_companion_person(actual_first_person_companion_point.x,actual_first_person_companion_point.y,actual_first_person_companion_point.vx,actual_first_person_companion_point.vx);
+					//std::cout << " breack_medium 11 ! "<< std::endl;
+					//std::cout << " Zanlungo 5"<<std::endl;
+					Vector2D first_companion_person2D(actual_first_person_companion_point.vx,actual_first_person_companion_point.vy,atan(actual_first_person_companion_point.vy/actual_first_person_companion_point.vx));
+
+					//std::cout << " breack_medium 12 ! "<< std::endl;
+					//std::cout << " Zanlungo 6"<<std::endl;
+					Others[0]=first_companion_person;
+
+					//std::cout << " breack_medium 8 ! "<< std::endl;
+					//std::cout << " breack_medium 13 ! "<< std::endl;
+
+
+					SpointV_cov actual_second_person_companion_point=SpointV_cov();//=second_group_companion_person_obj_->get_prediction_trajectory()->at(parent_vertex);
+					Cperson_abstract* person_obj_companion_person2;
+					//std::cout << " breack_medium 14 ! "<< std::endl;
+					if((find_person(id_SECOND_person_companion_ , &person_obj_companion_person2))&&(number_of_group_people_>1)){
+
+						if(second_group_companion_person_obj_->get_prediction_trajectory()->size()>index_person_pred){ // TODO: Importante, mirar porque tienen tamanos diferentes a veces.
+							actual_second_person_companion_point=second_group_companion_person_obj_->get_prediction_trajectory()->at(index_person_pred);
+						}else{
+							actual_second_person_companion_point=second_group_companion_person_obj_->get_prediction_trajectory()->back();
+						}
+						//std::cout << " Zanlungo 7"<<std::endl;
+						State2D second_companion_person(actual_second_person_companion_point.x,actual_second_person_companion_point.y,actual_second_person_companion_point.vx,actual_second_person_companion_point.vy);
+						//std::cout << " Zanlungo 8"<<std::endl;
+						Vector2D second_companion_person2D(actual_second_person_companion_point.vx,actual_second_person_companion_point.vy,atan(actual_second_person_companion_point.vy/actual_second_person_companion_point.vx));
+						//std::cout << " Zanlungo 9"<<std::endl;
+						Others[1]=second_companion_person;
+
+					}
+				//	std::cout << " breack_medium 15 ! "<< std::endl;
+					//std::cout << " breack_medium 9 ! "<< std::endl;
+					//std::vector<State2D> Others_in_group; // states of other people in the group.
+					//Others=&Others_in_group;
+
+					double theta=calc_person_companion_orientation();
+
+					if(theta<0){
+						theta=3.14+theta;
+					}
+					//std::cout << " breack_medium 16 ! "<< std::endl;
+					companion_person_theta_path_.push_back(theta);
+
+					double central_group_x;
+					double central_group_y;
+
+					if(number_of_group_people_<2){
+
+						central_group_x=(pose_of_the_robot.x + actual_first_person_companion_point.x)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+						central_group_y=(pose_of_the_robot.y + actual_first_person_companion_point.y)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+					}else{
+						if(we_have_pointer_to_second_person_){
+
+							central_group_x=(pose_of_the_robot.x + actual_first_person_companion_point.x+actual_second_person_companion_point.x)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+							central_group_y=(pose_of_the_robot.y + actual_first_person_companion_point.y+actual_second_person_companion_point.y)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+						}
+
+					}
+
+					//double x_orient_goal=actual_group_goal.x-central_group_x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+					//double y_orient_goal=actual_group_goal.y-central_group_y;//actual_first_person_companion_point.vy;//(actual_group_goal.y-central_group_y);
+					//double orient_goal=atan(y_orient_goal/x_orient_goal);//atan(y_orient_goal/x_orient_goal);
+					double x_orient_goal;
+					//actual_first_person_companion_point.x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+					//std::cout << " x_orient_goal="<<x_orient_goal<<std::endl;
+					double y_orient_goal;
+					double orient_goal;
+
+					//std::cout << " (solo 1 persona) x_orient_goal="<<actual_group_goal.x-pose_of_the_robot.x<<"; y_orient_goal="<<actual_group_goal.y-pose_of_the_robot.y<<"; orient_goal="<<atan((actual_group_goal.y-pose_of_the_robot.y)/(actual_group_goal.x-pose_of_the_robot.x))<<std::endl;
+					//std::cout << " (2 personas) x_orient_goal="<<actual_group_goal.x-central_group_x<<"; y_orient_goal="<<actual_group_goal.y-central_group_y<<"; orient_goal="<<atan((actual_group_goal.y-central_group_y)/(actual_group_goal.x-central_group_x))<<std::endl;
+					//std::cout << " breack_medium 17 ! "<< std::endl;
+
+					if(number_of_group_people_<2){
+						//std::cout << " breack_medium 18 ! if(number_of_group_people_<2) "<< std::endl;
+						x_orient_goal=actual_group_goal.x-pose_of_the_robot.x;
+						//actual_first_person_companion_point.x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+						//std::cout << " x_orient_goal="<<x_orient_goal<<std::endl;
+						y_orient_goal=actual_group_goal.y-pose_of_the_robot.y;
+						//actual_first_person_companion_point.y;//actual_first_person_companion_point.vy;//(actual_group_goal.y-central_group_y);
+						//std::cout << " y_orient_goal="<<y_orient_goal<<std::endl;
+						orient_goal=atan(y_orient_goal/x_orient_goal);//atan(y_orient_goal/x_orient_goal);
+						//std::cout << "(TEST, now have to be the same) orient_goal="<<orient_goal<<"theta="<<theta<<std::endl;
+
+					}else{
+						//std::cout << " breack_medium 18 ! ELSE if(number_of_group_people_<2) "<< std::endl;
+						if(we_have_pointer_to_second_person_){
+						//	std::cout << " breack_medium 18 ! ELSE if(we_have_pointer_to_second_person_){ "<< std::endl;
+							x_orient_goal=actual_group_goal.x-central_group_x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+							y_orient_goal=actual_group_goal.y-central_group_y;//actual_first_person_companion_point.vy;//(actual_group_goal.y-central_group_y);
+							orient_goal=atan(y_orient_goal/x_orient_goal);
+						}
+					}
+
+					double x_orient_goal2=actual_group_goal.x-central_group_x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+					double y_orient_goal2=actual_group_goal.y-central_group_y;//actual_first_person_companion_point.vy;//(actual_group_goal.y-central_group_y);
+					double orient_goal2=atan(y_orient_goal2/x_orient_goal2);
+
+					//std::cout << " x_orient_goal="<<x_orient_goal<<"; y_orient_goal="<<y_orient_goal<<"; orient_goal="<<orient_goal<<std::endl;
+					//std::cout << " breack_medium 18 ! "<< std::endl;
+					//orient_goal=theta;
+					//x_orient_goal=ori_pers_x_;
+					//y_orient_goal=ori_pers_y_;
+
+					Vector2D preferred(x_orient_goal,y_orient_goal,orient_goal); // is the orientation until the goal of the group.
+					if(debug_zanlungo_){
+						std::cout << " Zanlungo model dist.R-P="<<pose_of_the_robot.distance(actual_first_person_companion_point)<<"; preferred.x="<<preferred.x<<"; preferred.y="<<preferred.y<<"; preferred.th="<<preferred.th<<std::endl;
+					}
+					preferred_paths_Zanlungo_.push_back(preferred);
+					// calculate the central point in the group.
+					if(debug_zanlungo_){
+						std::cout << " Zanlungo; preferred.x="<<preferred.x<<"; preferred.x.y="<<preferred.y<<"; preferred.th="<<preferred.th<<std::endl;
+					}
+
+					//for(unsigned int gz=0;gz<number_of_group_people_;gz++){
+					//}
+
+					//std::cout << " breack_medium 19 ! "<< std::endl;
+					//for(unsigned int pr=0;pr<number_of_group_people_;pr++){
+						//preferred.Add(first_companion_person2D);
+
+					//	std::cout << " Zanlungo 10"<<std::endl;
+
+						//if(number_of_group_people_>1){
+							//preferred.Add(second_companion_person2D);
+						//}
+						//std::cout << " Zanlungo 11"<<std::endl;
+
+						//preferred.x=x_orient_goal;//preferred.x/number_of_group_people_;
+						//preferred.y=y_orient_goal;//preferred.y/number_of_group_people_;
+						//preferred.th=orient_goal;//preferred.th/number_of_group_people_;
+						///std::cout << " preferred.x="<<preferred.x<<"; preferred.y="<<preferred.y<<"; preferred.th="<<preferred.th<<"; person.vx"<<initial_person_companion_point_.vx<<"; person.vy="<<initial_person_companion_point_.vy<<"; person.th="<<atan((initial_person_companion_point_.vy)/(initial_person_companion_point_.vx))<<std::endl;//"; f_int.fx"<<f_int.fx<<"; f_int.fy="<<f_int.fy<<std::endl;
+
+
+
+					//}
+					//Companion_Zanlungo_Model_.adapt_Cr_and_Ct_whit_vel_CZM(person_companion_->get_desired_velocity()); //up_distance_margin_Zamlungo_(1.5), down_distance_margin_Zamlungo_(0.75)
+
+					//std::cout << " 7777!!! IMPORTANTE! person_companion_->get_desired_velocity()="<<person_companion_->get_desired_velocity()<<"; get_in_ct="<<Companion_Zanlungo_Model_.get_genome_ComModPar_Ct()<<" get_in_Cr="<<Companion_Zanlungo_Model_.get_genome_ComModPar_Cr()<<std::endl;
+
+
+					//std::cout << " down_distance_margin_Zamlungo_="<<down_distance_margin_Zamlungo_<<"; up_distance_margin_Zamlungo_="<<up_distance_margin_Zamlungo_<<std::endl;
+
+					dist_per_rob_path_.push_back(pose_of_the_robot.distance(actual_first_person_companion_point));
+					//std::cout << " breack_medium 20 ! "<< std::endl;
+					if(((pose_of_the_robot.distance(actual_first_person_companion_point)>(robot_person_proximity_distance_-down_distance_margin_Zamlungo_))&&(pose_of_the_robot.distance(actual_first_person_companion_point)<(robot_person_proximity_distance_+up_distance_margin_Zamlungo_)))&&(bool_distance_margin_)){
+						//std::cout << " Margin case!!! dist="<<pose_of_the_robot.distance(actual_first_person_companion_point)<<"; parent_vertex="<<parent_vertex<<std::endl;
+						Companion_Zanlungo_Model_.set_r0_CZM(pose_of_the_robot.distance(actual_first_person_companion_point));
+						genome_params_.set_r0(pose_of_the_robot.distance(actual_first_person_companion_point));
+						in_margin_true_.push_back(true);
+						distance_betw_per_robo_plann_.push_back(pose_of_the_robot.distance(actual_first_person_companion_point));
+
+					}else{
+						//std::cout << " NO Margin case!!! dist="<<pose_of_the_robot.distance(actual_first_person_companion_point)<<"; parent_vertex="<<parent_vertex<<std::endl;
+						Companion_Zanlungo_Model_.set_r0_CZM(robot_person_proximity_distance_);
+						genome_params_.set_r0(robot_person_proximity_distance_);
+						in_margin_true_.push_back(false);
+						distance_betw_per_robo_plann_.push_back(pose_of_the_robot.distance(actual_first_person_companion_point));
+					}
+					//std::cout << " breack_medium 21 ! "<< std::endl;
+					person_companion_->robot_set_genome(genome_params_);
+					//std::cout << " robot_->get_desired_velocity()="<<robot_->get_desired_velocity()<<"; genome_params_.cr="<<genome_params_.Cr_<<"; genome_params_.ct="<<genome_params_.Ct_<<std::endl;
+
+					//std::cout << " breack_medium 21.1 ! "<< std::endl;
+					//group_force_start = clock();
+					double actual_dis_tol=0.0;
+					if((we_have_pointer_to_second_person_)&&(number_of_group_people_>1)){
+						//std::cout << " breack_medium 21.2 ! "<< std::endl;
+						if(order_people_in_group_global_variable_[0]==1){
+						//	std::cout << " breack_medium 21.3 ! "<< std::endl;
+							actual_dis_tol=dis_tol_;
+						}else{
+							//std::cout << " breack_medium 21.4 ! "<< std::endl;
+							actual_dis_tol=dis_tol_side_;
+						}
+					}
+					//std::cout << " breack_medium 22 ! "<< std::endl;
+					//std::cout << "[ms] actual_dis_tol="<<actual_dis_tol<< std::endl;
+					Vector2D f_companion=Companion_Zanlungo_Model_.GroupForce(number_of_group_people_,Others,preferred,actual_dis_tol,parent_vertex);//Companion_Zanlungo_Model_.F(robot_pose);
+					//group_force_end = clock();
+					//std::cout << "[ms] (FIN) time_tot=group_force_start-group_force_end="<<((group_force_end-group_force_start)/clocks_per_sec_my_var_)*1000<< std::endl;
+					//std::cout << " breack_medium 23 ! "<< std::endl;
+					//std::cout << " Zanlungo 13 after group force"<<std::endl;
+					//std::cout << " breack_medium 23 !; f_companion.x= "<<f_companion.x<<"; f_companion.y="<<f_companion.y<< std::endl;
+					f_companion_Zanlungo.fx = f_companion.x;
+					f_companion_Zanlungo.fy = f_companion.y;
+					//std::cout << " breack_medium 23.1 ! "<< std::endl;
+				}
+
+				//std::cout << " breack_medium 24 ! "<< std::endl;
+				//if(Zanlungo_model2_){ // model only with atractive force until goal
+				//	f_companion_Zanlungo.fx = 0.0;
+				//	f_companion_Zanlungo.fy = 0.0;
+				//}
+
+
+
+
+				//std::cout << " breack_medium 25 ! "<< std::endl;
+
+				/////////////////////////////////
+
+		}
+
+		//////////////////////////////
+	}else{
+		//std::cout << " no person NO comp force "<< std::endl;
+		f_companion_Zanlungo =Sforce();
+	}*/
+
+
+	//std::cout << " IMPORTANTE, URGENTE!!!! Zanlungo_model2_= "<<Zanlungo_model2_<< std::endl;
+	// TODO: FALTA INCLUIR LO DE PERSONA A 90 grados de la person companion!!!!
+
+
+	// antes para companion estaba como f_goal_near, pero ahora el robot con la V-form esta como f_goal, así que lo cambie a ver si tambien va bien.
+	f_goal = person_companion_->force_goal( random_goal, get_sfm_params(person_companion_),&(person_companion_->get_planning_trajectory()->at(parent_vertex))  );
+	//f_goal = person_companion_->force_goal_near( random_goal, get_sfm_params(person_companion_),&(person_companion_->get_planning_trajectory()->at(parent_vertex))  );
+
+	f_int = force_persons_int_planning_virtual_companion_person_akp( person_companion_, parent_vertex );
+
+	SpointV robot = person_companion_->get_planning_trajectory()->at(parent_vertex);
+
+	// TEST: person_companion include force with the tibi=robot
+	SpointV robot_tibi_point=SpointV(robot_->get_current_pointV().x,robot_->get_current_pointV().y,robot_->get_current_pointV().time_stamp,robot_->get_current_pointV().vx,robot_->get_current_pointV().vy);
+	Sforce f_person_comp_to_tibi=person_companion_->force(robot_tibi_point,get_sfm_int_params(person_companion_,robot_),&robot);
+
+	//f_person_comp_to_tibi.fx=f_person_comp_to_tibi.fx/2;
+	//f_person_comp_to_tibi.fy=f_person_comp_to_tibi.fy/2;
+	f_int +=f_person_comp_to_tibi;
+	force_int_between_person_comp_and_robot_=f_person_comp_to_tibi;
+
+	if(((f_int.fx>0.5)||(f_int.fy>0.5))&&see_forces_){
+		std::cout << " (Akp_planning) f_int.fx= "<<f_int.fx<<" f_int.fy"<<f_int.fy <<"; parent_vertex="<< parent_vertex<<  std::endl;
+	}
+
+	// f_int+= robot_->force( person_companion_->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(robot_,person_companion_),&(robot_->get_planning_trajectory()->at(t) ) );   //++ si añado el efecto del robot en la person companion
+
+
+	//map force, used for simulations
+	if( read_force_map_success_ )
+		f_obs = get_force_map(person_companion_->get_robot_planning_trajectory()->at(parent_vertex).x,
+					person_companion_->get_robot_planning_trajectory()->at(parent_vertex).y);
+
+	//obstacles due to laser scans. for real environments has priority over map forces
+	if(read_laser_obstacle_success_)
+		f_obs = force_objects_laser_int_planning_virtual( person_companion_, parent_vertex, 25.0, true );
+
+	//f_obs= Sforce();
+	if(debug_calculate_edge_person_companion_akp_){
+		std::cout << " IN :calculate_edge (antes limitar f_obs); f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<"; delta_="<<delta_<<std::endl;
+		std::cout << " laser_obstacle_list_.size()="<<laser_obstacle_list_.size()<<"; number_of_obstacles_="<<number_of_obstacles_<<std::endl;
+	}
+
+	// INICION Limitar fuerza obstaculos cuando hay muchos solapados
+	fobos_Xmod=sqrt(f_obs.fx*f_obs.fx);
+	fobos_Ymod=sqrt(f_obs.fy*f_obs.fy);
+
+	if (f_obs.fx > 0){
+		signo_x=1;
+	}else{
+		signo_x=-1;
+	}
+	if (f_obs.fy > 0){
+		signo_y=1;
+	}else{
+		signo_y=-1;
+	}
+	//std::cout << " (FINAL) f_obs.fx="<<f_obs.fx<<"; f_obs.fy"<<f_obs.fy<<std::endl;
+
+	if((fobos_Xmod>f_obst_max_x_)||(fobos_Ymod>f_obst_max_y_)){
+		f_obs.fx=signo_x*f_obst_max_x_;
+		f_obs.fy=signo_y*f_obst_max_y_;
+	}
+	//std::cout << "(FINAL FORCE) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+
+	// FIN Limitar fuerza obstaculos cuando hay muchos solapados
+
+	//f=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_;
+	//gamma_=gamma_;
+
+	/* INI GENERATE person_companion, force companion (To companion with more than one person).*/
+	//std::cout << "ROBOT CURRENT POSE="<< std::endl;
+	///robot_->get_current_pose().print();
+	Sdestination accompanying_robot_goal=Sdestination(0,robot_->get_current_pose().x,robot_->get_current_pose().y, 0.5); // Sdestination paramenters = id, x, y, probability
+	// force to do companion with the robot.
+	//double threshold_apply_companion_force_with_robot_=1.5;
+	//if(robot_->get_current_pose().distance(person_companion_->get_current_pointV())<threshold_apply_companion_force_with_robot_){
+		f_companion_robot_goal=person_companion_->force_goal( accompanying_robot_goal, get_sfm_params(person_companion_),&(person_companion_->get_planning_trajectory()->at(parent_vertex))  );
+
+	//}else{
+	//	f_companion_robot_goal=Sforce();
+	//}
+
+	//double beta_robot_companion=0.3;
+	alpha_=0.7;
+	//double beta=0.3;
+
+	/* FIN GENERATE person_companion, force companion (To companion with more than one person).*/
+
+	//f=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_+f_companion_robot_goal*beta_robot_companion;
+	// if Zanlugo
+	//f=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_+f_goal_companion*beta;//+f_companion_robot_goal*beta_robot_companion;
+	// if normal
+	//f=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_+f_goal_companion*beta+f_companion_robot_goal*beta_robot_companion;
+
+	//std::cout << " IMPORTANTE!!!! Zanlungo_model_= "<<Zanlungo_model_<<"; !robot_->get_prediction_trajectory()->empty()="<<!robot_->get_prediction_trajectory()->empty()<<"; bool_find_person_comp2= "<<find_person(id_SECOND_person_companion_ , &person_obj_companion_person2)<< std::endl;
+
+	//if((Zanlungo_model_)&&(!robot_->get_prediction_trajectory()->empty())&&(find_person(id_SECOND_person_companion_ , &person_obj_companion_person2))){
+	/*if((!plan_create_fake_fixed_second_person_companion_)&&(Zanlungo_model_)&&(!robot_->get_prediction_trajectory_with_target_person()->empty())&&(find_person(id_SECOND_person_companion_ , &person_obj_companion_person2))){
+		//std::cout << " breack_last 1 ! "<< std::endl;
+		//std::cout << " Zanlungo 13 after final force"<<std::endl;
+		//f=f_goal_final*alpha_ + f_int*gamma_ + f_obs*delta_;
+		//f=f_goal*alpha_companion_ + f_int*gamma_companion_ + f_obs*delta_companion_;
+		float fx_Z=(float)f_companion_Zanlungo.fx;
+		if(isnan(fx_Z)){
+			f_companion_Zanlungo.fx=0;
+		}
+		float fy_Z=(float)f_companion_Zanlungo.fy;
+		if(isnan(fy_Z)){
+			f_companion_Zanlungo.fy=0;
+		}
+
+		//test forces, alpha and betha hard coded, afther change it outside.
+		//beta_companion_=1;
+		//alpha_companion_=1;
+
+		if((person_companion_->get_current_pointV().distance(robot_->get_current_pointV())<3)&&(person_companion_->get_current_pointV().distance(second_group_companion_person_obj_->get_current_pointV())<3)){
+			f=f_goal*alpha_companion_+f_companion_Zanlungo*constante_multiplicar_fuerza_base_Zanlungo_*beta_companion_ + f_int*gamma_ + f_obs*delta_; // prueba, con parametros articulo revista robot companion
+			std::cout << " enter zanlungo (less 3 meters)!="<<std::endl;
+		}else{
+			if(Zanlungo_model2_){
+				f=f_goal*alpha_+ f_int*gamma_ + f_obs*delta_; // prueba, con parametros articulo revista robot companion
+				std::cout << " enter zanlungo ( more 3 meters)! case 1 ="<<std::endl;
+			}else{
+				f=f_goal*alpha_companion_+f_companion_Zanlungo*constante_multiplicar_fuerza_base_Zanlungo_*beta_companion_ + f_int*gamma_ + f_obs*delta_; // prueba, con parametros articulo revista robot companion
+				std::cout << " enter zanlungo ( more 3 meters)! case 2 ="<<std::endl;
+			//}
+
+		}
+
+		if(Action_== Cplan_local_nav_person_companion::START){ // solo en caso start!!!, no uses la f_companion, que hace que no reinicies bien!
+			f=f_goal*alpha_+ f_int*gamma_ + f_obs*delta_;
+		}
+
+
+
+		//f=f_goal*alpha_companion_+f_companion_Zanlungo*beta_companion_; //+ f_int*gamma_companion_ + f_obs*delta_companion_; // prueba, con parametros articulo revista robot companion
+		//f=f_goal*alpha_companion_+ f_int*gamma_companion_ + f_obs*delta_companion_; // prueba, con parametros articulo revista robot companion
+
+		//std::cout << " (5) "<< std::endl;
+		//f_goal_final=f_goal*alpha_companion_+f_person_goal*beta_companion_;
+
+		if(debug_zanlungo_){
+			std::cout << " (Zanlungo, fuerza final y parametros):  f.fx="<<f.fx<<"; f.fy="<<f.fy<<"; alpha_companion_="<<alpha_companion_<<"; beta_companion_"<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<<std::endl;//"; f_int.fx"<<f_int.fx<<"; f_int.fy="<<f_int.fy<<std::endl;
+			std::cout << " f_goal.fx= "<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy <<"; f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<std::endl;
+			std::cout << " f_companion_Zanlungo.fx= "<<f_companion_Zanlungo.fx<<"; f_companion_Zanlungo.fy="<<f_companion_Zanlungo.fy<<"; f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy << std::endl;
+		}
+
+			//Sedge_tree_pcomp u( index2, f, f_goal, f_int, f_obs,f_person_goal);
+			//u_forces_robot_actual_=u;
+	}else{*/
+		// Caso side-by-side:
+		//std::cout << " breack_last! else, caso sin zanlungo "<< std::endl;
+
+		f=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_;
+
+			//std::cout << " (Akp_planning, fuerza final y parametros):  f.fx="<<f.fx<<"; f.fy="<<f.fy<<"; alpha_companion_="<<alpha_companion_<<"; beta_companion_"<<beta_companion_<<"; gamma_companion_="<<gamma_companion_<<"; delta_companion_="<<delta_companion_<<std::endl;//"; f_int.fx"<<f_int.fx<<"; f_int.fy="<<f_int.fy<<std::endl;
+			//std::cout << " f_goal.fx= "<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy <<"; f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<std::endl;
+			//std::cout << " (F_tot no usa ZANLUNGO comp) f_companion_Zanlungo.fx= "<<f_companion_Zanlungo.fx<<"; f_companion_Zanlungo.fy="<<f_companion_Zanlungo.fy<<"; f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy << std::endl;
+
+	//}
+
+
+
+	//f=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_;
+
+	//std::cout << "(FINAL FORCE) alpha_="<<alpha_<<"; gamma_="<<gamma_<<"; delta_="<<delta_<<"; f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy<< std::endl;
+
+	//if(debug_calculate_edge_person_companion_akp_){
+
+		/*std::cout << " (Fin) IN :calculate_edge f_goal.fx= "<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<<"; alpha_="<<alpha_<<"; f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy<<"; gamma_="<<gamma_<<"; f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<<"; delta_="<<delta_<<std::endl;
+		std::cout << " (Fin) IN :calculate_edge accompanying_robot_goal.x= "<<accompanying_robot_goal.x<<"; accompanying_robot_goal.y="<<accompanying_robot_goal.y<<std::endl;
+
+		std::cout << " (Fin) IN :calculate_edge f_companion_robot_goal.fx= "<<f_companion_robot_goal.fx<<"; f_companion_robot_goal.fy="<<f_companion_robot_goal.fy<<"; f.fx="<<f.fx<<"; f.fy="<<f.fy<<std::endl;
+*/
+		//}
+	//std::cout << " (Akp_planning):  f.fx="<<f.fx<<"; f.fy="<<f.fy<<"; alpha_="<<alpha_<<"; gamma_"<<gamma_<<"; f_goal.fx"<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<<std::endl;
+	//std::cout << " (Akp_planning): (force to other person of the group) f_goal_companion.fx="<<f_goal_companion.fx<<"; f_goal_companion.fy="<<f_goal_companion.fy<<"; beta="<<beta<<"; (force to robot of the group) f_companion_robot_goal.fx="<<f_companion_robot_goal.fx<<"; f_companion_robot_goal.fy="<<f_companion_robot_goal.fy<<"; beta_robot_companion="<<beta_robot_companion<<std::endl;
+
+	// +f_persongoal*(param)  TODO: para la propagacion usa la f(global!!!), esta hay k incluirle el goal persona en la Sedge_tree_pcomp que le entra.
+	//Sforce f=(f_goal+f_persongoal)*alpha_ + f_int*gamma_ + f_obs*delta_;
+	// todo, quizas se podría incluir como: (f_goal+f_persongoal)*alpha_ ?!?!?! o considerar solo goal de ir hacia la posicion de la persona=> f_persongoal*alpha_
+
+
+	saved_tree_forces_to_see_companion_Force_Zanlungo_.push_back(Sedge_tree_pcomp( parent_vertex, f, f_goal, f_int, f_obs,f_companion_Zanlungo));
+
+
+
+
+	//std::cout <<" saved_tree_forces_to_see_companion_Force_Zanlungo_.size="<<saved_tree_forces_to_see_companion_Force_Zanlungo_.size()<<  std::endl;
+	//saved_tree_forces_to_see_companion_Force_Zanlungo_.back().print();
+	//std::cout << " (Akp_planning):  f.fx="<<f.fx<<"; f.fy="<<f.fy<<"; alpha_="<<alpha_<<"; gamma_"<<gamma_<<"; f_goal.fx"<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<<std::endl;
+
+	 return Sedge_tree_pcomp( parent_vertex, f, f_goal_final, f_int, f_obs,f_companion_robot_goal);
+}
+
+bool Cplan_local_nav_person_companion::propagate_vertex_person_companion_akp( unsigned int parent_index , const Sedge_tree_pcomp& u)
+{
+	// Robot propagation and cost ----------------------------------------------------------------------
+	unsigned int index_to_copy;
+	//std::cout <<" (IN propagate_vertex_person_companion_akp) "<<std::endl;
+
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot;
+	//std::cout << " (Akp_planning):  u.f.fx="<<u.f.fx<<"; u.f.fy="<<u.f.fy<<"; alpha_="<<alpha_<<"; gamma_"<<gamma_<<std::endl;
+	if(((u.f_people.fx>0.5)||(u.f_people.fy>0.5))&&see_forces_){
+		//std::cout <<"; (propagate_vertex) f_int.fx"<<u.f_people.fx<<"; f_int.fy="<<u.f_people.fy<<"; parent_index="<<parent_index<<std::endl;
+	}
+	//std::cout <<" (1) propagate_vertex_person_companion_akp "<<std::endl;
+	//std::cout <<"; (propagate_vertex) f_obs.fx"<<u.f_obs.fx<<"; f_obs.fy="<<u.f_obs.fy<<"; parent_index="<<parent_index<<std::endl;
+
+	person_companion_->robot_propagation( dt_, parent_index , u.f );
+	//std::cout <<" (2) propagate_vertex_person_companion_akp "<<std::endl;
+	//check if the propagation is valid
+	bool collision_check = check_collision_person_companion_akp( person_companion_->get_planning_trajectory()->back(), parent_index );
+
+	if(collision_check){
+	//	std::cout <<" (IN propagate_vertex_person_companion_akp) "<<std::endl;
+	//	std::cout << " (propagate_vertex) collision_check=" << collision_check <<" dt_="<< dt_<<"; parent_index="<<parent_index<<  std::endl;
+	//	person_companion_->get_planning_trajectory()->back().print();
+	}
+
+
+	// vertixes plotting
+		//std::cout << robot_->get_robot_planning_trajectory()->back().x << " , " << robot_->get_robot_planning_trajectory()->back().y <<  std::endl;
+	//std::cout <<" (3) propagate_vertex_person_companion_akp "<<std::endl;
+		// Nearby people propagation and cost ---------------------------------------------------------------------
+		SpointV_cov robot_point;
+		for( Cperson_abstract* iit: nearby_person_list_ )
+		{
+			//std::cout <<" (3.1) propagate_vertex_person_companion_akp "<<std::endl;
+			// 1 precalculation: if really close to the robot, then a complete propagation is done, otherwise
+			// the correspondant Spose is sought.
+			if ( !iit->is_needed_to_propagate_person_for_planning(  parent_index, person_companion_->get_robot_planning_trajectory()->back() , index_to_copy ) )
+			{
+				//std::cout <<" (3.2) propagate_vertex_person_companion_akp "<<std::endl;
+				//update parent index correspondent vector TODO has to be an easiest way to not copy this
+				iit->planning_propagation_copy( index_to_copy );
+				robot_point =  person_companion_->get_planning_trajectory()->back();
+				virtual_force_robot =  iit->force( robot_point , get_sfm_int_params(iit,person_companion_),
+									&(iit->get_planning_trajectory()->at(parent_index) ) );
+				//std::cout <<" (3.3) propagate_vertex_person_companion_akp "<<std::endl;
+			}
+			else
+			{
+				//std::cout <<" (3.4) propagate_vertex_person_companion_akp "<<std::endl;
+				// 2 time step propagation
+				virtual_force_goal = iit->force_goal( iit->get_best_dest() , get_sfm_params(person_companion_),
+						&(iit->get_planning_trajectory()->at(parent_index) )  );
+				virtual_force_int_person = force_persons_int_planning_virtual( iit, parent_index );
+				if( read_force_map_success_ )
+					virtual_force_obstacle = get_force_map( iit->get_planning_trajectory()->at(parent_index).x,
+							iit->get_planning_trajectory()->at(parent_index).y ) * 0.5;
+
+			    //obstacles due to laser scans. for real environments has priority over map forces
+				if(read_laser_obstacle_success_)
+					virtual_force_obstacle = force_objects_laser_int_planning_virtual( iit , parent_index,16.0);
+				robot_point =  person_companion_->get_planning_trajectory()->back();
+				virtual_force_robot =  iit->force( robot_point , get_sfm_int_params(iit,person_companion_),
+						&(iit->get_planning_trajectory()->at(parent_index) ) );
+				iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+				iit->planning_propagation(dt_, iit->get_force_person() , parent_index);
+				//std::cout <<" (3.5) propagate_vertex_person_companion_akp "<<std::endl;
+			}
+			//calculate the interaction forces cost TO BE DEPRECATED
+			//dr = (Spoint)iit->get_planning_trajectory()->back() -
+			//		(Spoint)iit->get_planning_trajectory()->at(parent_index);
+			//work += fabs(virtual_force_robot * dr);
+
+		}
+
+		//std::cout <<" (4) propagate_vertex_person_companion_akp "<<std::endl;
+
+	return collision_check;
+}
+
+
+void Cplan_local_nav_person_companion::calculate_cost_person_companion_akp( unsigned int parent_index , Sedge_tree_pcomp u , Cperson_abstract::companion_reactive reactive)
+{
+	//for each propagation, a cost is calculated
+	//robot cost
+	Spoint dr;
+	double cost(0.0);
+
+	//dr = (Spoint) robot_->get_robot_planning_trajectory()->back() -
+	//		(Spoint) robot_->get_robot_planning_trajectory()->at(parent_index);
+	//work = fabs(u.f_goal * dr);
+	cost = u.f_goal.module2(cost_angular_);
+	cost_robot_.push_back( cost_robot_.at(parent_index) + cost);
+	// Obstacles cost -----------------------------------------------------------------------------------------
+	// If collision is detected, this function should return a high value,
+	// but it does not distinguish if a collision took place, only an abnormally huge value
+	//work = fabs(u.f_obs * dr );
+	//cost_obstacles_.push_back( cost_obstacles_.at(parent_index) + work );
+
+	//alternative way: max force module
+	cost = u.f_obs.module2();
+	//if ( cost_obstacles_.at(parent_index) > work )
+		//work = cost_obstacles_.at(parent_index);
+	cost_obstacles_.push_back( cost_obstacles_.at(parent_index) + cost );
+
+	//people cost --------------------------------------------------------------------------------------------
+	Sforce f,f_int,f2;
+	cost = 0;
+
+	for( Cperson_abstract* iit: nearby_person_list_  )
+	{
+		switch( pr_force_mode_ )
+		{
+		case 0: //deterministic force, classical definition
+			if((iit->get_id()!=id_person_companion_)&&(reactive!=Cperson_abstract::Akp_planning)){
+				f = iit->force_sphe(person_companion_->get_planning_trajectory()->back() , get_sfm_int_params(iit,person_companion_) , &(iit->get_planning_trajectory()->at( parent_index )) ,reactive);
+			}else{
+				//std::cout << " IN :calculate_cost, else: Akp_planning, salta person companion " <<  std::endl;
+			}
+			break;
+		case 1: //probabilistic force, sampling around the elipsoid
+			f = iit->force_sphe_prob( person_companion_->get_planning_trajectory()->back(), get_sfm_int_params(iit,person_companion_),&(iit->get_planning_trajectory()->at( parent_index )) );
+			break;
+		case 2: //probabilistic force, mahalanobis distance
+			f = iit->force_sphe_mahalanobis( person_companion_->get_planning_trajectory()->back(), get_sfm_int_params(iit,person_companion_), &(iit->get_planning_trajectory()->at( parent_index )));
+			break;
+		case 3: //probabilistic force, worst case scenario: covaraince ellipsoid nearer to the center point
+			f = iit->force_sphe_worst( person_companion_->get_planning_trajectory()->back(), get_sfm_int_params(iit,person_companion_), &(iit->get_planning_trajectory()->at( parent_index )));
+			break;
+		}
+		f_int += f;
+		cost += f.module2();
+	}
+
+	//if ( cost_int_forces_.at(parent_index) > work )
+		//work = cost_int_forces_.at(parent_index);
+	cost_int_forces_.push_back( cost_int_forces_.at(parent_index) + cost );
+
+	//distance cost --------------------------------------------------------------------------------------------
+	cost = person_companion_->get_planning_trajectory()->back().distance2(local_goal_);
+	cost_distance_.push_back( cost_distance_.at(parent_index) + cost );
+	double o = person_companion_->get_planning_trajectory()->back().angle_heading_point( local_goal_ );
+	cost_orientation_.push_back( cost_orientation_.at(parent_index) + o*o );
+
+    // Local minima cost  --------------------------------------------------------------------------------------------------------- TOBEDEPRECATED
+    // identify possible local minima problems abs ( sum f ) != sum( abs f) Initial calculation
+	//double sum_abs = u.f_goal.module2() + u.f_people.module2() + u.f_obs.module2();
+	//double sum = (u.f_goal + u.f_people + u.f_obs).module2();
+	//cost_local_minima_.push_back( cost_local_minima_.at(parent_index) - sum/sum_abs);//summation of all local minima indicators throughout the path
+
+
+	nodes_in_branch_.push_back( nodes_in_branch_.at(parent_index) + 1.0 );
+
+	// Simililarities wrt previous path --------------------------------------------------------------------------
+	//this function is properly calculated using the COMPLETE path. see 8) in planning()
+
+	if(reactive==Cperson_abstract::Akp_planning){
+		Crobot* robot_act=person_companion_;
+		calculate_companion_cost_node(parent_index, robot_act); //funcion (ely) calculate cost companion. TODO: descomentar cuando el robot vaya bien!
+	}
+
+}
+
+
+double Cplan_local_nav_person_companion::cost_to_go_person_companion_akp( const Spoint& random_goal, unsigned int i , Cperson_abstract::companion_reactive reactive)
+{
+	double result;
+	double d, t, o, dx, dy;
+	//metrics to evaluate the nearest vertex
+	switch( distance_mode_ )
+	{
+		//distance to random goal ----------------------- Euclidean distance: TO BE DEPRECATED   --------------------
+		case Cplan_local_nav_person_companion::Euclidean  :
+			//1- calculate distance normalized to max distance
+			d = person_companion_->get_robot_planning_trajectory()->at(i).distance( random_goal )
+					/ workspace_radii_ * cost_parameters_[0];
+			//2- orientation
+			dx = random_goal.x - person_companion_->get_robot_planning_trajectory()->at(i).x;
+			dy = random_goal.y - person_companion_->get_robot_planning_trajectory()->at(i).y;
+			o = fabs(diffangle( person_companion_->get_robot_planning_trajectory()->at(i).theta ,
+					atan2( dy, dx )  )) * cost_parameters_[1];
+
+			//3- accumulated robot work cost_parameters_[2] DEPRECATED
+			//wr = cost_robot_[i]*cost_parameters_[2];
+
+			//4- accumulated persons work cost_parameters_[3] DEPRECATED
+			//wp = cost_int_forces_[i]*cost_parameters_[3];
+
+			//5- time not allowed being outside the time horizon
+			t = (person_companion_->get_robot_planning_trajectory()->at(i).time_stamp -
+					now_ ) / horizon_time_ ;
+			//TODO other costs! bstacles + Local min
+			if ( t > 1.0 ) t = 10000.0; //discard the vertex
+			else t *= cost_parameters_[4];
+
+			//6 - obstacles
+			//wo = cost_obstacles_[i]*cost_parameters_[5];
+			//- Local minima indicator
+			//lm = cost_parameters_[7]*cost_local_minima_[i]/nodes_in_branch_[i];;
+			//check for min
+			result = d+o+t;
+			break;
+
+		//cost-to-go linear normalization to random goal  ------------------------------------------------------
+		  case  Cplan_local_nav_person_companion::Cost2go_norm :
+		//cost-to-go erf normalization to random goal ----------------------------------------------------------
+		  case  Cplan_local_nav_person_companion::Cost2go_erf :
+		  {
+			  // Gonzalo entra en este de distancia. !!!!!!!!!!!!!!!
+			 // std::cout << "cost to go (1)"<<  std::endl;
+			SpointV robot = person_companion_->get_planning_trajectory()->at(i);
+			Sforce f_goal, f_int, f_obs, f, f_tot;
+			//Sforce f_persongoal; // companion (ely) fuerza hacia la persona para el companion.
+			double look_time(0.0),cost_robot(0.0),cost_distance(0.0), cost_int(0.0), cost_obs(0.0),cost_orientation(0.0),o;//cost_companion(0.0);
+			unsigned int prediction_index(2),max_index_prediction(0);
+			//assert to avoid degenerated cases when the path does not look up to t_h due to being near the goal
+			//  std::cout << "cost to go (2)"<<  std::endl;
+			if ( person_companion_->get_planning_trajectory()->size() <  horizon_time_index_)
+			{
+				max_index_prediction = person_companion_->get_planning_trajectory()->size() -1;
+			}
+			else
+			{
+				max_index_prediction = horizon_time_index_;
+			}
+			 // std::cout << "cost to go (3)"<<  std::endl;
+			//calculates current prediction time index [0,horizon] and distance to random goal of previous path, TODO not working well
+			while(  look_time < robot.time_stamp  && prediction_index < max_index_prediction )
+			{
+				look_time = person_companion_->get_planning_trajectory()->at(prediction_index).time_stamp;
+				cost_distance += person_companion_->get_planning_trajectory()->at(prediction_index).distance2( random_goal );//previous distance to get to the goal
+				prediction_index += 2;
+			}
+			 // std::cout << "cost to go (4)"<<  std::endl;
+			prediction_index -= 2;
+			if ( look_time - now_ > horizon_time_ || prediction_index >=  horizon_time_index_ )
+				return 1e10;
+
+			 // std::cout << "cost to go (5)"<<  std::endl;
+			//std::cout << "entering  " <<  i << "  time = " << prediction_index <<  "  size = " << robot_->get_planning_trajectory()->size() << std::endl;
+			cost_robot = cost_robot_[i]/2.0;//as we are using double time step and half propagations, the accumulated robot cost
+			cost_obs = cost_obstacles_[i]/2.0;
+			cost_int = cost_int_forces_[i]/2.0;
+			//cost_companion = cost_companion_[i]/2.0;
+			while ( prediction_index < horizon_time_index_  )
+			{
+				 //std::cout << "cost to go (5.1) nearby_person_list_.size()="<<nearby_person_list_.size()<<  std::endl;
+				// cost due to interacting forces  (De aquí, habria que reducir la que te proboca la persona a la que acompañas)
+				for( Cperson_abstract* iit: nearby_person_list_  )
+				{
+					 //std::cout << "cost to go (5.1) iit->get_id()="<<iit->get_id()<<  std::endl;
+					/*std::cout << "cost to go (5.1) iit->get_id()="<<iit->get_id()<<"; id_person_companion_="<<id_person_companion_<<  std::endl;
+					std::cout << "cost to go (5.1) reactive="<<reactive<<"; Cperson_abstract::Akp_planning="<<Cperson_abstract::Akp_planning<<  std::endl;
+					std::cout << "cost to go (5.1) iit->x="<<iit->get_current_pointV().x<<"; iit->y="<<iit->get_current_pointV().y<<  std::endl;
+					std::cout << "cost to go (5.1) robot->x="<<robot.x<<"; robot->y="<<robot.y<<  std::endl;
+					std::cout << "cost to go (5.1) iit->get_prediction_trajectory().size="<<iit->get_prediction_trajectory()->size()<<"; empty="<<iit->get_prediction_trajectory()->empty()<<"; prediction_index="<<prediction_index<<  std::endl;
+					std::cout <<"; pred_traj.x="<<iit->get_prediction_trajectory()->at( prediction_index ).x<<"; pred_traj.y="<<iit->get_prediction_trajectory()->at( prediction_index ).y<<  std::endl;
+					 */
+
+					if(bool_tes_prop2){
+						std::cout <<"; id="<<iit->get_id()<<"; traj_size=="<<iit->get_prediction_trajectory()->size()<<  std::endl;
+					}
+
+
+					if(iit->get_prediction_trajectory()->size()>prediction_index){
+					if ( (iit->get_prediction_trajectory()->at( prediction_index ).distance2(robot) < 16.0 ) && (iit->get_id()!=id_person_companion_) )//<4m...to speed up, a more strict threshold is used
+					{ // para la person companion en el akp no hay fuerzas repulsivas contra ella.
+						//TODO aqui algo no va bien, sale demasiado pequeña esta cantidad: error o propagacion fatal
+						if((iit->get_id()!=id_person_companion_)&&(reactive!=Cperson_abstract::Akp_planning)){
+							//std::cout << " IN :cost_to_go, if: Akp_planning, differente Akp_planning " <<  std::endl;
+							f = iit->force_sphe(robot , get_sfm_int_params(iit,person_companion_) , &iit->get_prediction_trajectory()->at( prediction_index ) ,reactive);
+							//std::cout<<";(id_person_tenida_en_cuenta_cost_to_go_planning-> iit->get_id()=" << iit->get_id()<<  std::endl;
+							//std::cout <<  f.module2() << " , " <<  std::endl;
+							f_int += f;
+							cost_int += f.module2();
+						}else{ // caso person_companion con el robot.
+							//std::cout << " IN :cost_to_go, else: Akp_planning, salta person companion " <<  std::endl;
+							Spoint robot2=person_companion_->get_planning_trajectory()->at(i);
+							f = iit->force_sphe(robot2 , get_sfm_int_params(iit,person_companion_) , &iit->get_prediction_trajectory()->at( prediction_index ) ,reactive);
+							//f_int += f; // TODO: pensar si se incluye en el planing la influencia del robot en la person_companion o no...
+							//cost_int += f.module2();
+
+						}
+					}
+					}
+				}
+				 //std::cout << "cost to go (5.1.2)"<<  std::endl;
+				// TEST: person_companion include force with the tibi=robot
+				/*Spoint robot_tibi_point=Spoint(robot_->get_current_pointV().x,robot_->get_current_pointV().y,robot_->get_current_pointV().time_stamp);
+				Sforce f_person_comp_to_tibi=person_companion_->force_sphe(robot_tibi_point,get_sfm_int_params(person_companion_,robot_),&robot);
+				//f_person_comp_to_tibi.fx=f_person_comp_to_tibi.fx/2;
+				//f_person_comp_to_tibi.fy=f_person_comp_to_tibi.fy/2;
+				f_int +=f_person_comp_to_tibi;*/
+
+				//std::cout << " robot_tibi_point.x="<<robot_tibi_point.x<<"robot_tibi_point.y="<<robot_tibi_point.y<<"f_person_comp_to_tibi.fx= "<<f_person_comp_to_tibi.fx<<"; f_person_comp_to_tibi.fy="<<f_person_comp_to_tibi.fy <<  std::endl;
+				// std::cout << "cost to go (5.2)"<<  std::endl;
+				// potential cost to go destination
+				f_goal = person_companion_->force_goal( Sdestination(0,random_goal.x,random_goal.y), get_sfm_params(person_companion_), &robot );
+				cost_robot += f_goal.module2(cost_angular_);
+
+				//cost due to obstacles
+				/*for( Spoint iit : laser_obstacle_list_)
+				{
+					if ( iit.distance2(robot) < 9.0 )
+					{
+						f = robot_->force_sphe( iit, get_sfm_int_params(robot_), &robot );
+						f_obs += f;
+						cost_obs += f.module2();
+					}
+				}*/
+				// std::cout << "cost to go (5.3)"<<  std::endl;
+				// REtocado para reducir fuerza muchos obstaculos juntos.
+				for( Spoint iit : laser_obstacle_list_)
+				{
+					//if ( iit.distance2(robot) < 9.0 )
+					//if ( iit.distance(robot) < (max_distance_to_obstacles_detected_+person_robot_actual_real_distance_/2) )
+					//{
+						f = person_companion_->force_sphe( iit, get_sfm_int_params(person_companion_), &robot );
+						f_obs += f;
+						//cost_obs += f.module2();
+					//}
+				}
+
+				// std::cout << "cost to go (5.4)"<<  std::endl;
+				// INICION Limitar fuerza obstaculos cuando hay muchos solapados
+				double fobos_Xmod=sqrt(f_obs.fx*f_obs.fx);
+				double fobos_Ymod=sqrt(f_obs.fy*f_obs.fy);
+				double signo_x;
+				double signo_y;
+				if (f_obs.fx > 0){
+					signo_x=1;
+				}else{
+					signo_x=-1;
+				}
+				if (f_obs.fy > 0){
+					signo_y=1;
+				}else{
+					signo_y=-1;
+				}
+				// std::cout << "cost to go (5.5)"<<  std::endl;
+				if((fobos_Xmod>f_obst_max_x_)||(fobos_Ymod>f_obst_max_y_)){
+					f_obs.fx=signo_x*f_obst_max_x_;
+					f_obs.fy=signo_y*f_obst_max_y_;
+				}
+				// FIN Limitar fuerza obstaculos cuando hay muchos solapados
+
+				// robot propagation  (TODO: (ELY-companion)=> aqui tendria que add una fuerza que acerque al robot hacia la persona.
+				//f_tot=f_goal+f_obs+f_int;
+				f_tot=f_goal+f_obs+f_int;//+f_persongoal; // TODO, incluir la f_persongoal.
+				robot = robot.propagate( dt_*2, f_tot, robot_->get_desired_velocity() );//at double timestep to speed up calculations
+				cost_distance += robot.distance2(random_goal);
+				o = robot.angle_heading_point( random_goal );
+				cost_orientation += o*o;
+				prediction_index += 2;
+				// std::cout << "cost to go (5.6)"<<  std::endl;
+
+			}
+
+			 // std::cout << "cost to go (6)"<<  std::endl;
+			if( distance_mode_ == Cplan_local_nav_person_companion::Cost2go_erf )
+			{
+				//std::cout << "%cost_distance, cost_orientation, cost_robot, cost_int, cost_obs" << endl;
+				//std::cout  << cost_distance << " , " << cost_orientation << " , " << cost_robot << " , " << cost_int << " , " <<  cost_obs << std::endl;
+				result = cost_parameters_[0]*erf((cost_distance - mean_cost_distance_) / std_cost_distance_) +
+						cost_parameters_[1]*erf((cost_orientation - mean_cost_orientation_) / std_cost_orientation_) +
+						cost_parameters_[2]*erf((cost_robot - mean_cost_robot_) / std_cost_robot_ ) +
+						cost_parameters_[3]*erf((cost_int - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+						cost_parameters_[5]*erf((cost_obs - mean_cost_obstacles_) / std_cost_obstacles_);
+
+				/*result = 0.5*(cost_parameters_[0]*erf((cost_distance - mean_cost_distance_) / std_cost_distance_) +
+						 cost_parameters_[1]*erf((cost_orientation - mean_cost_orientation_) / std_cost_orientation_) +
+						 cost_parameters_[2]*erf((cost_robot - mean_cost_robot_) / std_cost_robot_ ) +
+						 cost_parameters_[3]*erf((cost_int - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+						 cost_parameters_[5]*erf((cost_obs - mean_cost_obstacles_) / std_cost_obstacles_))+0.5*erf((cost_companion - mean_cost_companion_) / std_cost_companion_);
+			*/
+			}
+			else
+			{
+			  //use the mean as the utopia point a std as the difference f_max - utopia, calculated previously
+			result = cost_parameters_[0]*((cost_distance - mean_cost_distance_) / std_cost_distance_) +
+						cost_parameters_[1]*((cost_orientation - mean_cost_orientation_) / std_cost_orientation_) +
+						cost_parameters_[2]*((cost_robot - mean_cost_robot_) / std_cost_robot_ ) +
+						cost_parameters_[3]*((cost_int - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+						cost_parameters_[5]*((cost_obs - mean_cost_obstacles_) / std_cost_obstacles_);
+			}
+			//  std::cout << "cost to go (7)"<<  std::endl;
+
+
+
+			break;
+		  }
+		  //cost-to-go to a random goal only considering steering forces and collision ------------------------------------------------------
+		  case  Cplan_local_nav_person_companion::Cost2go_raw :
+		  default:
+		  {
+			SpointV robot = person_companion_->get_planning_trajectory()->at(i);
+			Sforce f_goal;
+			double look_time(0.0), cost_robot(0.0);
+			unsigned int prediction_index(2),max_index_prediction(0);
+			//assert to avoid degenerated cases when the path does not look up to t_h due to being near the goal
+			if ( person_companion_->get_planning_trajectory()->size() <  horizon_time_index_)
+			{
+				max_index_prediction = person_companion_->get_planning_trajectory()->size() -1;
+			}
+			else
+			{
+				max_index_prediction = horizon_time_index_;
+			}
+			//calculates current prediction time index [0,horizon] and distance to random goal of previous path, TODO not working well
+			while(  look_time < robot.time_stamp  && prediction_index < max_index_prediction )
+			{
+				look_time = person_companion_->get_planning_trajectory()->at(prediction_index).time_stamp;
+				prediction_index += 2;
+			}
+			prediction_index -= 2;
+			if ( look_time - now_ > horizon_time_ || prediction_index >=  horizon_time_index_ )
+				return 1e10;
+			//std::cout << "entering  " <<  i << "  time = " << prediction_index <<  "  size = " << robot_->get_planning_trajectory()->size() << std::endl;
+			cost_robot = cost_robot_[i]/2.0;//as we are using double time step and half propagations, the accumulated robot cost
+			while ( prediction_index < horizon_time_index_  )
+			{
+				// potential cost to go destination
+				f_goal = person_companion_->force_goal( Sdestination(0,random_goal.x,random_goal.y), get_sfm_params(person_companion_), &robot );
+				cost_robot += f_goal.module2(cost_angular_);//fy cost 0.5
+
+				// robot propagation
+				robot = robot.propagate( dt_*2, f_goal, person_companion_->get_desired_velocity() );//at double timestep to speed up calculations
+				prediction_index += 2;
+
+				//check for collisions, only with obstacles
+				if (  check_collision_person_companion_akp( robot ) )
+					return 1e10;
+			}
+			result = cost_robot;
+
+			break;
+		  }
+		}//end of switch
+	//std::cout<<" END cost to go!" << std::endl;
+
+	return result;
+}
+
+
+unsigned int Cplan_local_nav_person_companion::global_min_cost_index( Crobot* robot_act , Cperson_abstract::companion_reactive reactive )
+{
+//std::cout<<" INI function: global_min_cost_index()" << std::endl;
+	double cost, min_cost(1e10);
+	unsigned int min_cost_index(0);
+	double d, o, dx, dy;
+	preprocess_global_parameters(robot_act);//depending on mode, needs a different preprocessing of data
+
+	we_have_cost_companion_=false;
+
+	switch( global_mode_ )
+	{
+
+	  //distance to local goal, end of branch ----------------------- Euclidean distance: TO BE DEPRECATED
+	  case Cplan_local_nav_person_companion::Scalarization :
+		  std::cout << "   Scalarization" << std::endl;
+		for( unsigned int i : end_of_branches_index_ )
+		{
+			d = robot_act->get_robot_planning_trajectory()->at(i).distance( local_goal_ );
+			dx = goal_.x - robot_act->get_robot_planning_trajectory()->at(i).x;
+			dy = goal_.y - robot_act->get_robot_planning_trajectory()->at(i).y;
+			o = fabs(diffangle( robot_act->get_robot_planning_trajectory()->at(i).theta ,
+				atan2( dy, dx )  ));
+			cost = cost_parameters_[0]*d +
+				cost_parameters_[1]*o +
+				cost_parameters_[2]*cost_robot_[i] +
+				cost_parameters_[3]*cost_int_forces_[i]/nodes_in_branch_[i] +
+				cost_parameters_[5]*cost_obstacles_[i]/nodes_in_branch_[i] +
+				cost_parameters_[6]*cost_past_traj_[i];
+
+			if(debug_antes_subgoals_entre_AKP_goals_){
+				std::cout<<"(CASE) Cplan_local_nav_person_companion::Scalarization"<< std::endl;
+				std::cout<<"i ="<<i<< std::endl;
+				//std::cout<<"(GONZALO) cost ="<<cost<< std::endl;
+			}
+
+			if(cost_companion_[i]!=0){
+				cost =(0.9)*cost+(0.1)*cost_companion_[i];
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					std::cout<<"(9/10)*cost="<<(0.9)*cost<< std::endl;
+					std::cout<<"(1/10)*cost_companion_[i]="<<(0.1)*cost_companion_[i]<< std::endl;
+					std::cout<<"cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+					std::cout<<"cost="<<cost<< std::endl;
+				}
+			}else{
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					std::cout<<"NO HAY cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+				}
+			}
+
+
+			if ( cost < min_cost)
+			{
+				min_cost = cost;
+				min_cost_index = i;
+			}
+			/*std::cout //<< "cost values (goal,ori,rob,int,obs,past,lm) = ("
+				<< d <<
+				" , " << o <<
+				" , " << cost_int_forces_[i]/nodes_in_branch_[i] <<
+				" , " << cost_obstacles_[i]/nodes_in_branch_[i] <<
+				" , " << cost_past_traj_[i] <<
+				" , " << cost_local_minima_[i]/nodes_in_branch_[i] << std::endl;*/
+		}
+		break;
+		// global cost, estimation and normalization ---------------------------------------------------------------
+	  case Cplan_local_nav_person_companion::Weighted_sum_erf :
+		  std::cout << "   Weighted_sum_erf" << std::endl;
+		for( unsigned int i : end_of_branches_index_ )
+		{
+			cost = cost_parameters_[0]*erf((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_) +
+				cost_parameters_[1]*erf((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_) +
+				cost_parameters_[2]*erf((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ ) +
+				cost_parameters_[3]*erf((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+				cost_parameters_[5]*erf((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_) +
+				cost_parameters_[6]*erf((cost_past_traj_[i] - mean_cost_past_traj_) / std_cost_past_traj_);
+
+			if(debug_antes_subgoals_entre_AKP_goals_){
+				std::cout<<"(CASE) Cplan_local_nav_person_companion::Weighted_sum_erf "<< std::endl;
+				std::cout<<"i ="<<i<< std::endl;
+				std::cout<<"(GONZALO) cost ="<<cost<< std::endl;
+			}
+
+			if(cost_companion_[i]!=0){
+				cost =(0.9)*cost+(0.1)*cost_companion_[i];
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					std::cout<<"cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+					std::cout<<"cost="<<cost<< std::endl;
+				}
+			}else{
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					std::cout<<"NO HAY cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+				}
+			}
+
+			if ( cost < min_cost)
+			{
+				min_cost = cost;
+				min_cost_index = i;
+			}
+			/*std::cout << i << " ,"
+			 	<< erf((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_) << " , "
+				<< erf((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_) << " , "
+				<< erf((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ ) << " , "
+				<< erf((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ ) << " , "
+				<< erf((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_) << std::endl;*/
+		}
+		break;
+	  case  Cplan_local_nav_person_companion::Weighted_sum_norm :
+
+		  std::cout << "   Weighted_sum_norm" << std::endl;
+		  // mean_cost is the utopia cost corresponding to a free path and std_cost is the max_cost - utopia, according to MMO clasical approaches
+	    for( unsigned int i : end_of_branches_index_ )
+	    {
+			cost = cost_parameters_[0]*((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_) +
+					cost_parameters_[1]*((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_) +
+					cost_parameters_[2]*((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ ) +
+					cost_parameters_[3]*((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+					cost_parameters_[5]*((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_) +
+					cost_parameters_[6]*((cost_past_traj_[i] - mean_cost_past_traj_) / std_cost_past_traj_);
+
+			if(debug_antes_subgoals_entre_AKP_goals_){
+				std::cout<<"(CASE) Cplan_local_nav_person_companion::Weighted_sum_norm "<< std::endl;
+				std::cout<<"i ="<<i<< std::endl;
+				std::cout<<"(GONZALO) cost ="<<cost<< std::endl;
+			}
+
+			if(cost_companion_[i]!=0){
+				cost =(0.9)*cost+(0.1)*cost_companion_[i];
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					std::cout<<"cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+					std::cout<<"cost="<<cost<< std::endl;
+				}
+			}else{
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					std::cout<<"NO HAY cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+				}
+			}
+
+			if ( cost < min_cost)
+			{
+				min_cost = cost;
+				min_cost_index = i;
+			}
+			/*std::cout << i << " , "
+				<<	((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_) << " , "
+				<< ((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_) << " , "
+				<< ((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ ) << " , "
+				<< ((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ ) << " , "
+				<< ((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_) << std::endl;*/
+	    }
+		break;
+	  case  Cplan_local_nav_person_companion::MO_erf :
+	  case  Cplan_local_nav_person_companion::MO_norm :
+	  {
+		  // Entra en esta!
+		 // std::cout << "[Cplan_local_nav_person_companion::MO_norm/MO_erf]" << std::endl;
+		  //first approach: push into a set of best trajectories
+		  nondominated_plan_vertex_index_.clear();
+		  nondominated_end_of_plan_vertex_index_.clear();
+		  unsigned int nondominated_branch_index, cont;
+		  std::vector<SsavePath_cost_and_values> non_domianted_path_and_act_costs_;
+		  non_domianted_path_and_act_costs_.reserve(nondominated_multicosts_.size());
+		 non_domianted_path_and_act_costs_.resize(nondominated_multicosts_.size());
+
+
+		  const std::vector<Spose>* plans_act = robot_act->get_robot_planning_trajectory();
+
+			//std::cout << "[Cplan_local_nav_person_companion::MO_norm/MO_erf] plans_act.empty()="<<plans_act->empty() <<"; cont = (horizon_time_index_/2)*2="<<(horizon_time_index_/2)*2<<"; nondominated_multicosts_.size()="<<nondominated_multicosts_.size()<< std::endl;
+
+		  unsigned int iter=0;
+
+		  for (  Smulticost_pcom m : nondominated_multicosts_)
+		  {
+		    nondominated_branch_index = m.id;
+		    cont = (horizon_time_index_/2)*2;//to avoid plotting all solutions, we will only plot the nondominated set, even number
+
+		    //print nondominated and normalized costs
+		    //m.print_ml();
+		    //print nondominated raw costs
+			/*std::cout << nondominated_branch_index << " , "
+				<< cost_distance_[nondominated_branch_index]  << " , "
+				<< cost_orientation_[nondominated_branch_index]  << " , "
+				<< cost_robot_[nondominated_branch_index]  << " , "
+				<< cost_int_forces_[nondominated_branch_index]  << " , "
+				<< cost_obstacles_[nondominated_branch_index]  << std::endl;*/
+		    //std::cout << " [Cplan_local_nav_person_companion::MO_norm/MO_erf] ANTES nondominated_end_of_plan_vertex_index_.push_back( nondominated_branch_index );" << std::endl;
+			nondominated_end_of_plan_vertex_index_.push_back( nondominated_branch_index );//only end of branches to plot the branch id
+			//std::cout << " [end of branch index] nondominated_branch_index="<<nondominated_branch_index<< std::endl;
+			non_domianted_path_and_act_costs_[iter].set_end_id_path(nondominated_branch_index);
+
+			//std::cout<<"non_domianted_path_and_act_costs_ => nondominated_branch_index="<<nondominated_branch_index<< std::endl;
+
+			std::vector<unsigned int> act_all_ids_path_positions;
+			std::vector<Spoint> act_path_positions;
+			std::vector<std::vector<double>> iter_vect_costst_act;
+			do
+			{
+				nondominated_plan_vertex_index_.push_back( nondominated_branch_index);
+				act_all_ids_path_positions.push_back( nondominated_branch_index);
+				act_path_positions.push_back(plans_act->at(nondominated_branch_index));
+
+				std::vector<double> vect_costst_act;
+				vect_costst_act.push_back(cost_parameters_[0]*erf((cost_distance_[nondominated_branch_index] - mean_cost_distance_) / std_cost_distance_));
+				vect_costst_act.push_back(cost_parameters_[1]*erf((cost_orientation_[nondominated_branch_index] - mean_cost_orientation_) / std_cost_orientation_));
+				vect_costst_act.push_back(cost_parameters_[2]*erf((cost_robot_[nondominated_branch_index] - mean_cost_robot_) / std_cost_robot_ ));
+				vect_costst_act.push_back(cost_parameters_[3]*erf((cost_int_forces_[nondominated_branch_index] - mean_cost_int_forces_) / std_cost_int_forces_ ));
+				vect_costst_act.push_back(cost_parameters_[5]*erf((cost_obstacles_[nondominated_branch_index] - mean_cost_obstacles_) / std_cost_obstacles_));
+				vect_costst_act.push_back(erf((cost_companion_[nondominated_branch_index] - mean_cost_companion_) / std_cost_companion_));
+				vect_costst_act.push_back(cost_parameters_[6]*erf((cost_past_traj_[nondominated_branch_index] - mean_cost_past_traj_) / std_cost_past_traj_));
+				cost = cost_parameters_[0]*erf((cost_distance_[nondominated_branch_index] - mean_cost_distance_) / std_cost_distance_) +
+										cost_parameters_[1]*erf((cost_orientation_[nondominated_branch_index] - mean_cost_orientation_) / std_cost_orientation_) +
+										cost_parameters_[2]*erf((cost_robot_[nondominated_branch_index] - mean_cost_robot_) / std_cost_robot_ ) +
+										cost_parameters_[3]*erf((cost_int_forces_[nondominated_branch_index] - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+										cost_parameters_[5]*erf((cost_obstacles_[nondominated_branch_index] - mean_cost_obstacles_) / std_cost_obstacles_) +
+										cost_parameters_[6]*erf((cost_past_traj_[nondominated_branch_index] - mean_cost_past_traj_) / std_cost_past_traj_);
+				// TODO: ojo! Cost robot estaba quitado del coste final y creo que ha de ir!!!
+
+				double new_cost=cost;
+
+				//std::cout << "(ant) [nondominated_branch_index] new_cost="<<new_cost<<"; cost_companion="<< erf((cost_companion_[nondominated_branch_index] - mean_cost_companion_) / std_cost_companion_)<< std::endl;
+
+				if((cost_companion_[nondominated_branch_index]!=0)&&(reactive==Cperson_abstract::Akp_planning)){
+					//new_cost= (0.9)*cost+(0.1)*erf((cost_companion_[nondominated_branch_index] - mean_cost_companion_) / std_cost_companion_);
+
+						// caso side-by-side:
+					    we_have_cost_companion_=true;
+						new_cost= (0.9)*cost+(0.1)*erf((cost_companion_[nondominated_branch_index] - mean_cost_companion_) / std_cost_companion_);
+
+
+				}
+
+				//std::cout << "[nondominated_branch_index] new_cost="<<new_cost<<"; cost_companion="<< erf((cost_companion_[nondominated_branch_index] - mean_cost_companion_) / std_cost_companion_)<< std::endl;
+				cost=new_cost;
+
+				//std::cout << " [Cplan_local_nav_person_companion::MO_norm/MO_erf] new_cost="<<new_cost<< std::endl;
+				vect_costst_act.push_back(new_cost);
+				iter_vect_costst_act.push_back(vect_costst_act);
+				nondominated_branch_index = edge_[ nondominated_branch_index ].parent;
+				--cont;
+			}while( nondominated_branch_index > 0 && cont >= 1);
+
+			//std::cout<<"antes  positions + cost + iter ="<<iter_vect_costst_act.size()<< std::endl;
+
+			non_domianted_path_and_act_costs_[iter].set_total_costs_of_each_path_position(iter_vect_costst_act);
+			non_domianted_path_and_act_costs_[iter].set_all_ids_path_positions(act_all_ids_path_positions);
+			non_domianted_path_and_act_costs_[iter].set_path_positions(act_path_positions);
+
+			iter++;
+		  }
+
+		  if( global_mode_ == Cplan_local_nav_person_companion::MO_erf )
+		  {
+
+			  for( unsigned int i : nondominated_end_of_plan_vertex_index_)
+			  {
+					//std::cout<<"[end of branch index] i ="<<nondominated_end_of_plan_vertex_index_[i]<< std::endl;
+
+				cost = cost_parameters_[0]*erf((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_) +
+						cost_parameters_[1]*erf((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_) +
+						cost_parameters_[2]*erf((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ ) +
+						cost_parameters_[3]*erf((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+						cost_parameters_[5]*erf((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_) +
+						cost_parameters_[6]*erf((cost_past_traj_[i] - mean_cost_past_traj_) / std_cost_past_traj_);
+				if(debug_real_test_companion2_){
+					std::cout<<"[distance] cost_parameters_[0]="<<cost_parameters_[0]<<"; [orientation] cost_parameters_[1]="<<cost_parameters_[1]<<"; [robot control] cost_parameters_[2]="<<cost_parameters_[2]<<"; [persons] cost_parameters_[3]"<<cost_parameters_[3]<<"; [cost obstacles] cost_parameters_[5]"<<cost_parameters_[5]<< "; [coste trajectoria anterior] cost_parameters_[6]="<<cost_parameters_[6]<< std::endl;
+				}
+				//std::cout << "[i] d_cost="<<cost_parameters_[0]*erf((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_)<<"; or_cost="<<cost_parameters_[1]*erf((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_)<<"; traj_cost="<<cost_parameters_[6]*erf((cost_past_traj_[i] - mean_cost_past_traj_) / std_cost_past_traj_)<< std::endl;
+
+				if(debug_real_test_companion2_){
+					std::cout<<"[Cplan_local_nav_person_companion::MO_norm/MO_erf] i ="<<i<< std::endl;
+					std::cout<<"[Cplan_local_nav_person_companion::MO_norm/MO_erf] (GONZALO) cost ="<<cost<< std::endl;
+				}
+
+				double new_cost=cost;
+				//std::cout << "(ant) [i] new_cost="<<new_cost<<"; cost_companion="<< erf((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_)<< std::endl;
+
+				if((cost_companion_[i]!=0)&&(reactive==Cperson_abstract::Akp_planning)){
+
+					//if(!Zanlungo_model_){
+						// caso side-by-side:
+						we_have_cost_companion_=true;
+						new_cost= (0.9)*cost+(0.1)*erf((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_);
+					/*}else{
+						if((pointer_to_person_companion_->get_current_pointV().v()<0.2)&&(second_group_companion_person_obj_->get_current_pointV().v()<0.2)){ // si personas paradas, no tenemos companion cost.
+							// si no se mueven las persnas, no tenemos fuerza companion ni cost companion!
+						}else{
+							new_cost= (0.9)*cost+(0.1)*erf((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_);
+						}
+					}*/
+
+
+				  // NOTA: special values: erf(-0) = -0.00 ; erf(Inf) = 1.00 ;
+					// NOTA: erf() computes the error function of the argument. (Creo k en mi caso es solo el valor del coste y YA esta!!!
+					//std::cout<<"(9/10)*cost="<<(0.9)*cost<< std::endl;
+					//std::cout<<"(1/10)*cost_companion_[i]="<<(0.1)*cost_companion_[i]<< std::endl;
+//					std::cout<<"cost_companion_["<<i<<"]="<<cost_companion_[i]<<"; mean_cost_companion_="<<mean_cost_companion_<<";std_cost_companion_= "<<std_cost_companion_<< std::endl;
+					//std::cout<<"(companion) mean_cost_companion_="<<mean_cost_companion_<< std::endl;
+					//std::cout<<"(companion) std_cost_companion_="<<std_cost_companion_<< std::endl;
+					//std::cout<<"(companion) cost ="<<erf((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_)<< std::endl;
+
+					if(debug_real_test_companion2_){
+						std::cout<<" [Cplan_local_nav_person_companion::MO_norm/MO_erf] eliminado mi coste, momentaneamente. (if in) new_cost="<<new_cost<<"; (companion) cost ="<<erf((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_)<<" (Gonzalo cost)="<<cost<< std::endl;
+						std::cout<<"[Cplan_local_nav_person_companion::MO_norm/MO_erf] cost_companion_[i]="<<cost_companion_[i]<<"; mean_cost_companion_="<<mean_cost_companion_<<"std_cost_companion_="<<std_cost_companion_<< std::endl;
+					}
+
+				}else{
+					if(debug_real_test_companion2_){
+						std::cout<<"NO HAY cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+					}
+				}
+
+				//std::cout << "[i] new_cost="<<new_cost<<"; cost_companion="<< erf((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_)<< std::endl;
+
+				cost=new_cost;
+
+				if ( cost < min_cost)
+				{
+					min_cost = cost;
+					min_cost_index = i;
+					// To print results in matlab.
+					//std::cout << "[i] min_cost="<<min_cost<< std::endl;
+					robot_distance_cost_=erf((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_);
+					robot_orientation_cost_=erf((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_);
+					robot_control_cost_=erf((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ );
+					robot_other_person_cost_=erf((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ );
+					robot_obstacles_cost_=erf((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_);
+					robot_companion_cost_=erf((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_);
+					robot_total_cost_=cost;
+					robot_ant_traj_cost_=erf((cost_past_traj_[i] - mean_cost_past_traj_) / std_cost_past_traj_);
+
+				}
+			  }
+		  }
+		  else
+		  {
+			for( unsigned int i : nondominated_end_of_plan_vertex_index_ )
+			{
+				//std::cout<<"[end of branch index] i ="<<nondominated_end_of_plan_vertex_index_[i]<< std::endl;
+				cost = cost_parameters_[0]*((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_) +
+						cost_parameters_[1]*((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_) +
+						cost_parameters_[2]*((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ ) +
+						cost_parameters_[3]*((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+						cost_parameters_[5]*((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_)+
+						cost_parameters_[6]*((cost_past_traj_[i] - mean_cost_past_traj_) / std_cost_past_traj_);
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					std::cout<<"(CASE) Cplan_local_nav_person_companion::MO_norm  "<< std::endl;
+					std::cout<<"(CASE) else global_mode_ = Cplan_local_nav_person_companion::MO_erf "<< std::endl;
+					std::cout<<"i ="<<i<< std::endl;
+					std::cout<<"(GONZALO) cost ="<<cost<< std::endl;
+				}
+				//std::cout<<"; (ant) cost="<<cost<<"; cost_companion="<<(cost_companion_[i]-mean_cost_companion_)/std_cost_companion_<< std::endl;
+				if(cost_companion_[i]!=0){
+					//cost =(9/10)*cost+(1/10)*((cost_companion_[i]-mean_cost_companion_)/std_cost_companion_);
+					//if(!Zanlungo_model_){
+						// caso side-by-side:
+						 we_have_cost_companion_=true;
+						cost =(9/10)*cost+(1/10)*((cost_companion_[i]-mean_cost_companion_)/std_cost_companion_);
+					/*}else{
+							if((pointer_to_person_companion_->get_current_pointV().v()<0.2)&&(second_group_companion_person_obj_->get_current_pointV().v()<0.2)){ // si personas paradas, no tenemos companion cost.
+												// si no se mueven las persnas, no tenemos fuerza companion ni cost companion!
+							}else{
+								cost =(9/10)*cost+(1/10)*((cost_companion_[i]-mean_cost_companion_)/std_cost_companion_);
+							}
+				    }*/
+
+
+
+
+
+					if(debug_antes_subgoals_entre_AKP_goals_){
+						std::cout<<"(NEW) cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+						std::cout<<"(NEW) final_cost_companion_="<<(1/10)*((cost_companion_[i]-mean_cost_companion_)/std_cost_companion_)<< std::endl;
+						std::cout<<"(NEW)  cost="<<cost<< std::endl;
+					}
+				}else{
+					//if(debug_antes_subgoals_entre_AKP_goals_){
+						std::cout<<"NO HAY cost_companion_["<<i<<"]="<<cost_companion_[i]<< std::endl;
+					//}
+				}
+
+				//std::cout<<"; cost="<<cost<<"; cost_companion="<<(cost_companion_[i]-mean_cost_companion_)/std_cost_companion_<< std::endl;
+
+				if ( cost < min_cost)
+				{	if(debug_real_test_companion_){
+						std::cout<<"Entro en if(cost < min_cost)"<< std::endl;
+					}
+					min_cost = cost;
+					min_cost_index = i;
+
+					robot_distance_cost_=((cost_distance_[i] - mean_cost_distance_) / std_cost_distance_);
+					robot_orientation_cost_=((cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_);
+					robot_control_cost_=((cost_robot_[i] - mean_cost_robot_) / std_cost_robot_ );
+					robot_other_person_cost_=((cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_ );
+					robot_obstacles_cost_=((cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_);
+					robot_companion_cost_=((cost_companion_[i] - mean_cost_companion_) / std_cost_companion_);
+					robot_total_cost_=cost;
+					robot_ant_traj_cost_=((cost_past_traj_[i] - mean_cost_past_traj_) / std_cost_past_traj_);
+
+				}
+		    }
+
+		  }
+		//  std::cout << "antes iter_act_multiple_paths_and_best_path_.set_nondominated_paths(non_domianted_path_and_act_costs_);"<<non_domianted_path_and_act_costs_.size()<< std::endl;
+		  iter_act_multiple_paths_and_best_path_.set_nondominated_paths(non_domianted_path_and_act_costs_);
+
+		break;
+	  }
+	}
+
+
+	/* INIT fill best_cost in struct  SsavePath_multiple_paths_and_best_path */
+		const std::vector<Spose>* plans_act2 = robot_act->get_robot_planning_trajectory();
+	 	 SsavePath_cost_and_values best_act_path_and_cost_;
+	 	//std::cout << "[Cplan_local_nav_person_companion::MO_norm/MO_erf] plans_act2.empty()="<<plans_act2->empty() << std::endl;
+		  //best_act_path_and_cost_();
+	 	 unsigned int act_best_branch_index=min_cost_index;
+		//nondominated_end_of_plan_vertex_index_.push_back( act_best_branch_index );//only end of branches to plot the branch id
+	 	best_act_path_and_cost_.set_end_id_path(act_best_branch_index);
+		std::vector<unsigned int> act_all_ids_path_positions;
+		std::vector<Spoint> act_path_positions;
+		std::vector<std::vector<double>> iter_vect_costst_act;
+
+		//std::cout << "end Best_BRANCH_INDEX="<<act_best_branch_index<< std::endl;
+
+		 if(!plans_act2->empty()){
+			//	std::cout << "NO plans_act2->empty()"<< std::endl;
+			do
+			{
+				//nondominated_plan_vertex_index_.push_back( act_best_branch_index);
+
+				act_all_ids_path_positions.push_back( act_best_branch_index);
+				act_path_positions.push_back(plans_act2->at(act_best_branch_index));
+
+				std::vector<double> vect_costst_act;
+
+				vect_costst_act.push_back(cost_parameters_[0]*erf((cost_distance_[act_best_branch_index] - mean_cost_distance_) / std_cost_distance_));
+				vect_costst_act.push_back(cost_parameters_[1]*erf((cost_orientation_[act_best_branch_index] - mean_cost_orientation_) / std_cost_orientation_));
+				vect_costst_act.push_back(cost_parameters_[2]*erf((cost_robot_[act_best_branch_index] - mean_cost_robot_) / std_cost_robot_ ));
+				vect_costst_act.push_back(cost_parameters_[3]*erf((cost_int_forces_[act_best_branch_index] - mean_cost_int_forces_) / std_cost_int_forces_ ));
+				vect_costst_act.push_back(cost_parameters_[5]*erf((cost_obstacles_[act_best_branch_index] - mean_cost_obstacles_) / std_cost_obstacles_));
+				vect_costst_act.push_back(erf((cost_companion_[act_best_branch_index] - mean_cost_companion_) / std_cost_companion_));
+				vect_costst_act.push_back(cost_parameters_[6]*erf((cost_past_traj_[act_best_branch_index] - mean_cost_past_traj_) / std_cost_past_traj_));
+				cost = cost_parameters_[0]*erf((cost_distance_[act_best_branch_index] - mean_cost_distance_) / std_cost_distance_) +
+												cost_parameters_[1]*erf((cost_orientation_[act_best_branch_index] - mean_cost_orientation_) / std_cost_orientation_) +
+												cost_parameters_[2]*erf((cost_robot_[act_best_branch_index] - mean_cost_robot_) / std_cost_robot_ ) +
+												cost_parameters_[3]*erf((cost_int_forces_[act_best_branch_index] - mean_cost_int_forces_) / std_cost_int_forces_ ) +
+												cost_parameters_[5]*erf((cost_obstacles_[act_best_branch_index] - mean_cost_obstacles_) / std_cost_obstacles_) +
+												cost_parameters_[6]*erf((cost_past_traj_[act_best_branch_index] - mean_cost_past_traj_) / std_cost_past_traj_);
+
+				double new_cost=cost;
+				//std::cout << "(ant) [act_best_branch_index] new_cost="<<new_cost<<"; cost_companion="<<erf((cost_companion_[act_best_branch_index] - mean_cost_companion_) / std_cost_companion_) << std::endl;
+
+				if((cost_companion_[act_best_branch_index]!=0)&&(reactive==Cperson_abstract::Akp_planning)){
+					//new_cost= (0.9)*cost+(0.1)*erf((cost_companion_[act_best_branch_index] - mean_cost_companion_) / std_cost_companion_);
+					//if(!Zanlungo_model_){
+						// case side-by-side:
+						we_have_cost_companion_=true;
+						new_cost= (0.9)*cost+(0.1)*erf((cost_companion_[act_best_branch_index] - mean_cost_companion_) / std_cost_companion_);
+					/*}else{
+						if((pointer_to_person_companion_->get_current_pointV().v()<0.2)&&(second_group_companion_person_obj_->get_current_pointV().v()<0.2)){ // si personas paradas, no tenemos companion cost.
+																	// si no se mueven las persnas, no tenemos fuerza companion ni cost companion!
+						}else{
+							new_cost= (0.9)*cost+(0.1)*erf((cost_companion_[act_best_branch_index] - mean_cost_companion_) / std_cost_companion_);
+						}
+					}*/
+
+				}
+				//std::cout << "[act_best_branch_index] new_cost="<<new_cost<<"; cost_companion="<<erf((cost_companion_[act_best_branch_index] - mean_cost_companion_) / std_cost_companion_) << std::endl;
+
+				vect_costst_act.push_back(new_cost);
+				iter_vect_costst_act.push_back(vect_costst_act);
+				act_best_branch_index = edge_[ act_best_branch_index ].parent;
+
+			}while( act_best_branch_index > 0 );
+
+			best_act_path_and_cost_.set_total_costs_of_each_path_position(iter_vect_costst_act);
+			best_act_path_and_cost_.set_all_ids_path_positions(act_all_ids_path_positions);
+			best_act_path_and_cost_.set_path_positions(act_path_positions);
+			iter_act_multiple_paths_and_best_path_.set_best_path(best_act_path_and_cost_);
+
+			//std::cout << "out NO plans_act2->empty()"<< std::endl;
+		 }
+
+		// std::cout << "out NO plans_act2->empty() part2"<< std::endl;
+	/* FIN fill best_cost in struct SsavePath_multiple_paths_and_best_path */
+	if(!plans_act2->empty()){
+		// std::cout << "1"<< std::endl;
+		iter_act_multiple_paths_and_best_path_.set_number_of_total_paths(1 + nondominated_end_of_plan_vertex_index_.size() );
+		// std::cout << "2"<< std::endl;
+		Cperson_abstract* person_obj;
+		//bool finded_person=find_person(id_person_companion_ , &person_obj);
+		find_person(id_person_companion_ , &person_obj);
+		 //std::cout << "3"<< std::endl;
+		double time=0.2;//person_obj->get_time(); //TODO: cambiado a 0.2, porque salian tiempos enormes y parece que iba super lento!!!
+		// std::cout << "4"<< std::endl;
+		iter_act_multiple_paths_and_best_path_.set_time_act(time);
+		// std::cout << "5"<< std::endl;
+		iter_act_multiple_paths_and_best_path_.set_iter_act(planner_iterations_);
+	}
+	// std::cout << "6"<< std::endl;
+	//fill best cost
+	best_costs_.resize( 7, 0.0 );
+	best_costs_[0] = cost_distance_[min_cost_index];
+	best_costs_[1] = cost_orientation_[min_cost_index];
+	best_costs_[2] = cost_robot_[min_cost_index];
+	best_costs_[3] = cost_int_forces_[min_cost_index];
+	best_costs_[4] = cost_obstacles_[min_cost_index];
+	best_costs_[5] = cost_companion_[min_cost_index];
+	best_costs_[6] = cost_past_traj_[min_cost_index];
+
+	if(debug_real_test_companion_){
+		std::cout<<"(INI) min_cost="<<min_cost<< std::endl;
+		std::cout<<"min_cost_index="<<min_cost_index<< std::endl;
+		std::cout<<"(FIN) orientation_person_robot_angles_["<<min_cost_index<<"]="<<orientation_person_robot_angles_[min_cost_index]<< std::endl;
+		std::cout<<"(FIN) orientation_person_robot_angles_with_prediction_of_person_companion_["<<min_cost_index<<"]="<<orientation_person_robot_angles_with_prediction_of_person_companion_[min_cost_index]<< std::endl;
+
+	}
+/*	std::cout<<"best_costs_[0] = cost_distance_   [min_cost_index="<<min_cost_index<<"] ="<<cost_distance_[min_cost_index]<< std::endl;
+	std::cout<<"best_costs_[1] = cost_orientation_[min_cost_index="<<min_cost_index<<"] ="<<cost_orientation_[min_cost_index]<< std::endl;
+	std::cout<<"best_costs_[2] = cost_robot_      [min_cost_index="<<min_cost_index<<"] ="<<cost_robot_[min_cost_index]<< std::endl;
+	std::cout<<"best_costs_[3] = cost_int_forces_ [min_cost_index="<<min_cost_index<<"] ="<<cost_int_forces_[min_cost_index]<< std::endl;
+	std::cout<<"best_costs_[4] = cost_obstacles_  [min_cost_index="<<min_cost_index<<"] ="<<cost_obstacles_[min_cost_index]<< std::endl;
+*/
+	//fill mean costs
+	mean_costs_.resize( 7, 0.0 );
+	mean_costs_[0] = mean_cost_distance_;
+	mean_costs_[1] = mean_cost_orientation_;
+	mean_costs_[2] = mean_cost_robot_;
+	mean_costs_[3] = mean_cost_int_forces_;
+	mean_costs_[4] = mean_cost_obstacles_;
+	mean_costs_[5] = mean_cost_companion_;
+	mean_costs_[6] = mean_cost_past_traj_;
+
+	 if(!plans_act2->empty()){
+		 iter_act_multiple_paths_and_best_path_.set_means(mean_costs_);
+	 }
+/*  std::cout<<"mean_costs_[0] = mean_cost_distance_    ="<<mean_cost_distance_<< std::endl;
+	std::cout<<"mean_costs_[1] = mean_cost_orientation_ ="<<mean_cost_orientation_<< std::endl;
+	std::cout<<"mean_costs_[2] = mean_cost_robot_       ="<<mean_cost_robot_<< std::endl;
+	std::cout<<"mean_costs_[3] = mean_cost_int_forces_  ="<<mean_cost_int_forces_<< std::endl;
+	std::cout<<"mean_costs_[4] = mean_cost_obstacles_   ="<<mean_cost_obstacles_<< std::endl;
+*/
+
+	//fill std costs
+	std_costs_.resize( 7, 0.0 );
+	std_costs_[0] = std_cost_distance_;
+	std_costs_[1] = std_cost_orientation_;
+	std_costs_[2] = std_cost_robot_;
+	std_costs_[3] = std_cost_int_forces_;
+	std_costs_[4] = std_cost_obstacles_;
+	std_costs_[5] = std_cost_companion_;
+	std_costs_[6] = std_cost_past_traj_;
+
+	 if(!plans_act2->empty()){
+		 iter_act_multiple_paths_and_best_path_.set_stds(std_costs_);
+	 }
+/*  std::cout<<"std_costs_[0] = std_cost_distance_    ="<<std_cost_distance_<< std::endl;
+	std::cout<<"std_costs_[1] = std_cost_orientation_ ="<<std_cost_orientation_<< std::endl;
+	std::cout<<"std_costs_[2] = std_cost_robot_       ="<<std_cost_robot_<< std::endl;
+	std::cout<<"std_costs_[3] = std_cost_int_forces_  ="<<std_cost_int_forces_<< std::endl;
+	std::cout<<"std_costs_[4] = std_cost_obstacles_   ="<<std_cost_obstacles_<< std::endl;
+*/
+	//std::cout<<" FIN function: global_min_cost_index(); min_cost_index="<<min_cost_index << std::endl;
+
+	// iter_act_multiple_paths_and_best_path_.print();
+
+	return min_cost_index;
+}
+
+Sforce Cplan_local_nav_person_companion::force_persons_int_planning_virtual(Cperson_abstract* center , unsigned int t, double min_dist2, Cperson_abstract::companion_reactive reactive)
+{
+
+	//std::cout<<" IN force_persons_int_planning_virtual" << std::endl;
+
+	Sforce force_res;
+
+	switch(reactive)
+	{
+	case Cperson_abstract::Reactiva_repulsive:
+	case Cperson_abstract::Reactive_atractive:
+		//std::cout << " IN :force_persons_int_planning_virtual case(Reactiva_repulsive+atractive) " <<  std::endl;
+		for( auto iit : nearby_person_list_)
+		{
+
+			if( *center != *iit && center->get_planning_trajectory()->at(t)
+						.distance2( iit->get_planning_trajectory( )->at(t) ) < min_dist2 )
+			{
+				//if((iit->get_id()!=id_person_companion_)||(iit->get_id()!=id_SECOND_person_companion_)){ // para el id companion esta fuerza ha de ser 0!
+				if(iit->get_id()!=id_person_companion_){ //&&(iit->get_id()!=id_SECOND_person_companion_) para el id companion esta fuerza ha de ser 0!
+
+
+
+						Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+								&(center->get_planning_trajectory()->at(t) ) );
+						force_res += force_act;
+						if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+
+							//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+						}
+
+				}else{ // CASO: person companion!!!
+
+					//std::vector<double> params_interact_with_person_companion=get_sfm_int_params(center,iit);
+					//if(center->get_planning_trajectory()->at(t).distance2( iit->get_planning_trajectory( )->at(t))<1.25){
+					//	std::cout<<"params_interact_with_person_companion(1)=" <<get_sfm_int_params(center,iit)->at(1)<< "; params_interact_with_person_companion(2) ="<<get_sfm_int_params(center,iit)->at(2)<< "; params_interact_with_person_companion(3)="<<get_sfm_int_params(center,iit)->at(3) <<  std::endl;
+					//	std::cout<<"params_interact_with_person_companion(4)=" <<get_sfm_int_params(center,iit)->at(4) <<  std::endl;
+					//}
+					//std::cout << " IN :force person companion " <<  std::endl;
+
+
+					//if(!Zanlungo_model_){
+						// ini Case side-by-side.
+						/*if(Action_==FACEPERSON){
+							const std::vector<double>* act_robot_params=get_sfm_int_params(center,iit);
+												//std::cout << "(Action_==FACEPERSON) act_robot_params[0]="<< act_robot_params->at(0)<<"; act_robot_params[1]="<<act_robot_params->at(1)<<"; act_robot_params[2]="<<act_robot_params->at(2)<<"; act_robot_params[3]="<<act_robot_params->at(3)<<"; act_robot_params[4]="<<act_robot_params->at(4)<<  std::endl;
+
+							std::vector<double> act_robot_params2;
+							act_robot_params2.push_back(act_robot_params->at(0));
+							act_robot_params2.push_back(act_robot_params->at(1));
+							//act_robot_params2.push_back(new_A_force_face_person_);//act_robot_params->at(2));
+							//act_robot_params2.push_back(new_B_force_face_person_);//act_robot_params->at(3)+0.3);
+							act_robot_params2.push_back(act_robot_params->at(4));
+
+							//std::cout << "(Action_==FACEPERSON) act_robot_params2[0]="<< act_robot_params2[0]<<"; act_robot_params2[1]="<<act_robot_params2[1]<<"; act_robot_params2[2]="<<act_robot_params2[2]<<"; act_robot_params2[3]="<<act_robot_params2[3]<<"; act_robot_params[4]="<<act_robot_params2[4]<<  std::endl;
+
+												//Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+														//&(center->get_planning_trajectory()->at(t) ) , reactive);
+							Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  &act_robot_params2,
+											&(center->get_planning_trajectory()->at(t) ) , reactive);
+
+							//force_act.fx=2*force_act.fx;
+							//force_act.fy=2*force_act.fy;
+							force_res += force_act;
+						}else{*/
+							//Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+							//		&(center->get_planning_trajectory()->at(t) ) , reactive);
+
+							force_res += Sforce();  // NUNCA la ha de considerar en el path, excepto en el case face person!!!
+						//}
+
+						//if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+						//	std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+						//}
+						// fin Case side-by-side.
+					/*}else{
+						// todo: reducir!
+						//std::cout << " caso Zanlungo atractive and repulsive (with force) " <<  std::endl;
+
+						Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+								&(center->get_planning_trajectory()->at(t) ) );
+						force_res += force_act;
+
+						if(iit->get_id()==id_SECOND_person_companion_){
+							person2_repulsive_force_fx_act_=force_act.fx;
+							person2_repulsive_force_fy_act_=force_act.fy;
+						}else{
+							person2_repulsive_force_fx_act_=-1.0;
+							person2_repulsive_force_fy_act_=-1.0;
+						}
+
+
+						if(iit->get_id()==id_person_companion_){
+							person1_repulsive_force_fx_act_=force_act.fx;
+							person1_repulsive_force_fy_act_=force_act.fy;
+						}else{
+							person1_repulsive_force_fx_act_=-1.0;
+							person1_repulsive_force_fy_act_=-1.0;
+						}
+
+					}*/
+
+
+				}
+
+			}
+		}
+	break;
+
+	case Cperson_abstract::Akp_planning:
+	default:
+		//std::cout << " IN force_persons_int_planning_virtual: case Akp_planning " <<  std::endl;
+		for( auto iit : nearby_person_list_)
+		{
+			//std::cout << " IN :force_persons_int_planning_virtual case: Akp_planning, salta person companion, id="<<iit->get_id()<<  std::endl;
+
+			if( *center != *iit && center->get_planning_trajectory()->at(t)
+						.distance2( iit->get_planning_trajectory( )->at(t) ) < min_dist2 )
+			{
+
+
+				/// INI Add go to person goal. Do not (tratar) the person that is the goal of the group as a repulsive.
+					//if((iit->get_id()!=id_person_companion_)||(iit->get_id()!=id_SECOND_person_companion_)){ // para el id companion esta fuerza ha de ser 0!
+					if(iit->get_id()!=id_person_companion_){ //&&(iit->get_id()!=id_SECOND_person_companion_) para el id companion esta fuerza ha de ser 0!
+						Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+								&(center->get_planning_trajectory()->at(t) ) );
+						force_res += force_act;
+
+						//std::cout << " ( BAD case id, comp pers or 2 comp pers) IN :force_persons_int_planning_virtual case: Akp_planning, person id="<<iit->get_id()<<  std::endl;
+						if(debug_antes_subgoals_entre_AKP_goals_){
+							//force_res.print();
+						}
+
+						if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+							//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+						}
+					}else{ // para id_person_companion
+						//std::cout << " IN :force_persons_int_planning_virtual case: Akp_planning, salta person companion, id="<<iit->get_id()<<  std::endl;
+
+						//if(!Zanlungo_model_){
+							// ini case side-by-side:
+							Sforce force_act_companion_person;
+
+							//std::cout << " (OK) IN :force_persons_int_planning_virtual case: before => force_act_companion_person, id="<<iit->get_id()<<  std::endl;
+
+							force_act_companion_person=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_planning_trajectory()->at(t) ) );
+
+							if(debug_antes_subgoals_entre_AKP_goals_){
+								force_act_companion_person.print();
+							}
+							//force_act_companion_person.fx=force_act_companion_person.fx/2; En el caso de ir a la person target goal, va bien sin el partir por 2, así que en solo companion ha de ir igual de bien!
+							//force_act_companion_person.fy=force_act_companion_person.fy/2;
+							if(debug_antes_subgoals_entre_AKP_goals_){
+								force_act_companion_person.print();
+							}
+
+							//if(((force_act_companion_person.fx>0.5)||(force_act_companion_person.fy>0.5))&&see_forces_){
+							//	std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act_companion_person.fx ="<<force_act_companion_person.fx<< "; force_act_companion_person.fy="<<force_act_companion_person.fy <<  std::endl;
+							//}
+
+							force_res+=Sforce();
+							//force_res+=force_act_companion_person; // is commented, because for the path we need NO force respect person companion to have a path down of it in the situations where the robot is rear of the person.
+							//force_res.print();
+							// fin case side-by-side:
+						/*}else{
+							//std::cout << "; id="<<iit->get_id()<<"; iit->get_person_type()="<<iit->get_person_type()<<std::endl;
+							Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_planning_trajectory()->at(t) ) );;
+							force_res += force_act;
+							if(iit->get_id()==id_SECOND_person_companion_){
+								person2_repulsive_force_fx_act_=force_act.fx;
+								person2_repulsive_force_fy_act_=force_act.fy;
+							}else{
+								person2_repulsive_force_fx_act_=-1.0;
+								person2_repulsive_force_fy_act_=-1.0;
+							}
+
+
+							if(iit->get_id()==id_person_companion_){
+								person1_repulsive_force_fx_act_=force_act.fx;
+								person1_repulsive_force_fy_act_=force_act.fy;
+							}else{
+								person1_repulsive_force_fx_act_=-1.0;
+								person1_repulsive_force_fy_act_=-1.0;
+							}
+
+						}*/
+
+					}
+					//std::cout << "; id="<<iit->get_id()<<"; force_res.fx="<<force_res.fx<<"; force_res.fy="<<force_res.fy<<std::endl;
+
+			}
+		}
+	break;
+	}
+
+	//std::cout<<" out force_persons_int_planning_virtual" << std::endl;
+
+	return force_res;
+}
+
+
+
+Sforce Cplan_local_nav_person_companion::force_persons_int_planning_virtual_robot_prediction(Cperson_abstract* center , unsigned int t, double min_dist2, Cperson_abstract::companion_reactive reactive, unsigned int id_pers_comp_rob)
+{
+
+	//std::cout << " (1)  force_persons_int_planning_virtual_robot_prediction " <<  std::endl;
+
+
+
+	Sforce force_res;
+
+	switch(reactive)
+	{
+	case Cperson_abstract::Reactiva_repulsive:
+	case Cperson_abstract::Reactive_atractive:
+		//std::cout << " IN :force_persons_int_planning_virtual case(Reactiva_repulsive+atractive) "<<  std::endl;
+		for( auto iit : person_list_)
+		{
+			//std::cout << " IN : iit->get_prediction_trajectory()->size(): "<<iit->get_prediction_trajectory()->size() << "; id="<<iit->get_id()  <<  std::endl;
+
+			if(id_pers_comp_rob!=iit->get_id()){
+				//std::cout << " IN : iit->get_prediction_trajectory()->size(): "<<iit->get_prediction_trajectory()->size() <<", id_pers_comp_rob="<<id_pers_comp_rob<<  std::endl;
+
+				if( *center != *iit && center->get_prediction_trajectory_with_target_person()->at(t)
+							.distance2( iit->get_prediction_trajectory( )->at(t) ) < min_dist2 )
+				{
+					if(iit->get_id()!=id_person_companion_){ // para el id companion esta fuerza ha de ser 0!
+						Sforce force_act=center->force( iit->get_prediction_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+								&(center->get_prediction_trajectory_with_target_person()->at(t) ) );;
+						force_res += force_act;
+						//if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+
+							//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+						//}
+
+					}else{ // para id person companion!
+						//std::cout << " IN :force person companion " <<  std::endl;
+						Sforce force_act=center->force( iit->get_prediction_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+								&(center->get_prediction_trajectory_with_target_person()->at(t) ) , reactive);
+						force_res += force_act;
+
+						//if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+						//	std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+						//}
+
+					}
+
+				}
+
+
+			}
+
+		}
+	break;
+
+	case Cperson_abstract::Akp_planning:
+	default:
+		//std::cout << " (2)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+
+		for( auto iit : person_list_)
+		{
+			//std::cout << " IN : Akp_planning id="<<iit->get_id() <<"; id_pers_comp_rob="<<id_pers_comp_rob <<  std::endl;
+			if(id_pers_comp_rob!=iit->get_id()){
+
+				//std::cout << " 2 IN : iit->get_prediction_trajectory()->size(): "<<iit->get_prediction_trajectory()->size() <<", id_pers_comp_rob="<<id_pers_comp_rob<<  std::endl;
+				//std::cout << " (3)  force_persons_int_planning_virtual_robot_prediction (Akp_planning) t="<<t <<"; center->get_prediction_trajectory_with_target_person().size()="<<center->get_prediction_trajectory_with_target_person()->size()<<"; iit->get_planning_trajectory( ).size()="<<iit->get_planning_trajectory( )->size()<<  std::endl;
+				//std::cout << " (3)  force_persons_int_planning_virtual_robot_prediction (Akp_planning) t="<<t <<"; iit->get_prediction_trajectory()( ).size()="<<iit->get_prediction_trajectory()->size()<<  std::endl;
+				// solucion provisional para inicializacion simulador.
+
+				if((center->get_prediction_trajectory_with_target_person()->size()>t)&&(iit->get_prediction_trajectory( )->size()>t)){
+					if(bool_tes_prop1){
+						std::cout << " IN :force_persons_int_planning_virtual case: center->get_prediction_trajectory_with_target_person()->size()="<<center->get_prediction_trajectory_with_target_person()->size()<<std::endl;
+						std::cout <<	" id. iit="<<iit->get_id()<<"; iit->get_prediction_trajectory( )->size()="<<iit->get_prediction_trajectory( )->size()<<  std::endl;
+
+					}
+
+				if( *center != *iit && center->get_prediction_trajectory_with_target_person()->at(t)
+							.distance2( iit->get_prediction_trajectory( )->at(t) ) < min_dist2 )
+				{
+
+					//std::cout << " (4)  force_persons_int_planning_virtual_robot_prediction (Akp_planning); id_person_companion_="<<id_person_companion_<<"; id_person_goal_"<<id_person_goal_ <<  std::endl;
+					/// INI Add go to person goal. Do not (tratar) the person that is the goal of the group as a repulsive.
+
+
+						//std::cout << " (13)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+						if(iit->get_id()!=id_person_companion_){ // para el id companion esta fuerza ha de ser 0!
+							Sforce force_act=center->force( iit->get_prediction_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_prediction_trajectory_with_target_person()->at(t) ) );
+							force_res += force_act;
+							//std::cout << " (14)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+							//std::cout << " IN :force_persons_int_planning_virtual case: Akp_planning, person id="<<iit->get_id()<<  std::endl;
+							if(debug_antes_subgoals_entre_AKP_goals_){
+								//force_res.print();
+							}
+							//std::cout << " (15)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+							//if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+							//	std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+							//}
+						}else{
+							//std::cout << "(16.1) IN :force_persons_int_planning_virtual case: Akp_planning, salta person companion, id="<<iit->get_id()<<  std::endl;
+							Sforce force_act_companion_person;
+							force_act_companion_person=center->force( iit->get_prediction_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_prediction_trajectory_with_target_person()->at(t) ) );
+							//std::cout << " (16)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+							if(debug_antes_subgoals_entre_AKP_goals_){
+								force_act_companion_person.print();
+							}
+							//std::cout << " (17)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+							force_act_companion_person.fx=force_act_companion_person.fx/2;
+							force_act_companion_person.fy=force_act_companion_person.fy/2;
+							//std::cout << " (18)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+							if(debug_antes_subgoals_entre_AKP_goals_){
+								force_act_companion_person.print();
+							}
+
+							//if(((force_act_companion_person.fx>0.5)||(force_act_companion_person.fy>0.5))&&see_forces_){
+							//	std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act_companion_person.fx ="<<force_act_companion_person.fx<< "; force_act_companion_person.fy="<<force_act_companion_person.fy <<  std::endl;
+							//}
+							//std::cout << " (19)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+							//force_res+=Sforce();
+								//force_res+=force_act_companion_person;
+							//force_res.print();
+						}
+
+
+					//}
+
+				}
+			}
+			}
+
+		}
+	break;
+	}
+
+	//std::cout << " (20)  force_persons_int_planning_virtual_robot_prediction (Akp_planning)" <<  std::endl;
+	return force_res;
+}
+
+
+Sforce Cplan_local_nav_person_companion::force_persons_int_planning_virtual_companion_person_akp(Cperson_abstract* center , unsigned int t, double min_dist2, Cperson_abstract::companion_reactive reactive)
+{
+	Sforce force_res;
+	//std::cout << " (IN)  force_persons_int_planning_virtual_companion_person_akp nearby_person_list_.size()="<<nearby_person_list_.size() <<  std::endl;
+
+	for( auto iit : nearby_person_list_)
+	//for( auto iit : person_list_)
+	{
+		//std::cout << " (IN)  center->get_person_type()="<<center->get_person_type()<<"; iit->get_person_type()"<<iit->get_person_type() <<  std::endl;
+
+		//std::cout << " (1)  force_persons_int_planning_virtual_companion_person_akp " <<  std::endl;
+		if( *center != *iit && center->get_planning_trajectory()->at(t)
+						.distance2( iit->get_planning_trajectory( )->at(t) ) < min_dist2 )
+		{
+			//std::cout << " (IN)  center->get_person_type()="<<center->get_person_type()<<"; iit->get_person_type()"<<iit->get_person_type() <<  std::endl;
+			//if(iit->get_id()!=id_person_companion_){ // para el id companion esta fuerza ha de ser 0!
+			if(iit->get_id()!=id_person_companion_){ // &&(iit->get_id()!=id_SECOND_person_companion_) &&(iit->get_id()!=id_person_goal_)
+			//if((iit->get_id()!=my_id_person_companion_simulation_)){
+
+				Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+							&(center->get_planning_trajectory()->at(t) ) )*multiply_person_companion_force_to_persons_;
+
+				//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+
+				force_act.fx=force_act.fx; // todo: solucion rapida para incrementar algo la fuerza para que la person companion no pase tan cerca de las otras personas que casi se rozan y eso dificulta la recuperacion de la posicion del robot.
+				force_act.fy=force_act.fy;
+				//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+
+				force_res += force_act;
+				//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+				//std::cout << " IN :force_persons_int_planning_virtual case: Akp_planning, person id="<<iit->get_id()<<  std::endl;
+
+				if(debug_antes_subgoals_entre_AKP_goals_){
+					//force_res.print();
+				}
+
+				//if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+				//	std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+				//}
+			}else{ //if(iit->get_id()==id_SECOND_person_companion_){ // TODO: do the force between the robot and the person companion here, the companion force.
+				/*Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+											&(center->get_planning_trajectory()->at(t) ) )*multiply_person_companion_force_to_persons_;
+				force_res += force_act;*/
+				if(iit->get_id()!=my_id_person_companion_simulation_){ //&&(iit->get_id()!=id_SECOND_person_companion_) con la otra person companion he de tener fuerza repulsiva, pero menos que con las demás personas.
+					// he de usar la fuerza repulsiva pero de companion!!! //TODO:si uso dos robots como companions hay que quitar esta fuerza repulsiva. Pero habra que reducirla, porque esta fuerza repulsiva es demasiado grande para que esten en la posicion ideal!
+					//const std::vector<double>* social_forces_param=get_sfm_int_params(center,iit);
+
+					//std::cout<<" [IMPORTANTE!!!] center.type=" <<center->get_person_type()<< "; iit->get_person_type()="<<iit->get_person_type()<<"; my_id_person_companion_simulation_="<<my_id_person_companion_simulation_<<"; iit->get_id()="<<iit->get_id() <<  std::endl;
+
+
+					//std::cout<<" [IMPORTANTE!!!] social_forces_param.at(0)=" <<social_forces_param->at(0)<< "; social_forces_param.at(1)="<<social_forces_param->at(1)<< "; social_forces_param->at(2)="<<social_forces_param->at(2)<<"; social_forces_param->at(3)="<<social_forces_param->at(3) <<  std::endl;
+
+
+					Sforce force_act=center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+												&(center->get_planning_trajectory()->at(t) ) )*multiply_person_companion_force_to_persons_;
+
+					//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+
+					force_act.fx=force_act.fx; // todo: solucion rapida para incrementar algo la fuerza para que la person companion no pase tan cerca de las otras personas que casi se rozan y eso dificulta la recuperacion de la posicion del robot.
+					force_act.fy=force_act.fy;
+					//std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+
+					force_res += force_act;
+
+				}
+
+
+			}
+		}
+	}
+	//std::cout << " (OUT)  force_persons_int_planning_virtual_companion_person_akp " <<  std::endl;
+	return force_res;
+}
+
+Sforce Cplan_local_nav_person_companion::force_persons_int_planning_virtual_companion_person_akp_person_prediction(Cperson_abstract* center , unsigned int t, double min_dist2, Cperson_abstract::companion_reactive reactive)
+{
+	Sforce force_res;
+
+	//std::cout << " (INT PERSON FORCES) (1) iit->get_prediction_trajectory( )->size()="<<  std::endl;
+
+//for( auto iit : nearby_person_list_)
+	for( auto iit : person_list_)
+	{
+			if(iit->get_id()!=id_person_companion_){
+			//std::cout << " (INT PERSON FORCES) (1) iit->get_prediction_trajectory( )->size()="<<iit->get_prediction_trajectory( )->size()<<"; iit->get_id()=" <<iit->get_id()<<  std::endl;
+			//std::cout << " (INT PERSON FORCES) (1) iit->get_prediction_trajectory_with_target_person( )->size()="<<center->get_prediction_trajectory_with_target_person( )->size()<<"; t=" <<t<<  std::endl;
+
+			if( *center != *iit && center->get_prediction_trajectory_with_target_person()->at(t)
+							.distance2( iit->get_prediction_trajectory( )->at(t) ) < min_dist2 )
+			{
+
+				//std::cout << " (INT PERSON FORCES) (2) "<<  std::endl;
+
+				//std::cout << " (2)  force_persons_int_planning_virtual_companion_person_akp " <<  std::endl;
+				//if((iit->get_id()!=id_person_companion_)&&(iit->get_id()!=id_person_goal_)){ // para el id companion esta fuerza ha de ser 0!
+					//std::cout << " (INT PERSON FORCES) (3) "<<  std::endl;
+					//std::cout << " (3)  force_persons_int_planning_virtual_companion_person_akp " <<  std::endl;
+					Sforce force_act=center->force( iit->get_prediction_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+								&(center->get_prediction_trajectory_with_target_person()->at(t) ) )*multiply_person_companion_force_to_persons_;
+					force_res += force_act;
+					//std::cout << " (INT PERSON FORCES) (4) "<<  std::endl;
+					//std::cout << " (4)  force_persons_int_planning_virtual_companion_person_akp " <<  std::endl;
+					//std::cout << " IN :force_persons_int_planning_virtual case: Akp_planning, person id="<<iit->get_id()<<  std::endl;
+					if(debug_antes_subgoals_entre_AKP_goals_){
+						//force_res.print();
+					}
+
+					//if(((force_act.fx>0.5)||(force_act.fy>0.5))&&see_forces_){
+					//	std::cout<<"person_id=iit->get_id()=" <<iit->get_id()<< "; force_act.fx ="<<force_act.fx<< "; force_act.fy="<<force_act.fy <<  std::endl;
+					//}
+				//}//else{
+
+				//}
+			}
+		}
+	}
+	//std::cout << " (5)  force_persons_int_planning_virtual_companion_person_akp " <<  std::endl;
+	return force_res;
+}
+
+
+Sforce Cplan_local_nav_person_companion::force_persons_int_planning_virtual_robot_companion_propagation(Cperson_abstract* center , unsigned int t, double min_dist2, Cperson_abstract::companion_reactive reactive)
+{
+
+	Sforce force_res;
+	Sforce force_res_other_people;
+	Sforce force_res_companion_person;
+	if(debug_real_test_companion_){
+		std::cout<< std::endl<< std::endl<< std::endl << " !!!!!!!!!!!!!!!!!!!!!! [replan last step] IN :force_persons_int_planning_virtual_robot_companion_propagation " <<  std::endl;
+	}
+
+	switch(reactive)
+	{
+	case Cperson_abstract::Reactiva_repulsive:
+	case Cperson_abstract::Reactive_atractive:
+		//std::cout << " IN :force_persons_int_planning_virtual case(Reactiva_repulsive+atractive) " <<  std::endl;
+		for( auto iit : nearby_person_list_)
+		{
+			//std::cout << " [atractive and repulsive] force_persons_int_planning_virtual_robot_companion_propagation IN : Akp_planning " <<  std::endl;
+			//		std::cout << " IN : Akp_planning; id_person_companion_"<<id_person_companion_ <<"; nearby_person_list_.size="<<nearby_person_list_.size()<<"; t="<<t <<  std::endl;
+
+
+			if( *center != *iit && center->get_planning_trajectory()->at(t)
+						.distance2( iit->get_planning_trajectory( )->at(t) ) < min_dist2 )
+			{
+
+
+
+					if(iit->get_id()!=id_person_companion_){ // para el id companion esta fuerza ha de ser 0!
+							force_res += center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_planning_trajectory()->at(t) ) );
+							force_res_other_people += center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_planning_trajectory()->at(t) ) );
+						}else{
+							//std::cout<<" (replan_last_step) params_interact_with_person_companion(1)=" <<get_sfm_int_params(center,iit)->at(1)<< "; params_interact_with_person_companion(2) ="<<get_sfm_int_params(center,iit)->at(2)<< "; params_interact_with_person_companion(3)="<<get_sfm_int_params(center,iit)->at(3) <<  std::endl;
+							//		std::cout<<"params_interact_with_person_companion(4)=" <<get_sfm_int_params(center,iit)->at(4) <<  std::endl;
+
+							//std::cout << " IN :force person companion " <<  std::endl;
+							force_res += center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+														&(center->get_planning_trajectory()->at(t) ) , reactive);
+							force_res_companion_person= center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_planning_trajectory()->at(t) ) , reactive);
+
+							if(debug_gazebo_journal_){
+								std::cout<<" NO group_go_to_interact_with_other_person_(reactive-repulsive) else group_go_to_interact_with_other_person person_id=iit->get_id()=" <<iit->get_id()<< "; force_res_companion_person.fx ="<<force_res_companion_person.fx<< "; force_res_companion_person.fy="<<force_res_companion_person.fy <<  std::endl;
+
+							}
+
+						}
+
+
+
+			}
+		}
+	break;
+
+	case Cperson_abstract::Akp_planning:
+	default:
+		if(debug_real_test_companion_){
+			std::cout << "force_persons_int_planning_virtual_robot_companion_propagation IN : Akp_planning " <<  std::endl;
+			std::cout << " IN : Akp_planning; id_person_companion_"<<id_person_companion_ <<"; nearby_person_list_.size="<<nearby_person_list_.size()<<"; t="<<t <<  std::endl;
+		}
+		for( auto iit : nearby_person_list_)
+		//for( auto iit : person_list_)
+		{
+			if(debug_real_test_companion_){
+				std::cout << " IN : Akp_planning; iit="<<iit <<  std::endl;
+			}
+
+			//std::cout <<"; id="<<iit->get_id()<< "iit->get_planning_trajectory( )->size()= "<<iit->get_planning_trajectory( )->size() <<"; center->get_planning_trajectory()->size="<<center->get_planning_trajectory()->size()<<  std::endl;
+
+
+				//std::cout<<" INI (replan_last_step) params_interact_with_person_companion(1)=" <<get_sfm_int_params(center,iit)->at(1)<< "; params_interact_with_person_companion(2) ="<<get_sfm_int_params(center,iit)->at(2)<< "; params_interact_with_person_companion(3)="<<get_sfm_int_params(center,iit)->at(3) <<  std::endl;
+				//	std::cout<<"params_interact_with_person_companion(4)=" <<get_sfm_int_params(center,iit)->at(4) <<  std::endl;
+
+					if( *center != *iit && center->get_planning_trajectory()->at(t)
+												.distance2( iit->get_planning_trajectory( )->at(t) ) < min_dist2 )
+					{
+
+
+						if(iit->get_id()!=id_person_companion_){ // para el id companion esta fuerza ha de ser 0!
+							force_res += center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+									&(center->get_planning_trajectory()->at(t) ) );
+							//std::cout << " IN :force_persons_int_planning_virtual case: Akp_planning, person id="<<iit->get_id()<<  std::endl;
+							if(debug_antes_subgoals_entre_AKP_goals_){
+								force_res.print();
+							}
+							force_res_other_people += center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+														&(center->get_planning_trajectory()->at(t) ) );
+						}else{
+							//std::cout << " IN :force_persons_int_planning_virtual case: Akp_planning, salta person companion, id="<<iit->get_id()<<  std::endl;
+							//force_res+=Sforce();
+							//force_res.print();
+							force_res += center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+														&(center->get_planning_trajectory()->at(t) ) );
+								//std::cout<< "[f_int force replan_last_step ] person_ID="<<iit->get_id()<<"+ iit->get_person_type()="<<iit->get_person_type() <<  std::endl;
+
+							if(debug_real_test_companion_){
+								std::cout << " IN :force_persons_int_planning_virtual_robot_companion_propagation case: Akp_planning, person id="<<iit->get_id()<<  std::endl;
+							}
+							if(debug_antes_subgoals_entre_AKP_goals_){
+								//force_res.print();
+							}
+							force_res_companion_person= center->force( iit->get_planning_trajectory( )->at(t) ,  get_sfm_int_params(center,iit),
+															&(center->get_planning_trajectory()->at(t) ) , reactive);
+
+							if(debug_gazebo_journal_){
+								std::cout<<"(AKP) NO group_go_to_ ... get_sfm_int_params(center,iit)->at(0)="<<get_sfm_int_params(center,iit)->at(0)<< "; at(1) ="<<get_sfm_int_params(center,iit)->at(1)<< "; at(2)="<<get_sfm_int_params(center,iit)->at(2)<<"; at(3)="<<get_sfm_int_params(center,iit)->at(3)<<"; at(4)="<<get_sfm_int_params(center,iit)->at(4) <<  std::endl;
+								std::cout<<"(AKP) NO group_go_to_interact_with_other_person_ person_id=iit->get_id()=" <<iit->get_id()<< "; force_res_companion_person.fx ="<<force_res_companion_person.fx<< "; force_res_companion_person.fy="<<force_res_companion_person.fy <<  std::endl;
+
+							}
+
+						}
+
+
+					}
+
+				//}
+
+
+		//	}
+		}
+	break;
+	}
+
+
+	//std::cout << " (out1) "<< std::endl;
+
+	last_step_robot_other_person_cost_=force_res_companion_person.module2();
+	last_step_robot_companion_cost_=force_res_companion_person.module2();
+
+	//std::cout << " (out 2) "<< std::endl;
+
+
+	return force_res;
+}
+
+
+
+Sforce Cplan_local_nav_person_companion::force_persons_int_robot_prediction_virtual(const SpointV& center , unsigned int t, double min_dist2)
+{
+	//calculates the resultant forces to all nearby people due to the robot position
+	Sforce force_res;
+    for( auto iit : nearby_person_list_)
+    {
+        if( center.distance2( iit->get_planning_trajectory( )->at(t) ) < min_dist2 )
+        {
+            force_res += iit->force( iit->get_prediction_trajectory( )->at(t) ,  get_sfm_int_params(iit),
+            		&center );
+        }
+    }
+	return force_res;
+}
+
+Sforce Cplan_local_nav_person_companion::force_objects_laser_int_planning_virtual( Cperson_abstract* person, unsigned int planning_index, double min_dist2, bool robot_collision_check_flag)
+{
+	Sforce force_res;
+	Sforce force_res_iter;
+	const SpointV_cov* virtual_current_point;
+	if ( planning_index == 0)
+	{
+		virtual_current_point = &(person->get_current_pointV());
+	}
+	else
+	{
+		virtual_current_point = &(person->get_planning_trajectory()->at(planning_index) );
+	}
+	nearby_obstacle_list_.clear();
+	//for robot, checks
+	//std::cout << "min_dist2="<<min_dist2<< std::endl;
+	number_obstacles_big_force_=1;
+
+	for( Spoint iit : laser_obstacle_list_)
+	{
+		//there is a list for persons and another for robot(s). This function is for obstacles
+		//double d2 = person->get_current_pointV().distance2( iit );
+		double d2 = person->get_current_pointV().distance( iit );
+		if( d2 < min_dist2)//square distance 5^2
+		{
+
+			force_res_iter=person->force_sphe( iit , get_sfm_int_params(person), virtual_current_point );
+			//std::cout <<"d2="<<d2<<"; force_res_iter.fx="<<force_res_iter.fx<<"; force_res_iter.fy"<<force_res_iter.fy<< std::endl;
+			force_res +=force_res_iter;
+			if( robot_collision_check_flag && d2 < 1.0 )//detect ultra nearby obstacles and check after propagation if collision took place
+			{
+				nearby_obstacle_list_.push_back( iit );
+			}
+			if((force_res_iter.fx>1.0)||(force_res_iter.fy>1.0)||(force_res_iter.fx<-1.0)||(force_res_iter.fy<-1.0)){
+				number_obstacles_big_force_++;
+			}
+
+
+		}
+	}
+
+	if(number_obstacles_big_force_>1){
+		number_obstacles_big_force_=number_obstacles_big_force_-1;
+	}
+
+	//std::cout << " (ant) force_res.fx="<<force_res.fx<<"; force_res.fy="<<force_res.fy<<"; number_obstacles_big_force_= "<<number_obstacles_big_force_<< std::endl;
+	force_res.fx=force_res.fx/number_obstacles_big_force_;
+	force_res.fy=force_res.fy/number_obstacles_big_force_;
+	//std::cout << "(desp) force_res.fx="<<force_res.fx<<"; force_res.fy="<<force_res.fy<< std::endl;
+	//std::cout << "nearby_obstacle_list_.size()="<<nearby_obstacle_list_.size()<< std::endl;
+
+	return force_res;
+
+}
+
+Sforce Cplan_local_nav_person_companion::force_objects_laser_int_planning_virtual_robot_propagation( Cperson_abstract* person, unsigned int planning_index, double min_dist2, bool robot_collision_check_flag)
+{
+	Sforce force_res;
+	Sforce force_res_iter;
+	const SpointV_cov* virtual_current_point;
+	if ( planning_index == 0)
+	{
+		virtual_current_point = &(person->get_current_pointV());
+	}
+	else
+	{
+		virtual_current_point = &(person->get_prediction_trajectory_with_target_person()->at(planning_index) );
+	}
+	nearby_obstacle_list_.clear();
+	//for robot, checks
+	//std::cout << "min_dist2="<<min_dist2<< std::endl;
+	number_obstacles_big_force_=1;
+
+	for( Spoint iit : laser_obstacle_list_)
+	{
+		//there is a list for persons and another for robot(s). This function is for obstacles
+		//double d2 = person->get_current_pointV().distance2( iit );
+		double d2 = person->get_current_pointV().distance( iit );
+		if( d2 < min_dist2)//square distance 5^2
+		{
+
+			force_res_iter=person->force_sphe( iit , get_sfm_int_params(person), virtual_current_point );
+			//std::cout <<"d2="<<d2<<"; force_res_iter.fx="<<force_res_iter.fx<<"; force_res_iter.fy"<<force_res_iter.fy<< std::endl;
+			force_res +=force_res_iter;
+			if( robot_collision_check_flag && d2 < 1.0 )//detect ultra nearby obstacles and check after propagation if collision took place
+			{
+				nearby_obstacle_list_.push_back( iit );
+			}
+			if((force_res_iter.fx>1.0)||(force_res_iter.fy>1.0)||(force_res_iter.fx<-1.0)||(force_res_iter.fy<-1.0)){
+				number_obstacles_big_force_++;
+			}
+
+
+		}
+	}
+
+	if(number_obstacles_big_force_>1){
+		number_obstacles_big_force_=number_obstacles_big_force_-1;
+	}
+
+	//std::cout << " (ant) force_res.fx="<<force_res.fx<<"; force_res.fy="<<force_res.fy<<"; number_obstacles_big_force_= "<<number_obstacles_big_force_<< std::endl;
+	force_res.fx=force_res.fx/number_obstacles_big_force_;
+	force_res.fy=force_res.fy/number_obstacles_big_force_;
+	//std::cout << "(desp) force_res.fx="<<force_res.fx<<"; force_res.fy="<<force_res.fy<< std::endl;
+	//std::cout << "nearby_obstacle_list_.size()="<<nearby_obstacle_list_.size()<< std::endl;
+
+	return force_res;
+
+}
+
+
+bool Cplan_local_nav_person_companion::check_collision_person_companion_akp( const SpointV_cov& p2 ,  int t)
+{
+	// (ONLY simulation==simulated person companion as a robot) CHECK collision of the path for the personCompanion shape and for the companion shape (to calculate the companion cost and angle, before)
+		Spoint p=Spoint(p2.x,p2.y,p2.time_stamp);
+		bool collision=false;
+
+		// Start: Init values of companion collisions
+		case_dynamic_=false;
+		double  robot_radi=robot_->get_platform_radii();
+
+		double real_robot_person_distance; // real distance between robot and person companion.
+
+		if(bool_case_person_companion_){
+			real_robot_person_distance=calc_robot_person_companion_distance_companion_person_akp();
+		}else{
+			real_robot_person_distance=calc_robot_person_companion_distance();
+		}
+		min_distance_collision_=(robot_person_proximity_distance_+2*robot_radi+little_augmented_collision_margin_)/2;
+
+
+		if(debug_companion_){
+			std::cout << "min_distance_collision_==robot_person_companion_distance_= "<<min_distance_collision_ << std::endl;
+		}
+		std::vector<double> min_distances_vector;
+		min_distances_vector.clear();
+
+		bool_collision_companion_=false;
+
+		//double collision_threshold=(robot_person_proximity_distance_+2*robot_radi+little_augmented_collision_margin_)/2;
+		double collision_threshold=(real_robot_person_distance+2*robot_radi+little_augmented_collision_margin_)/2;
+
+		if(debug_gazebo_journal_){
+			std::cout << "collision_threshold= "<<collision_threshold<<"; obstacle_radi_amp_="<<obstacle_radi_amp_<<"; anisotropy_threshold_="<<anisotropy_threshold_<< std::endl;
+		}
+		// End: Init values of companion collisions
+
+
+	//TODO does not work properly on real scenarios! long term issue
+	//check colision with map: TO BE DEPRECATED
+	if ( read_force_map_success_ && !is_cell_clear_map( p.x, p.y ) )
+	{
+		bool_collision_companion_=true; // colision, pero por choque con el mapa, TODO: mirar como tratar esto...
+		collision = true;
+	}
+
+
+	//check collision with obstacles (laser), prior is necessary to calculate force_objects_laser_int_planning()
+	//for( Spoint iit : nearby_obstacle_list_ )//TODO not working properly since the c2g recalculates this vector
+	//std::cout << "laser_obstacle_list_.size()=" << laser_obstacle_list_.size()<< std::endl;
+
+	for( Spoint iit : laser_obstacle_list_ )
+	{
+		// START: calculate normal collisions only with person companion shape
+		//if( iit.distance2( p )  < robot_->get_platform_radii_2() ) // TODO: ojo! le cambie la distancia respeco a la que gonzalo calculaba colision, pq a mi esa distancia me liaba.
+		if( iit.distance2( p )  < (robot_->get_platform_radii() + 0.45)) // 0.37, margen colision con objeto, colchon de seguridad!
+		{
+			if(debug_real_test_companion3_){
+				std::cout << "(!!! check_collision !!!) iit.distance2( p )="<< iit.distance2( p )<<" iit.distance( p )"<< iit.distance( p )<<"< robot_->get_platform_radii()="<<robot_->get_platform_radii()<<"; obstacle_radi_="<<obstacle_radi_<<"; robot_->get_platform_radii()/2 + 0.55="<<robot_->get_platform_radii()/2 + 0.55<<"; robot_->get_platform_radii()/2="<<robot_->get_platform_radii()/2<< std::endl;
+			}
+			//std::cout << "(OBSTACLE) Collision found!! robot_->get_platform_radii_2()=" << robot_->get_platform_radii_2() <<"; iit.distance2( p )="<<iit.distance2( p )<<"; iit.distance( p )="<<iit.distance( p )<< std::endl;
+			collision = true;
+		}
+		// END: calculate normal collisions only with person companion shape
+
+		// START: Calculate companion collisions with the group shape.
+		double anisotropy=calculate_anisotropy( p2, iit );  // ???? ver si necesito SpointV_cov del robot, verdaderamente...
+		double collision_distance_obst_act=sqrt((iit.distance( p )-obstacle_radi_amp_)*(iit.distance( p )-obstacle_radi_amp_));
+		//std::cout << "Collision found!! iit.distance( initial_robot_spoint_ )=act_min_collision_dist= "<< act_min_collision_dist<< std::endl;
+
+		if( (collision_distance_obst_act < collision_threshold)&& (anisotropy>anisotropy_threshold_) ) // ojo! he cambiado distance2 por distance.
+		{
+		//	std::cout << "anisotropy=" << anisotropy<<"; min_distance_vector_=2*(iit.distance( p ))="<< 2*(iit.distance( p )) << std::endl;
+			//std::cout << "collision distance=iit.distance( p )=" << iit.distance( p ) <<" < collision_threshold="<<collision_threshold<< std::endl;
+			//std::cout << "obst_pose.x="<<iit.x<<"; obst_pose.y="<<iit.y<<"; obstacle_radi_amp_="<<obstacle_radi_amp_<< std::endl;
+
+			min_distances_vector.push_back(collision_distance_obst_act);
+			//collision=true;
+			bool_collision_companion_=true;
+
+			//std::cout << "obstacle_COLLISION=" << std::endl;
+			if(debug_real_test_companion_){
+				//std::cout << "anisotropy=" << anisotropy << std::endl;
+				//std::cout << "Collision found!! min_dist" << (iit.distance( p ))<<"; obstacle_radi_amp_"<<obstacle_radi_amp_<<"; collision_threshold="<<collision_threshold<<"; anisotropy=" <<anisotropy<<"; anisotropy_threshold_="<<anisotropy_threshold_<< std::endl;
+				//obstacle.print();
+			}
+
+		}
+		//END:	Calculate companion collisions with the group shape.
+
+	}
+
+
+	// START: debug path of the companion collisions calculation
+	if(debug_gazebo_journal_){
+		// calc min distance to obstacle collision!
+		double act_min_collision_dist=0;
+		if(!min_distances_vector.empty()){
+			act_min_collision_dist=min_distances_vector[0];
+		}
+
+		for(unsigned int u=0; u<min_distances_vector.size();u++){
+			if(min_distances_vector[u]<act_min_collision_dist){
+				act_min_collision_dist=min_distances_vector[u];
+			}
+		}
+		if(!min_distances_vector.empty()){
+			std::cout << "Collision found!! iit.distance( initial_robot_spoint_ )=act_min_collision_dist= "<< act_min_collision_dist<< std::endl;
+		}
+	}
+	/*if(collision){
+		std::cout << "obstacle_radi_amp_=" << obstacle_radi_amp_<<"; collision_threshold"<<collision_threshold << std::endl;
+		std::cout << "anisotropy_threshold_=" << anisotropy_threshold_ << std::endl;
+		for(unsigned int l=0; l<min_distances_vector.size(); l++){
+			std::cout << "min_distances_vector("<<l<<")=" << min_distances_vector[l] << std::endl;
+		}
+	}*/
+
+	//END: debug path of the companion collisions calculation
+
+
+
+	//std::cout << "t=" <<t<< std::endl;
+	//if t = -1, then no collision is calculated wrt ppl
+	if ( t > -1 )
+	{
+		double d,det;
+		switch( ppl_collision_mode_ )
+		{
+		  case 0: //normal mode, quadratic distance to person, independent of distribution
+			for( auto iit : nearby_person_list_)
+			{
+				// START: calculate simple collisions, only with person companion shape.
+				if(iit->get_id()!=id_person_companion_){ // TODO: ASEGURARME QUE SEA VERDAD creo que tampoco la ha de tener en cuenta en colisiones aquí.
+					//d = iit->get_planning_trajectory( )->at(t).distance2( p );
+					d = iit->get_planning_trajectory( )->at(t).distance( p );
+					//if ( d < robot_->get_platform_radii_2())
+					if ( d < (robot_->get_platform_radii()+(person_radi_)))
+					{
+						//std::cout << " case 0; d="<<d<< std::endl;
+
+						collision = true;
+					}
+				}
+				// END: calculate simple collisions, only with person companion shape.
+
+				// START: calculate companion collisions with the group shape
+				//if(!group_go_to_interact_with_other_person_){
+					if(iit->get_id()!=id_person_companion_){ // add due to person companion, esta persona no hay que calcular colisiones respecto a ella.
+						d = sqrt((iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_));
+						double anisotropy=calculate_anisotropy( p2, iit->get_planning_trajectory( )->at(t) );
+
+						if ( (d < collision_threshold)&&(anisotropy>anisotropy_threshold_))
+						{
+							//std::cout << "person_COLLISION id="<<iit->get_id() << std::endl;
+							case_dynamic_=true;
+							//collision=true;
+							bool_collision_companion_=true;
+							min_distances_vector.push_back(d); // - robot_radi, margen de seguridad entre obstaculos.
+							if(debug_real_test_companion_){
+								//std::cout << "anisotropy=" << anisotropy << std::endl;
+								//std::cout << "Collision found!! min_dist" << 2*d <<"person_id"<<iit->get_id()<< std::endl;
+							}
+						}
+					}
+
+				// END: calculate companion collisions with the group shape
+
+			}
+			break;
+		  case 1://mahalanobis distance, considers collision if inside the std ellipsoid: TOO RESTRICTIVE...
+			for( auto iit : nearby_person_list_)
+			{
+				// START: calculate simple collisions, only with person companion shape.
+				if(iit->get_id()!=id_person_companion_){
+					d = iit->get_planning_trajectory( )->at(t).cov_dist(p,det);
+					if ( d < 1.0 )
+					{
+						//std::cout << " case 1"<< std::endl;
+						//std::cout << "Colision detected, pr distance = " << d << std::endl;
+						collision = true;
+					}
+				}
+				// END: calculate simple collisions, only with person companion shape.
+
+				// START: calculate companion collisions with the group shape
+				//if(!group_go_to_interact_with_other_person_){
+					if(iit->get_id()!=id_person_companion_){
+						double anisotropy=calculate_anisotropy( p2, iit->get_planning_trajectory( )->at(t) );
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+						if ( (d < collision_threshold)&&(anisotropy>anisotropy_threshold_) )
+						{
+							//std::cout << "person_COLLISION id="<<iit->get_id() << std::endl;
+							case_dynamic_=true;
+							//std::cout << "Colision detected, pr distance = " << d << std::endl;
+							//collision=true;
+							bool_collision_companion_=true;
+							min_distances_vector.push_back(d);
+							if(debug_real_test_companion_){
+								//std::cout << "anisotropy=" << anisotropy << std::endl;
+								//std::cout << "Collision found!! min_dist" << 2*d <<"person_id"<<iit->get_id()<< std::endl;
+							}
+						}
+					}
+
+				// END: calculate companion collisions with the group shape
+
+			}
+			break;
+		  case 2 ://mahalanobis distance, half the std, much less restrictive
+			for( auto iit : nearby_person_list_)
+			{
+
+				// START: calculate simple collisions, only with person companion shape.
+				if(iit->get_id()!=id_person_companion_){
+					d = iit->get_planning_trajectory( )->at(t).cov_dist(p,det);
+					if ( det > 1.0)
+					{
+						if ( d < 0.5 )
+						{
+							//std::cout << " case 2.1"<< std::endl;
+							collision = true;
+						}
+					}
+					else
+					{
+						//std::cout << "(case2) d=" <<d<<"; iit->get_planning_trajectory( )->at(t).distance( p )="<<iit->get_planning_trajectory( )->at(t).distance( p )<< std::endl;
+						//std::cout << " robot_->get_platform_radii()="<<robot_->get_platform_radii()<<"; (person_radi_*2)="<<(person_radi_*2)<<" sum="<<robot_->get_platform_radii()+(person_radi_*2)<< std::endl;
+
+						//d = iit->get_planning_trajectory( )->at(t).distance2( p );
+						d = iit->get_planning_trajectory( )->at(t).distance( p );
+						//if ( d < robot_->get_platform_radii_2() )
+						if ( d < (robot_->get_platform_radii()+(person_radi_)) )
+						{
+							//std::cout << " case 2.2"<< std::endl;
+							return true;
+						}
+					}
+				}
+				// END: calculate simple collisions, only with person companion shape.
+
+				// START: calculate companion collisions with the group shape
+				//if(!group_go_to_interact_with_other_person_){
+
+					if(iit->get_id()!=id_person_companion_){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+						double anisotropy=calculate_anisotropy( p2, iit->get_planning_trajectory( )->at(t) );
+						if ( det > 1.0)
+						{
+							if ( (d < collision_threshold)&&(anisotropy>anisotropy_threshold_) )
+							{
+								//std::cout << "person_COLLISION id="<<iit->get_id() << std::endl;
+								case_dynamic_=true;
+								//collision=true;
+								bool_collision_companion_=true;
+								min_distances_vector.push_back(d);
+								if(debug_real_test_companion_){
+									//std::cout << "anisotropy=" << anisotropy << std::endl;
+									//std::cout << "Collision found!! min_dist" << 2*d <<"person_id"<<iit->get_id()<< std::endl;
+								}
+							}
+						}
+						else
+						{
+							d = sqrt((iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_));
+							double anisotropy=calculate_anisotropy( p2, iit->get_planning_trajectory( )->at(t) );
+							if ( (d < collision_threshold)&& (anisotropy>anisotropy_threshold_) )
+							{
+								//std::cout << "person_COLLISION id="<<iit->get_id() << std::endl;
+								case_dynamic_=true;
+								//collision=true;
+								bool_collision_companion_=true;
+								min_distances_vector.push_back(d);
+								if(debug_real_test_companion_){
+									//std::cout << "anisotropy=" << anisotropy << std::endl;
+									//std::cout << "Collision found!! min_dist" << 2*d <<"person_id"<<iit->get_id()<< std::endl;
+								}
+							}
+						}
+					}
+
+				// END: calculate companion collisions with the group shape
+
+			}
+			break;
+		  case 3 :
+			for( auto iit : nearby_person_list_)
+			{
+				// START: calculate simple collisions, only with person companion shape.
+				if(iit->get_id()!=id_person_companion_){
+					d = iit->get_planning_trajectory( )->at(t).cov_dist(p,det);
+					if ( det > 1.0)
+					{
+						if ( d < 0.3 )
+						{
+							//std::cout << " case 3.1"<< std::endl;
+							collision=true;
+						}
+					}
+					else
+					{
+
+						//std::cout << "(case3) d=" <<d<<"; iit->get_planning_trajectory( )->at(t).distance( p )="<<iit->get_planning_trajectory( )->at(t).distance( p )<< std::endl;
+						//std::cout << " robot_->get_platform_radii()="<<robot_->get_platform_radii()<<"; (person_radi_*2)="<<(person_radi_*2)<<" sum="<<robot_->get_platform_radii()+(person_radi_*2)<< std::endl;
+
+						//d = iit->get_planning_trajectory( )->at(t).distance2( p );
+						d = iit->get_planning_trajectory( )->at(t).distance( p );
+						//if ( d < robot_->get_platform_radii_2() )
+						if ( d < (robot_->get_platform_radii()+(person_radi_)) )
+						{
+							//std::cout << " case 3.2"<< std::endl;
+							collision=true;
+						}
+					}
+				}
+				// END: calculate simple collisions, only with person companion shape.
+
+				// START: calculate companion collisions with the group shape
+				//if(!group_go_to_interact_with_other_person_){
+					if(iit->get_id()!=id_person_companion_){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+						double anisotropy=calculate_anisotropy( p2, iit->get_planning_trajectory( )->at(t) );
+						if ( det > 1.0)
+						{
+							if ( (d < collision_threshold)&&(anisotropy>anisotropy_threshold_)  ) // de momento, para mi todas las suyas con constantes, han de ser menores que la distancia robot+persona. (luego ya veremos si va bien o no)
+							{
+							//	std::cout << "person_COLLISION id="<<iit->get_id() << std::endl;
+								case_dynamic_=true;
+								//collision=true;
+								bool_collision_companion_=true;
+								min_distances_vector.push_back(d);
+								if(debug_real_test_companion_){
+									//std::cout << "anisotropy=" << anisotropy << std::endl;
+									//std::cout << "Collision found!! min_dist" << 2*d <<"person_id"<<iit->get_id()<< std::endl;
+								}
+							}
+						}
+						else
+						{
+							d = sqrt((iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_));
+							double anisotropy=calculate_anisotropy( p2, iit->get_planning_trajectory( )->at(t) );
+							if ( (d < collision_threshold)&&(anisotropy>anisotropy_threshold_) )
+							{
+								//std::cout << "person_COLLISION id="<<iit->get_id() << std::endl;
+								case_dynamic_=true;
+								//collision=true;
+								bool_collision_companion_=true;
+								min_distances_vector.push_back(d);
+								if(debug_real_test_companion_){
+									//std::cout << "anisotropy=" << anisotropy << std::endl;
+									//std::cout << "Collision found!! min_dist" << 2*d <<"person_id"<<iit->get_id()<< std::endl;
+								}
+							}
+						}
+					}
+
+				// END: calculate companion collisions with the group shape
+
+			}
+			break;
+
+		}
+
+			//calculate probabilities. NOT implemented, insignificant collision values when cov is high
+            //pr_no_col *= 1 - gaussian_constant_ / sqrt(det) * exp( -0.5*d );// * robot_->get_platform_radii_2();//area = pi * r^2 (pi included in gaussian_contant)
+            //std::cout << "Pr of no colision joint = " << pr_no_col << " and distance = " << d << " det = " << det << std::endl;
+	}
+
+
+	// START: final part calculate the min collision distance for companion
+
+	// obtain minimun collision distance.
+	if(debug_companion_){
+		std::cout << "min_distances_vector.size()= "<<min_distances_vector.size()<< std::endl;
+	}
+	if(!min_distances_vector.empty()){ // si hay alguna distancia minima.
+
+		double min_dist;
+		if(min_distance_collision_>min_distances_vector[0]){
+			min_dist=min_distances_vector[0];
+		}else{
+			min_dist=min_distance_collision_;
+		}
+
+		for( unsigned int in=0; in<min_distances_vector.size(); in++){
+			if(debug_companion_){
+				std::cout << "min_distances_vector["<<in<<"]= "<<min_distances_vector[in]<< std::endl;
+			}
+			if(min_distances_vector[in]<min_dist){
+				min_dist=min_distances_vector[in];
+				//std::cout << "min_dist="<<min_dist<< std::endl;
+				//min_angle=min_angles_colisions_[in];
+			}
+		}
+
+
+		min_distance_collision_=min_dist; // sacar fuera la min dist
+
+	}
+
+	//std::cout << "min_distance_collision_= "<<min_distance_collision_<<"; ((real_robot_person_distance/2)+2*robot_radi)="<<((real_robot_person_distance/2)+2*robot_radi)<< std::endl;
+
+	/*if(min_distance_collision_<((real_robot_person_distance/2)+2*robot_radi)){
+		std::cout << "(REAL ROBOT-PERSON distace for collisions)!!! real_robot_person_distance= "<<real_robot_person_distance << std::endl;
+	}*/
+
+	if(debug_companion_){
+		std::cout << "min_distance_collision_= "<<min_distance_collision_<< std::endl;
+		std::cout << "bool_collision_companion_= "<<bool_collision_companion_ << std::endl;
+		std::cout << "FIN function: check_collision_companion " << std::endl;
+	}
+	/*check_collision_companion_end = clock();
+	if(check_execution_times_){
+		std::cout << "time_check_collision_companion="<<((check_collision_companion_start-check_collision_companion_end)/clocks_per_sec_my_var_)*1000 << std::endl;
+	}*/
+
+
+	// END: final part calculate the min collision distance for companion
+
+
+	return collision;
+}
+
+
+
+bool Cplan_local_nav_person_companion::check_collision_final( const Spoint& p ,  int t)
+{
+	//TODO does not work properly on real scenarios! long term issue
+	//check colision with map: TO BE DEPRECATED
+	if ( read_force_map_success_ && !is_cell_clear_map( p.x, p.y ) )
+//	if ( read_force_map_success_ && !is_cell_clear_map( robot_->get_robot_planning_trajectory()->back().x,	robot_->get_robot_planning_trajectory()->back().y ) )
+	{
+		return  true;
+	}
+
+
+	//check collision with obstacles (laser), prior is necessary to calculate force_objects_laser_int_planning()
+	//for( Spoint iit : nearby_obstacle_list_ )//TODO not working properly since the c2g recalculates this vector
+	//std::cout << "laser_obstacle_list_.size()=" << laser_obstacle_list_.size()<< std::endl;
+
+
+	for( Spoint iit : laser_obstacle_list_ )
+	{
+
+		//if( iit.distance2( p )  < robot_->get_platform_radii_2() ) // TODO: ojo! le cambie la distancia respeco a la que gonzalo calculaba colision.
+		if( iit.distance( p )  < (robot_->get_platform_radii()+obstacle_radi2_ )) // 0.37, margen colision con objeto, colchon de seguridad!
+		{
+			if(debug_real_test_companion4_){
+				std::cout << "(!!! check_collision_final !!!) iit.distance( p )="<< iit.distance( p )<<"< robot_->get_platform_radii()="<<robot_->get_platform_radii()<< std::endl;
+			}
+			//std::cout << "(OBSTACLE) Collision found!! robot_->get_platform_radii_2()=" << robot_->get_platform_radii_2() <<"; iit.distance2( p )="<<iit.distance2( p )<<"; iit.distance( p )="<<iit.distance( p )<< std::endl;
+			return true;
+		}
+	}
+
+	//if t = -1, then no collision is calculated wrt ppl
+	if ( t > -1 )
+	{
+		double d,det;
+		switch( ppl_collision_mode_ )
+		{
+		  case 0: //normal mode, quadratic distance to person, independent of distribution
+			for( auto iit : nearby_person_list_)
+			{
+				//std::cout << "t=" <<t<<"; iit->get_planning_trajectory( )->size()="<<iit->get_planning_trajectory( )->size()<< std::endl;
+					//d = iit->get_planning_trajectory( )->at(t).distance2( p );
+					d = iit->get_planning_trajectory( )->at(t).distance( p );
+					//if ( d < robot_->get_platform_radii_2())
+					if ( d < (robot_->get_platform_radii()+person_radi2_))
+					{
+						std::cout << " case 0; d="<<d<<" person_radi2_="<<person_radi2_<<"; robot_->get_platform_radii()="<<robot_->get_platform_radii()<<"; t="<<t<< std::endl;
+
+						return true;
+					}
+
+			}
+			break;
+		  case 1://mahalanobis distance, considers collision if inside the std ellipsoid: TOO RESTRICTIVE...
+			for( auto iit : nearby_person_list_)
+			{
+
+					d = iit->get_planning_trajectory( )->at(t).cov_dist(p,det);
+					if ( d < 1.0 )
+					{
+						//std::cout << " case 1"<< std::endl;
+						//std::cout << "Colision detected, pr distance = " << d << std::endl;
+						return true;
+					}
+
+			}
+			break;
+		  case 2 ://mahalanobis distance, half the std, much less restrictive
+			for( auto iit : nearby_person_list_)
+			{
+
+					d = iit->get_planning_trajectory( )->at(t).cov_dist(p,det);
+					if ( det > 1.0)
+					{
+						if ( d < 0.5 )
+						{
+							//std::cout << " case 2.1"<< std::endl;
+							return true;
+						}
+					}
+					else
+					{
+						//d = iit->get_planning_trajectory( )->at(t).distance2( p );
+						d = iit->get_planning_trajectory( )->at(t).distance( p );
+						//if ( d < robot_->get_platform_radii_2() )
+						if ( d < (robot_->get_platform_radii()+person_radi2_) )
+						{
+							//std::cout << " case 2.2"<< std::endl;
+							return true;
+						}
+					}
+
+			}
+			break;
+		  case 3 :
+			for( auto iit : nearby_person_list_)
+			{
+
+					d = iit->get_planning_trajectory( )->at(t).cov_dist(p,det);
+					if ( det > 1.0)
+					{
+						if ( d < 0.3 )
+						{
+							//std::cout << " case 3.1"<< std::endl;
+							return true;
+						}
+					}
+					else
+					{
+						//d = iit->get_planning_trajectory( )->at(t).distance2( p );
+						d = iit->get_planning_trajectory( )->at(t).distance( p );
+						//if ( d < robot_->get_platform_radii_2() )
+						if ( d < (robot_->get_platform_radii()+person_radi2_) )
+						{
+							//std::cout << " case 3.2"<< std::endl;
+							return true;
+						}
+					}
+
+			}
+			break;
+
+		}
+
+			//calculate probabilities. NOT implemented, insignificant collision values when cov is high
+            //pr_no_col *= 1 - gaussian_constant_ / sqrt(det) * exp( -0.5*d );// * robot_->get_platform_radii_2();//area = pi * r^2 (pi included in gaussian_contant)
+            //std::cout << "Pr of no colision joint = " << pr_no_col << " and distance = " << d << " det = " << det << std::endl;
+	}
+
+	return false;
+}
+
+
+void Cplan_local_nav_person_companion::set_number_of_vertex( unsigned int n )
+{
+	max_iter_ = n;
+    edge_.reserve((size_t)max_iter_);
+    cost_robot_.reserve((size_t)max_iter_);
+    cost_int_forces_.reserve((size_t)max_iter_);
+    cost_obstacles_.reserve((size_t)max_iter_);
+    //cost_local_minima_.reserve((size_t)max_iter_);
+    cost_distance_.reserve((size_t)max_iter_);
+    cost_orientation_.reserve((size_t)max_iter_);
+    cost_past_traj_.reserve((size_t)max_iter_);
+    nodes_in_branch_.reserve((size_t)max_iter_);
+	random_goals_.reserve( (size_t)max_iter_ );
+
+
+}
+
+void Cplan_local_nav_person_companion::preprocess_global_parameters(Crobot* robot_act)
+{
+	switch( global_mode_)
+	{
+	case Cplan_local_nav_person_companion::Weighted_sum_erf :
+		calculate_normalization_cost_functions_parameters_erf();
+		break;
+	case Cplan_local_nav_person_companion::MO_erf :
+		calculate_normalization_cost_functions_parameters_erf();
+		calculate_non_dominated_solutions();
+		break;
+	case Cplan_local_nav_person_companion::MO_norm :
+		calculate_normalization_cost_functions_parameters_norm(robot_act);
+		calculate_non_dominated_solutions();
+		break;
+	case Cplan_local_nav_person_companion::Scalarization :
+	case Cplan_local_nav_person_companion::Weighted_sum_norm :
+		//calcualte normalization: we need utopia point and max value
+		calculate_normalization_cost_functions_parameters_norm(robot_act);
+		break;
+	}
+}
+
+void Cplan_local_nav_person_companion::calculate_non_dominated_solutions()
+{
+	//fill the multiobjective cost structure
+	multicosts_.clear();
+	Smulticost_pcom m(0,5);
+	bool is_candidate_dominated;
+	//std::cout << " end_of_branches_index_.size()="<<end_of_branches_index_.size()<< std::endl;
+
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		m.id = i;
+		//raw costs
+		/*m.cost[0] = cost_distance_[i];// [0] Goal cost
+		m.cost[1] = cost_orientation_[i];// [1] orientation cost
+		m.cost[2] = cost_robot_[i];// [2] Robot cost
+		m.cost[3] = cost_int_forces_[i];// [3]Interacting people cost
+		m.cost[4] = cost_obstacles_[i];// [5] obstacles cost*/
+		//normalized costs
+		m.cost[0] = (cost_distance_[i] - mean_cost_distance_) / std_cost_distance_;// [0] Goal cost
+		m.cost[1] = (cost_orientation_[i] - mean_cost_orientation_) / std_cost_orientation_;// [1] orientation cost
+		m.cost[2] = (cost_robot_[i] - mean_cost_robot_) / std_cost_robot_;// [2] Robot cost
+		m.cost[3] = (cost_int_forces_[i] - mean_cost_int_forces_) / std_cost_int_forces_;// [3]Interacting people cost
+		m.cost[4] = (cost_obstacles_[i] - mean_cost_obstacles_) / std_cost_obstacles_;// [5] obstacles cost
+		multicosts_.push_back(m);
+	}
+
+	//std::cout << " multicosts_.size()="<<multicosts_.size()<< std::endl;
+	//calculate the non-dominated set
+	nondominated_multicosts_.clear();
+	for( Smulticost_pcom i : multicosts_  )
+	{
+		//std::cout << " int first for:"<< std::endl;
+		//i.print_ml();
+		is_candidate_dominated = false;
+		for( std::list<Smulticost_pcom>::iterator j = nondominated_multicosts_.begin() ; j != nondominated_multicosts_.end(); j++ )
+		{
+			//std::cout << " int seconf for:"<< std::endl;
+			//check it is not the same
+			if ( i!=*j )
+			{
+				// check if i dominates j
+				if ( i < *j )
+				{
+					//std::cout << " i:"<< std::endl;
+					//i.print();
+					//std::cout << " j:"<< std::endl;
+					//j->print();
+					j = nondominated_multicosts_.erase(j);
+				}
+				// check if j dominates i: break and look for a new candidate i
+				else if ( *j < i )
+				{
+					is_candidate_dominated = true;
+					break;
+				}
+
+				//else, nothing happens until all set is compared with i
+			}
+		}
+		if( !is_candidate_dominated )
+		{
+			//std::cout << " int if"<< std::endl;
+			nondominated_multicosts_.push_back(i);
+		}
+	}
+	//std::cout << " nondominated_multicosts_.size()="<<nondominated_multicosts_.size()<< std::endl;
+
+
+
+	//std::cout << "size of the non-dominated set = " << set.size() << " / " << end_of_branches_index_.size() << std::endl;
+}
+
+void Cplan_local_nav_person_companion::calculate_normalization_cost_functions_parameters_erf()
+{
+	mean_cost_int_forces_=0.0;
+	mean_cost_robot_=0.0;
+	mean_cost_obstacles_=0.0;
+	mean_cost_past_traj_=0.0;
+	mean_cost_distance_=0.0;
+	mean_cost_orientation_=0.0;
+	mean_cost_companion_=0.0;  // mean companion cost, add by ely.
+
+	double N = (double)end_of_branches_index_.size();
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		mean_cost_int_forces_ += cost_int_forces_[i];
+		mean_cost_robot_ +=cost_robot_[i];
+		mean_cost_obstacles_ +=cost_obstacles_[i];
+		mean_cost_past_traj_ += cost_past_traj_[i];
+		mean_cost_distance_ +=cost_distance_[i];
+		mean_cost_orientation_ +=cost_orientation_[i];
+		mean_cost_companion_ +=cost_companion_[i]; // mean companion cost, add by ely.
+
+		//plot of the entire raw costs
+		/*std::cout << cost_int_forces_[i] << " , " <<
+				cost_robot_[i] << " , " <<
+				cost_obstacles_[i] << " , " <<
+				cost_distance_[i] << " , " <<
+				cost_orientation_[i] <<	std::endl;*/
+		/*std::cout << " cost_int_forces_ ["<<i<<"]="<< cost_int_forces_[i] <<" mean_cost_int_forces_="<< mean_cost_int_forces_ <<std::endl;
+		std::cout << " cost_robot_      ["<<i<<"]="<< cost_robot_[i]      <<" mean_cost_robot_     ="<< mean_cost_robot_      <<std::endl;
+		std::cout << " cost_obstacles_  ["<<i<<"]="<< cost_obstacles_[i]  <<" mean_cost_obstacles_ ="<< mean_cost_obstacles_  <<std::endl;
+		std::cout << " cost_distance_   ["<<i<<"]="<< cost_distance_[i]   <<" mean_cost_distance_  ="<< mean_cost_distance_   <<std::endl;
+		std::cout << " cost_orientation_["<<i<<"]="<< cost_orientation_[i]<<" mean_cost_int_forces_="<< mean_cost_int_forces_ <<std::endl;
+		 */
+	}
+	mean_cost_int_forces_ /= N;
+	mean_cost_robot_ /= N;
+	mean_cost_obstacles_ /= N;
+	mean_cost_past_traj_ /= N;
+	mean_cost_distance_ /= N;
+	mean_cost_orientation_ /= N;
+	mean_cost_companion_ /= N; // mean companion cost, add by ely.
+	/*std::cout <<" N = "<< N <<std::endl;
+	std::cout <<" mean_cost_int_forces_="<< mean_cost_int_forces_ <<std::endl;
+	std::cout <<" mean_cost_robot_     ="<< mean_cost_robot_      <<std::endl;
+	std::cout <<" mean_cost_obstacles_ ="<< mean_cost_obstacles_  <<std::endl;
+	std::cout <<" mean_cost_distance_  ="<< mean_cost_distance_   <<std::endl;
+	std::cout <<" mean_cost_int_forces_="<< mean_cost_int_forces_ <<std::endl;
+	*/
+
+	std_cost_int_forces_=0.0;
+	std_cost_robot_=0.0;
+	std_cost_obstacles_=0.0;
+	std_cost_past_traj_=0.0;
+	std_cost_distance_=0.0;
+	std_cost_orientation_=0.0;
+	std_cost_companion_=0.0; // std companion cost, add by ely.
+
+	double d;
+	N -= 1.0;//unbiased std
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		d = cost_int_forces_[i] - mean_cost_int_forces_;
+		std_cost_int_forces_ += d*d;
+
+		/*std::cout <<" cost_int_forces_["<<i<<"]="<< cost_int_forces_[i] <<"mean_cost_int_forces_="<<mean_cost_int_forces_<<std::endl;
+		std::cout <<" d = (cost_int_forces_[i] - mean_cost_int_forces_) ="<< d <<std::endl;
+		std::cout <<" std_cost_int_forces_ =" << std_cost_int_forces_      <<std::endl;
+		*/
+
+		d = cost_robot_[i] - mean_cost_robot_;
+		std_cost_robot_ += d*d;
+
+		/*std::cout <<" cost_robot_["<<i<<"]="<< cost_robot_[i] <<"mean_cost_robot_="<<mean_cost_robot_<<std::endl;
+		std::cout <<" d = (cost_robot_[i] - mean_cost_robot_) ="<< d <<std::endl;
+		std::cout <<" std_cost_robot_ =" << std_cost_robot_      <<std::endl;
+		*/
+
+		d = cost_obstacles_[i] - mean_cost_obstacles_;
+		std_cost_obstacles_ += d*d;
+
+		/*std::cout <<" cost_obstacles_["<<i<<"]="<< cost_obstacles_[i] <<"mean_cost_obstacles_="<<mean_cost_obstacles_<<std::endl;
+		std::cout <<" d = (cost_obstacles_[i] - mean_cost_obstacles_) ="<< d <<std::endl;
+		std::cout <<" std_cost_obstacles_ =" << std_cost_obstacles_     <<std::endl;
+		*/
+
+		d = cost_past_traj_[i] - mean_cost_past_traj_;
+		std_cost_past_traj_ += d*d;
+
+		/*std::cout <<" cost_past_traj_["<<i<<"]="<< cost_past_traj_[i] <<"mean_cost_past_traj_="<<mean_cost_past_traj_<<std::endl;
+		std::cout <<" d = (cost_past_traj_[i] - mean_cost_past_traj_) ="<< d <<std::endl;
+		std::cout <<" std_cost_past_traj_ =" << std_cost_past_traj_ <<std::endl;
+		*/
+
+		d = cost_distance_[i] - mean_cost_distance_;
+		std_cost_distance_ += d*d;
+
+		/*std::cout <<" cost_distance_["<<i<<"]="<< cost_distance_[i] <<"mean_cost_distance_="<<mean_cost_distance_<<std::endl;
+		std::cout <<" d = (cost_distance_[i] - mean_cost_distance_) ="<< d <<std::endl;
+		std::cout <<" std_cost_distance_ =" << std_cost_distance_      <<std::endl;
+		*/
+
+		d = cost_orientation_[i] - mean_cost_orientation_;
+		std_cost_orientation_ += d*d;
+
+		/*std::cout <<" cost_orientation_["<<i<<"]="<< cost_orientation_[i] <<"mean_cost_orientation__="<<mean_cost_orientation_<<std::endl;
+		std::cout <<" d = (cost_orientation_[i] - mean_cost_orientation_) ="<< d <<std::endl;
+		std::cout <<" std_cost_orientation_ =" << std_cost_orientation_      <<std::endl;
+		*/
+
+		d = cost_companion_[i] - mean_cost_companion_; // std companion cost, add by ely.
+		std_cost_companion_ += d*d; // std companion cost, add by ely.
+	}
+	if( std_cost_int_forces_ > 0.01 )
+	{
+		std_cost_int_forces_ /= N; std_cost_int_forces_ = sqrt(std_cost_int_forces_);
+	}
+	else
+		std_cost_int_forces_ = 0.01;
+	if( std_cost_robot_ > 0.01)
+	{
+		std_cost_robot_ /= N; std_cost_robot_ = sqrt(std_cost_robot_);
+	}
+	else
+		std_cost_robot_ = 0.01;
+	if( std_cost_obstacles_ > 0.01)
+	{
+		std_cost_obstacles_ /= N;std_cost_obstacles_ = sqrt(std_cost_obstacles_);
+	}
+	else
+		std_cost_obstacles_ = 0.01;
+	if( std_cost_past_traj_ > 0.01)
+	{
+		std_cost_past_traj_ /= N; std_cost_past_traj_= sqrt(std_cost_past_traj_);
+	}
+	else
+		std_cost_past_traj_ = 0.01;
+	if( std_cost_distance_ > 0.01)
+	{
+		std_cost_distance_ /= N; std_cost_distance_= sqrt(std_cost_distance_);
+	}
+	else
+		std_cost_distance_ = 0.01;
+	if( std_cost_orientation_ > 0.01)
+	{
+		std_cost_orientation_ /= N; std_cost_orientation_= sqrt(std_cost_orientation_);
+	}
+	else
+		std_cost_orientation_ = 0.01;
+
+	if( std_cost_companion_ > 0.01)  // std companion cost, add by ely.
+	{
+		std_cost_companion_ /= N; std_cost_companion_= sqrt(std_cost_companion_);
+	}
+	else
+		std_cost_companion_ = 0.01;
+
+	//printing results
+	//std::cout << "cost_distance = (" << mean_cost_distance_ << " , " << std_cost_distance_ << std::endl;
+	//std::cout << "cost_orientation = (" << mean_cost_orientation_ << " , " << std_cost_orientation_ << std::endl;
+	//std::cout << "cost_int_forces = (" << mean_cost_int_forces_ << " , " << std_cost_int_forces_ << std::endl;
+	//std::cout << "cost_robot = (" << mean_cost_robot_ << " , " << std_cost_robot_ << std::endl;
+	//std::cout << "cost_obstacles = (" << mean_cost_obstacles_ << " , " << std_cost_obstacles_ << std::endl;
+	//std::cout << "cost_past_traj = (" << mean_cost_past_traj_ << " , " << std_cost_past_traj_ << std::endl;
+	//std::cout << "cost_companion = (" << mean_cost_companion_ << " , " << std_cost_companion_ << std::endl;
+}
+
+void Cplan_local_nav_person_companion::calculate_normalization_cost_functions_parameters_norm(Crobot* robot_act)
+{
+	//calculates the Utopia point considering free space and the max value in order to linearly normalize ->[0,1]
+	mean_cost_distance_=0.0;
+	mean_cost_orientation_=0.0;
+	mean_cost_robot_=0.0;
+	mean_cost_int_forces_=0.0;
+	mean_cost_obstacles_=0.0;
+	mean_cost_past_traj_=0.0;
+	//propagate the robot as if no obstacle is in the scene and calculate costs
+	SpointV robot = robot_act->get_planning_trajectory()->front();
+	Sforce f_goal;
+	while ( robot.time_stamp - now_ < horizon_time_ && robot.distance2( local_goal_ ) > 0.25 )
+	{
+		// potential cost to go destination
+		f_goal = robot_act->force_goal( Sdestination(0,local_goal_.x,local_goal_.y), get_sfm_params(robot_act), &robot );
+
+		// robot propagation
+		robot = robot.propagate( dt_, f_goal, robot_act->get_desired_velocity() );
+
+		//calculate costs
+		mean_cost_robot_ += f_goal.module2(cost_angular_);
+		mean_cost_distance_ += robot.distance2(local_goal_);
+		double o = robot.angle_heading_point( local_goal_ );
+		mean_cost_orientation_ += o*o;
+	}
+
+	//calculate max costs and the scalarization term
+	double max;
+	max = -10000.0;
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		if (max < cost_distance_[i])
+			max = cost_distance_[i];
+	}
+	std_cost_distance_ = max - mean_cost_distance_;
+	if ( std_cost_distance_ < 0.01 ) std_cost_distance_ = 0.01;
+
+	max = -10000.0;
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		if (max < cost_orientation_[i])
+			max = cost_orientation_[i];
+	}
+	std_cost_orientation_ = max - mean_cost_orientation_;
+	if ( std_cost_orientation_ < 0.01 ) std_cost_orientation_ = 0.01;
+
+	max = -10000.0;
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		if (max < cost_robot_[i])
+			max = cost_robot_[i];
+	}
+	std_cost_robot_ = max - mean_cost_robot_;
+	if ( std_cost_robot_ < 0.01 ) std_cost_robot_= 0.01;
+
+	max = -10000.0;
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		if (max < cost_int_forces_[i])
+			max = cost_int_forces_[i];
+	}
+	std_cost_int_forces_ = max - mean_cost_int_forces_;
+	if ( std_cost_int_forces_ < 0.01 ) std_cost_int_forces_ = 0.01;
+
+	max = -10000.0;
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		if (max < cost_obstacles_[i])
+			max = cost_obstacles_[i];
+	}
+	std_cost_obstacles_ = max - mean_cost_obstacles_;
+	if ( std_cost_obstacles_ < 0.01 ) std_cost_obstacles_ = 0.01;
+
+	max = -10000.0;
+	for( unsigned int i : end_of_branches_index_ )
+	{
+		if (max < cost_past_traj_[i])
+			max = cost_past_traj_[i];
+	}
+	std_cost_past_traj_= max - mean_cost_past_traj_;
+	if ( std_cost_past_traj_< 0.01 ) std_cost_past_traj_= 0.01;
+
+	//printing results
+	//std::cout << "cost_distance = (" << mean_cost_distance_ << " , " << std_cost_distance_ << std::endl;
+	//std::cout << "cost_orientation = (" << mean_cost_orientation_ << " , " << std_cost_orientation_ << std::endl;
+	//std::cout << "cost_int_forces = (" << mean_cost_int_forces_ << " , " << std_cost_int_forces_ << std::endl;
+	//std::cout << "cost_robot = (" << mean_cost_robot_ << " , " << std_cost_robot_ << std::endl;
+	//std::cout << "cost_obstacles = (" << mean_cost_obstacles_ << " , " << std_cost_obstacles_ << std::endl;
+	//std::cout << "cost_past_traj = (" << mean_cost_past_traj_ << " , " << std_cost_past_traj_ << std::endl;
+}
+
+
+Spose Cplan_local_nav_person_companion::get_best_planned_pose_person_companion_akp(double dt)
+{
+	// TODO: arreglar mejor el que la person_companion, tenga en cuenta la second person companion!
+	// de momento esta solo reactivo! No usa el path para predecir donde posiciomnarse segun predicciones.
+	// Solucion rápida para ver si funciona. Cuando este to_do hay que arreglarlo bien!!!
+	//returns the best planned pose at time
+	if(debug_get_best_planned_pose_person_companion_akp_){
+		std::cout << "INI get_best_planned_pose_person_companion_akp (person_companion)" <<  std::endl;
+	}
+
+	Spose returned_pose;
+	int index(0);
+	if ( dt < dt_)
+	   // index = 1;
+		 index = 1;
+	else
+	    index = (int) (dt / dt_);
+
+
+	actual_best_path_index_=index;
+
+	//std::cout << "(get_best_planned_pose_person_companion_akp) dt="<<dt<<"; dt_="<<dt_<<"; index="<<index<<"; best_plan_vertex_index_.empty()="<<best_plan_vertex_index_.empty()<<"; best_plan_vertex_index_.size()="<<best_plan_vertex_index_.size()<<  std::endl;
+	if( !best_plan_vertex_index_.empty() && (unsigned)index < best_plan_vertex_index_.size() )
+	{
+		Spose pose_Act_person=ini_spose_person_companion_akp_;
+		SpointV_cov Spoint_Act_person=ini_point_person_companion_akp_;
+
+		if(debug_get_best_planned_pose_person_companion_akp_){
+			std::cout << "(ANT) pose_Act_person:" <<  std::endl;
+			pose_Act_person.print();
+			std::cout << "Spoint_Act_person:" <<  std::endl;
+			Spoint_Act_person.print();
+		}
+
+		unsigned int next_plan_index = best_plan_vertex_index_.at( best_plan_vertex_index_.size() - index );
+		returned_pose=person_companion_->get_robot_planning_trajectory()->at(next_plan_index);
+
+
+		if(debug_get_best_planned_pose_person_companion_akp_){
+			std::cout << " (LAST) next_plan_index="<<next_plan_index <<  std::endl;
+			std::cout << "best_plan_vertex_index_.size() - index="<<best_plan_vertex_index_.size() - index <<  std::endl;
+			std::cout << "(ini) returned_pose.print():" <<  std::endl;
+			returned_pose.print();
+		}
+
+
+		if(bool_case_person_companion_){
+
+			double v; //double v=person_companion_desired_velocity_sim_;
+			// opcion 3.
+
+			if((returned_pose.v)>=(person_companion_desired_velocity_sim_)){
+				//std::cout << "ENTRO EN if (returned_pose.v)<=(person_companion_desired_velocity_sim_)" <<  std::endl;
+				v=person_companion_desired_velocity_sim_;
+			}else if((returned_pose.v)<=(-person_companion_desired_velocity_sim_)){
+				//std::cout << "ENTRO EN else if (returned_pose.v)<=(-person_companion_desired_velocity_sim_)" <<  std::endl;
+				v=-person_companion_desired_velocity_sim_;
+			}else{
+				//std::cout << "ENTRO EN else (returned_pose.v)<=(-person_companion_desired_velocity_sim_)" <<  std::endl;
+				v=returned_pose.v;
+			}
+
+			//Spose pose_Act_person=ini_spose_person_companion_akp_;
+			SpointV_cov Spoint_Act_person=ini_point_person_companion_akp_;
+			if(debug_get_best_planned_pose_person_companion_akp_){
+				std::cout << "(ANT) returned_pose.print():" <<  std::endl;
+				returned_pose.print();
+				std::cout << "(simulated vel) v=person_companion_desired_velocity_sim_"<<person_companion_desired_velocity_sim_ <<  std::endl;
+				std::cout << "robot_->get_desired_velocity()="<<robot_->get_desired_velocity()<<  std::endl;
+			}
+			//returned_pose=Spose(ini_spose_person_companion_akp_.x+returned_pose.x*(person_companion_desired_velocity_sim_/robot_->get_desired_velocity()),ini_spose_person_companion_akp_.y+returned_pose.y*(person_companion_desired_velocity_sim_/robot_->get_desired_velocity()), returned_pose.time_stamp, returned_pose.theta, v, returned_pose.w);
+			double inc_x=(returned_pose.x-ini_spose_person_companion_akp_.x)*(person_companion_desired_velocity_sim_/robot_->get_desired_velocity());
+			double inc_y=(returned_pose.y-ini_spose_person_companion_akp_.y)*(person_companion_desired_velocity_sim_/robot_->get_desired_velocity());
+
+			double x= ini_spose_person_companion_akp_.x + inc_x;
+			double y= ini_spose_person_companion_akp_.y + inc_y;
+			returned_pose=Spose(x,y, returned_pose.time_stamp, returned_pose.theta, v, returned_pose.w);
+
+			if(debug_get_best_planned_pose_person_companion_akp_){
+				std::cout << "(DESPUES) returned_pose.print():" <<  std::endl;
+				returned_pose.print();
+			}
+		}
+	}
+	else{
+		//std::cout << "else Spose() get_best_planned_pose_person_companion_akp." <<  std::endl;
+		//returned_pose=Spose();
+		returned_pose=person_companion_->get_current_pose(); // en el caso del simulador de persona, si no hay plan. se usa la posicion anterior!
+	}
+
+	//std::cout << "OUT REPLAN LAST STEP; returned_pose.print(): " <<  std::endl;
+	//returned_pose.print();
+
+	return returned_pose;
+}
+
+
+
+void Cplan_local_nav_person_companion::
+get_navigation_instant_work( double& work_robot, double& work_persons )
+{
+	work_robot = work_robot_;
+	work_persons = work_persons_;
+}
+
+
+void Cplan_local_nav_person_companion::
+calculate_navigation_instant_work( )
+{
+	work_robot_ = 0.0;
+	if( best_plan_vertex_index_.size() > 2 )
+	{
+		work_robot_ =  fabs( edge_.at(best_plan_vertex_index_.at( best_plan_vertex_index_.size()-2 )).f  *
+			robot_->get_diff_position() );
+	}
+	else
+	{
+		work_robot_ = 0.0;
+	}
+
+	work_persons_ = 0.0;
+	for( Cperson_abstract* iit : nearby_person_list_)
+	{
+		if ( iit->get_current_pointV().distance( robot_->get_current_pointV() ) < workspace_radii_ )
+			work_persons_ += fabs( iit->force( robot_->get_current_pointV() ,
+					get_sfm_int_params(iit,robot_) ) * iit->get_diff_position() );
+	}
+}
+
+
+void Cplan_local_nav_person_companion::set_robot_params( double v, double w, double av, double av_break, double aw, double platform_radii)
+{
+	robot_->set_v_max( v );
+	max_v_by_system_ = v;//this velocity is modified depending on the density of nearby obstacles
+	robot_->set_w_max( w );
+	robot_->set_a_v_max( av );
+	robot_->set_a_v_break( av_break );
+	robot_->set_a_w_max( aw );
+	robot_->set_platform_radii( platform_radii);
+}
+
+//TODO update to new cost-to-go function and elimiate DEPRECATED parameters
+void Cplan_local_nav_person_companion::set_plan_cost_parameters( double c_dist, double c_orientation, double c_w_robot,
+		double c_w_people, double c_time, double c_w_obstacles, double c_old_path, double c_l_minima)
+{
+    cost_parameters_[0] = c_dist;// [0] Goal cost
+    cost_parameters_[1] = c_orientation;// [1] orientation cost
+    cost_parameters_[2] = c_w_robot;// [2] Robot cost
+    cost_parameters_[3] = c_w_people;// [3]Interacting people cost
+    cost_parameters_[4] = c_time;// [4] potential time
+    cost_parameters_[5] = c_w_obstacles;// [5] obstacles cost
+    cost_parameters_[6] = c_old_path;// [6] past function cost
+    cost_parameters_[7] = c_l_minima;// [7] local minima scape cost
+}
+
+//only use when no plan is calculated, as an evaluation of the observed performance
+// of this method or any navigation method
+void Cplan_local_nav_person_companion::calculate_navigation_cost_values( std::vector<double>& costs )
+{
+	costs.resize(4,0.0);
+	// calculate robot cost --------------------------------------------------------------------------------
+	Spose dr = robot_->get_diff_pose();
+	costs[0] = dr.v* dr.v + dr.w*dr.w;
+	costs[0] /= dt_*dt_;
+
+
+	// calculate ppl cost --------------------------------------------------------------------------------
+	Sforce f,f_int;
+	double cost = 0.0;
+	for( Cperson_abstract* iit: person_list_  )
+	{
+		f = iit->force_sphe(robot_->get_current_pointV() , get_sfm_int_params(iit,robot_)  );
+		f_int += f;
+		cost += f.module2();
+	}
+	costs[1] = cost;
+
+	// calculate obstacles cost  --------------------------------------------------------------------------------
+	Sforce f_obs = force_objects_laser_int_planning_virtual( robot_, 0, 25.0, false );//false set for no new nearby_obstacles list to be refilled
+	// INICION Limitar fuerza obstaculos cuando hay muchos solapados
+				double fobos_Xmod=sqrt(f_obs.fx*f_obs.fx);
+				double fobos_Ymod=sqrt(f_obs.fy*f_obs.fy);
+				double signo_x;
+				double signo_y;
+				if (f_obs.fx > 0){
+					signo_x=1;
+				}else{
+					signo_x=-1;
+				}
+				if (f_obs.fy > 0){
+					signo_y=1;
+				}else{
+					signo_y=-1;
+				}
+
+				if((fobos_Xmod>f_obst_max_x_)||(fobos_Ymod>f_obst_max_y_)){
+					f_obs.fx=signo_x*f_obst_max_x_;
+					f_obs.fy=signo_y*f_obst_max_y_;
+				}
+				//std::cout << "(FINAL FORCE) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+	// FIN Limitar fuerza obstaculos cuando hay muchos solapados
+
+
+	costs[2] = f_obs.module2();
+
+
+	// calculate average velocity --------------------------------------------------------------------------------
+	costs[3] = robot_->get_current_pose().v;
+
+}
+
+Sedge_tree_pcomp::Sedge_tree_pcomp(	unsigned int parent_, Sforce f_, Sforce f_goal_,
+		Sforce f_people_,Sforce f_obs_, Sforce f_persongoal_):
+		parent(parent_), f(f_), f_goal(f_goal_), f_people(f_people_), f_obs(f_obs_),f_persongoal(f_persongoal_)
+{
+
+}
+double Sedge_tree_pcomp::cost( Sedge_tree_pcomp parent) const
+{
+	//TODO
+	return 0.0;
+}
+void Sedge_tree_pcomp::print()
+{
+	std::cout << "parent vertex = " << parent << std::endl;
+	f.print();
+}
+
+Smulticost_pcom::Smulticost_pcom( unsigned int id_, unsigned int n ) :
+	id(id_)
+{
+	cost.resize( n, 0.0 );
+}
+
+bool Smulticost_pcom::operator< ( const Smulticost_pcom& m2) const
+{
+	//dominance operator. Returns true if m dominates m2
+	double thr(1e-5);
+	bool one_better(false);
+	for( unsigned int i = 0; i<cost.size(); ++i )
+	{
+		//for numerical stability, equality is cheked:  x-x2 < thr
+		if ( cost[i] - thr >  m2.cost[i] )
+			return false;
+		// check for at least one better cost i
+		else if ( cost[i] + thr <  m2.cost[i] )
+			one_better = true;
+		//else: equal both costs, needs more comparisons
+
+	}
+	return one_better;//requires that at least one was better
+}
+
+bool Smulticost_pcom::operator== ( const Smulticost_pcom& m2) const
+{
+	if( id == m2.id )
+		return true;
+	else
+		return false;
+}
+
+
+bool Smulticost_pcom::operator!= ( const Smulticost_pcom& m2) const
+{
+	return !(*this==m2);
+}
+
+void Smulticost_pcom::print ( ) const
+{
+	std::cout << "Multicost " << id << ", costs = {";
+	for( double i: cost )
+		std::cout << i << " , ";
+	std::cout << " } " << std::endl;
+}
+
+void Smulticost_pcom::print_ml ( ) const
+{
+	std::cout << id ;
+	for( double i: cost )
+		std::cout << ", "<< i;
+	std::cout << std::endl;
+}
+
+
+
+
+/*** Ini Check collision companion!  (ely-modificada, solo, esta vez para calculo colisiones robot goal respecto persona, cuando esta lejos de esta) ***/
+double Cplan_local_nav_person_companion::check_collision_companion_goal(const Spoint& p ,  int t)
+// return if have collision and the  minimum distance of the collision
+{
+
+	clock_t check_collision_companion_goal_start, check_collision_companion_goal_end;
+	check_collision_companion_goal_start = clock();
+
+	if(debug_companion_){
+		std::cout << "INI function: check_collision_companion ="<< std::endl;
+	}
+
+	double min_distance_collision_act=robot_person_companion_distance_; // initial equal to the máx distance. (robot+person) =pasan bien.
+
+	if(debug_companion_){
+		std::cout << "min_distance_collision_==robot_person_companion_distance_act= "<<min_distance_collision_act << std::endl;
+	}
+	std::vector<double> min_distances_vector;
+	min_distances_vector.clear();
+
+	bool collision=false;
+	 //TODO does not work properly on real scenarios! long term issue
+	//check colision with map: TO BE DEPRECATED
+	if ( read_force_map_success_ && !is_cell_clear_map( p.x, p.y ) )
+	{
+		collision=true; // colision, pero por choque con el mapa, TODO: mirar como tratar esto...
+
+	}
+
+// TODO: (ely) Igualmente, independientemente del modo que use gonzalo para calcular colisiones, yo podría usar el modo normal,
+//de distancia cuadratica, si veo mejor que pasa...
+
+	//check collision with obstacles (laser), prior is necessary to calculate force_objects_laser_int_planning()
+	//for( Spoint iit : nearby_obstacle_list_ )//TODO not working properly since the c2g recalculates this vector
+	for( Spoint iit : laser_obstacle_list_ )
+	{
+		double act_distance_obst_collision=sqrt((iit.distance( p )-obstacle_radi_amp_)*(iit.distance( p )-obstacle_radi_amp_));
+		if( act_distance_obst_collision  < robot_person_companion_distance_ )
+		{
+			//std::cout << "Collision found!!" << robot_->get_platform_radii_2() << std::endl;
+
+			min_distances_vector.push_back(act_distance_obst_collision);
+			collision=true;
+		}
+	}
+	t=0;
+	//if t = -1, then no collision is calculated wrt ppl
+	if ( t > -1 )
+	{
+		double d,det;
+		switch( ppl_collision_mode_ )
+		{
+		  case 0: //normal mode, quadratic distance to person, independent of distribution
+			  if(debug_companion_){
+			  std::cout << "case 0 (ppl_collision_mode_)" << std::endl;
+			  }
+			for( auto iit : nearby_person_list_)
+			{
+
+				//if(!group_go_to_interact_with_other_person_){ // si es id_person companion + caso zanlungo ha de entrar.
+				//if(!Zanlungo_model_){
+					// ini side-by-side:
+					if(iit->get_id()!=id_person_companion_){ // add due to person companion, esta persona no hay que calcular colisiones respecto a ella.
+						d = sqrt((iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_));
+
+						if( d < robot_person_companion_distance_ )
+						{
+							collision=true;
+							min_distances_vector.push_back(d);
+						}
+					}
+					// fin side-by-side:
+				/*}else{
+					d = sqrt((iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_));
+
+					if( d < robot_person_companion_distance_ )
+					{
+						collision=true;
+						min_distances_vector.push_back(d);
+					}
+				}*/
+				/*}else
+				 * }{
+					if((iit->get_id()!=id_person_companion_)&&(iit->get_id()!=id_person_goal_)){ // add due to person companion, esta persona no hay que calcular colisiones respecto a ella.
+						d = iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_;
+
+						if( d < robot_person_companion_distance_ )
+						{
+							collision=true;
+							min_distances_vector.push_back(d);
+						}
+					}
+				}*/
+
+
+
+			}
+			break;
+		  case 1://mahalanobis distance, considers collision if inside the std ellipsoid: TOO RESTRICTIVE...
+			  if(debug_companion_){
+				  std::cout << "case 1 (ppl_collision_mode_)" << std::endl;
+			  }
+			for( auto iit : nearby_person_list_) // de momento, para mi todas las suyas con constantes, han de ser menores que la distancia robot+persona. (luego ya veremos si va bien o no)
+			{
+
+				//if(!group_go_to_interact_with_other_person_){
+				//if(!Zanlungo_model_){
+					// ini case side-by-side:
+					if(iit->get_id()!=id_person_companion_){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+						if ( d < robot_person_companion_distance_ )
+						{
+							//std::cout << "Colision detected, pr distance = " << d << std::endl;
+							collision=true;
+							min_distances_vector.push_back(d);
+
+						}
+					}
+					// fin case side-by-side:
+				/*}else{
+					d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+					if ( d < robot_person_companion_distance_ )
+					{
+						//std::cout << "Colision detected, pr distance = " << d << std::endl;
+						collision=true;
+						min_distances_vector.push_back(d);
+
+					}
+
+				}*/
+				/*}else{
+					if((iit->get_id()!=id_person_companion_)&&(iit->get_id()!=id_person_goal_)){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+						if ( d < robot_person_companion_distance_ )
+						{
+							//std::cout << "Colision detected, pr distance = " << d << std::endl;
+							collision=true;
+							min_distances_vector.push_back(d);
+
+						}
+					}
+				}*/
+
+			}
+			break;
+		  case 2 ://mahalanobis distance, half the std, much less restrictive
+			  if(debug_companion_){
+				  std::cout << "case 2 (ppl_collision_mode_)" << std::endl;
+			  }
+			for( auto iit : nearby_person_list_)
+			{
+
+				//if(!group_go_to_interact_with_other_person_){
+				//if(!Zanlungo_model_){
+					// ini case-side-by-side:
+					if(iit->get_id()!=id_person_companion_){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+						if ( det > 1.0)
+						{
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+							}
+						}
+						else
+						{
+							d = iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_;
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+							}
+						}
+					}
+					// fin case-side-by-side:
+				/*}else{
+					d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+					if ( det > 1.0)
+					{
+						if ( d < robot_person_companion_distance_)
+						{
+							collision=true;
+							min_distances_vector.push_back(d);
+						}
+					}
+					else
+					{
+						d = iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_;
+						if ( d < robot_person_companion_distance_)
+						{
+							collision=true;
+							min_distances_vector.push_back(d);
+						}
+					}
+				}*/
+				/*}else{ // fin go targ pers
+					if((iit->get_id()!=id_person_companion_)&&(iit->get_id()!=id_person_goal_)){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_);
+						if ( det > 1.0)
+						{
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+							}
+						}
+						else
+						{
+							d = iit->get_planning_trajectory( )->at(t).distance( p )-person_radi_amp_;
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+							}
+						}
+					}
+				}*/
+
+			}
+			break;
+		  case 3 :
+			  if(debug_companion_){
+				  std::cout << "case 3 (ppl_collision_mode_)" << std::endl;
+			  }
+			for( auto iit : nearby_person_list_)
+			{
+
+
+				//if(!group_go_to_interact_with_other_person_){
+				//if(!Zanlungo_model_){
+					// ini side-by-side
+					if(iit->get_id()!=id_person_companion_){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+
+						if ( det > 1.0)
+						{
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+							}
+						}
+						else
+						{
+							d = iit->get_planning_trajectory( )->at(t).distance( p );
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+
+							}
+						}
+					}
+
+					// fin side-by-side
+				/*}else{
+					d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+
+					if ( det > 1.0)
+					{
+						if ( d < robot_person_companion_distance_)
+						{
+							collision=true;
+							min_distances_vector.push_back(d);
+						}
+					}
+					else
+					{
+						d = iit->get_planning_trajectory( )->at(t).distance( p );
+						if ( d < robot_person_companion_distance_)
+						{
+							collision=true;
+							min_distances_vector.push_back(d);
+
+						}
+					}
+				}*/
+				/*}else{ // fin go targ pers
+					if((iit->get_id()!=id_person_companion_)&&(iit->get_id()!=id_person_goal_)){
+						d = sqrt((iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_)*(iit->get_planning_trajectory( )->at(t).cov_dist(p,det)-person_radi_amp_));
+
+						if ( det > 1.0)
+						{
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+							}
+						}
+						else
+						{
+							d = iit->get_planning_trajectory( )->at(t).distance( p );
+							if ( d < robot_person_companion_distance_)
+							{
+								collision=true;
+								min_distances_vector.push_back(d);
+
+							}
+						}
+					}
+				}*/
+
+
+			}
+			break;
+
+		}
+
+			//calculate probabilities. NOT implemented, insignificant collision values when cov is high
+            //pr_no_col *= 1 - gaussian_constant_ / sqrt(det) * exp( -0.5*d );// * robot_->get_platform_radii_2();//area = pi * r^2 (pi included in gaussian_contant)
+            //std::cout << "Pr of no colision joint = " << pr_no_col << " and distance = " << d << " det = " << det << std::endl;
+	}
+
+
+	// obtain minimun collision distance.
+	if(debug_companion_){
+		std::cout << "min_distances_vector.size()= "<<min_distances_vector.size()<< std::endl;
+	}
+	if(!min_distances_vector.empty()){ // si hay alguna distancia minima.
+		double min_dist=min_distances_vector[0];
+		//double min_angle=min_angles_colisions_[0];
+		for( unsigned int in=0; in<min_distances_vector.size(); in++){
+			if(debug_companion_){
+				std::cout << "min_distances_vector["<<in<<"]= "<<min_distances_vector[in]<< std::endl;
+			}
+			if(min_distances_vector[in]<min_dist){
+				min_dist=min_distances_vector[in];
+				//min_angles_colisions_=min_angles_colisions_[in];
+			}
+		}
+
+		min_distance_collision_act=min_dist; // sacar fuera la min dist.
+	}
+	if(debug_companion_){
+		std::cout << "min_distance_collision_act= "<<min_distance_collision_act<< std::endl;
+		std::cout << "collision= "<<collision << std::endl;
+		std::cout << "FIN function: check_collision_companion " << std::endl;
+	}
+
+	check_collision_companion_goal_end = clock();
+	if(check_execution_times_){
+		std::cout << "time_check_collision_companion_goal="<<((check_collision_companion_goal_start-check_collision_companion_goal_end)/clocks_per_sec_my_var_)*1000 << std::endl;
+	}
+	return min_distance_collision_act;
+}
+
+
+
+/*** INI calculate_companion_cost_node! ***/
+void Cplan_local_nav_person_companion::calculate_companion_cost_node( unsigned int parent_index, Crobot* robot_act)
+{
+	if(debug_companion_){
+	 std::cout << "INI Function: calculate_companion_cost_node" << std::endl;
+	}
+
+
+		double final_min_colision_distance=0.0;
+		bool colision=false; // se inicializa a falso.
+		std::vector<double> min_colision_distances;
+		if(debug_companion_){
+			std::cout << "robot_person_companion_distance_="<<robot_person_companion_distance_ << std::endl;
+		}
+
+		// ver si hay colision en la circunferencia de radio ROBOT+Persona. Si hay algun obstaculo estatico o persona, prediccion dentro de esa circunferencia.
+		// (check_collision( const Spoint& p=robot_creo ,  int t)) => la tendré que modificar para que devuelva la distancia de colision, tambien!
+		// la check_collision ya tiene los bucles siguientes que hacian falta.
+		// collision check for static objects    (si hay alguno dentro de esa circuferencia => se cambia el bool a true y se guarda esa distancia en el vector, min_distances.
+		// collision check for dynamic persons
+
+		//colision=check_collision_companion( robot_act->get_planning_trajectory()->back(), parent_index );
+		//check_collision_companion( robot_act->get_planning_trajectory()->back(), parent_index );
+
+		colision=bool_collision_companion_;
+
+		if(debug_companion_){
+			std::cout << "parent_index="<<parent_index<< std::endl;
+			std::cout << "colision="<<colision<< std::endl;
+		}
+
+		// busco la distancia minima de todas las distancias de colision.
+
+		if(colision){
+			final_min_colision_distance=min_distance_collision_; // = distance entre robot y obstaculo más cercano.
+			min_distance_collision_vector_.push_back(min_distance_collision_);
+			//std::cout << " si colision !!!!!!  (calculate_companion_cost_node) colision="<<colision<<"; final_min_colision_distance="<<final_min_colision_distance<< std::endl;
+
+		}else{
+			final_min_colision_distance=robot_person_companion_distance_;
+			min_distance_collision_vector_.push_back(robot_person_companion_distance_);
+			//std::cout << " No colision !!!!!!  (calculate_companion_cost_node) colision="<<colision<<"; final_min_colision_distance="<<final_min_colision_distance<< std::endl;
+
+		}
+		if(debug_companion_){
+			std::cout << "final_min_colision_distance="<<final_min_colision_distance<< std::endl;
+		}
+		// calculate the angle between robot and person.
+		double angle=angle_companion_; // in grad.
+
+		double robot_radi=robot_->get_platform_radii();
+		double real_robot_person_distance2;
+		if(bool_case_person_companion_){
+			real_robot_person_distance2=calc_robot_person_companion_distance_companion_person_akp();
+		}else{
+			real_robot_person_distance2=calc_robot_person_companion_distance();
+		}
+
+
+
+		if((final_min_colision_distance==robot_person_companion_distance_)||(final_min_colision_distance>robot_person_companion_distance_)){
+		//if((final_min_colision_distance==(2*((real_robot_person_distance/2)+2*robot_radi)))||(final_min_colision_distance>(2*((real_robot_person_distance/2)+2*robot_radi)))){
+		//if((final_min_colision_distance==(real_robot_person_distance+4*robot_radi+little_augmented_collision_margin_))||(final_min_colision_distance>(real_robot_person_distance+4*robot_radi+little_augmented_collision_margin_))){
+			angle=angle_companion_;
+
+			//std::cout << " entro en if(...) => angle=angle_companion_"<< std::endl;
+
+		}else{
+			//angle=(180/3.14)*(asin((final_min_colision_distance/2)/(robot_person_companion_distance_/2))); //asin((final_min_colision_distance/2)/((2*radio_robot)/2)) ; 2*radio_robot= robot_person_companion_distance_;
+			//angle=(180/3.14)*(asin((final_min_colision_distance)/(robot_person_companion_distance_)));
+			if(overpas_obstacles_behind_person_){
+				//orientation_person_robot_angles_.push_back(180-angle);
+				//angle=(180/3.14)*(asin((final_min_colision_distance)/(robot_person_companion_distance_))); //prueba 1.
+				//double division=(2*final_min_colision_distance)/(robot_person_proximity_distance_+2*robot_radi+little_augmented_collision_margin_);
+				double division;
+				//double division2;
+
+				if(case_dynamic_){
+					//double radi_force_influence=0.71; // la A! para las personas. Que no influya la fuerza de las personas.
+					//std::cout << " entro an case dynamic"<< std::endl;
+					//division=(final_min_colision_distance-robot_radi-radi_force_influence)/(real_robot_person_distance2/2); //revisar el caso dynamico!
+					//division=((final_min_colision_distance/2)-robot_radi-(little_augmented_collision_margin_/2))/((real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_)/2);
+					if((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2)<0){
+						division=0;
+					}else{
+						division=((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2))/((real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_)/2);
+					}
+
+				}else{
+					//std::cout << " entro an case NO dynamic"<< std::endl;
+					// en formulacion => dw/Ri => dw=d_real_collision/2-Rr-free_space_margin/2
+					// Ri = (d_real_between_r_and_p +2Rr+Free_space_margin)/2 =>free_space_margin==little_augmented_collision_margin_
+					//division=((final_min_colision_distance/2)-robot_radi-(little_augmented_collision_margin_/2))/((real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_)/2);
+					if((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2)<0){
+						division=0;
+					}else{
+						division=((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2))/((real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_)/2);
+					}
+					//division=(final_min_colision_distance)/(real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_);
+					//division=(final_min_colision_distance)/((real_robot_person_distance2/2)+robot_radi+(little_augmented_collision_margin_/2));
+					//division=(final_min_colision_distance)/((real_robot_person_distance2/2)+robot_radi+(1/2));
+					//division=(final_min_colision_distance-robot_radi)/(real_robot_person_distance2/2);
+					//division2=((final_min_colision_distance/2)-robot_radi-(little_augmented_collision_margin_/2))/((robot_person_distance_+2*robot_radi+little_augmented_collision_margin_)/2);
+					//std::cout << " final_min_colision_distance="<<final_min_colision_distance<<"; robot_radi="<<robot_radi<<"real_robot_person_distance2="<<real_robot_person_distance2<<" little_augmented_collision_margin_="<<little_augmented_collision_margin_<< std::endl;
+				}
+
+				//std::cout << " entro en else (...) => division="<<division<<"; case_dynamic_="<<case_dynamic_<< std::endl;
+
+				if(division>1){
+					division=1;
+				}else if(division<(-1)){
+					division=-1;
+				}
+
+				//std::cout << " entro en else (...) => division="<<division<<" division2="<<division2<< std::endl;
+
+				angle=(180/3.14)*(asin(division)); //prueba 1.
+
+				//double angle2 =(180/3.14)*(asin(division2));
+				//std::cout << "(1) angle="<<angle<<"; angle2="<<angle2<< std::endl;
+
+				if(angle>angle_companion_){
+					//std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! OJO!!!! ENTRO EN if(angle>angle_companion_)"<< std::endl;
+					//std::cout << " (if angle>angle_companion_   Caso angle=angle_companion_) angle="<<angle<<"angle_companion_="<<angle_companion_<< std::endl;
+					angle=angle_companion_;
+				}
+				//std::cout << "(2) angle="<<angle<< std::endl;
+
+				//std::cout << "parent_index="<<parent_index<< std::endl;
+				//std::cout << "colision="<<colision<< std::endl;
+				//std::cout << " [PASAR POR DETRAS] !!!! (ant) (test, colision) angle="<<angle<<" final_min_colision_distance="<<final_min_colision_distance<<"; robot_person_proximity_distance_="<<robot_person_proximity_distance_<< std::endl;
+				//std::cout << " [PASAR POR DETRAS] !!!! (ant) (test, colision) angle="<<angle<<" final_min_colision_distance/2="<<final_min_colision_distance/2<<"; (robot_person_proximity_distance_/2)+2*robot_radi)="<<(robot_person_proximity_distance_/2)+2*robot_radi<< std::endl;
+
+				angle=180-angle;
+				//std::cout << "(3) angle="<<angle<< std::endl;
+
+				//std::cout << " angle2="<<angle<< std::endl;
+
+				if(angle<angle_companion_){
+					angle=angle_companion_;
+					//std::cout << "angle<angle_companion_=> angle=angle_companion"<< std::endl;
+				}
+				//std::cout << "(4) angle="<<angle<< std::endl;
+
+				if(angle>180){
+					angle=180;
+					//std::cout << "angle>180=> angle=180"<< std::endl;
+				}
+				//std::cout << "(5) angle="<<angle<< std::endl;
+
+
+				//std::cout << " [overpas_obstacles_behind_person_] final_min_colision_distance="<<final_min_colision_distance<<"; robot_radi="<<robot_radi<<" little_augmented_collision_margin_="<<little_augmented_collision_margin_<<"; real_robot_person_distance2="<<real_robot_person_distance2<< std::endl;
+
+				//std::cout << " [overpas_obstacles_behind_person_] division="<<division<<" angle="<<angle<< std::endl;
+
+				//std::cout << "[overpas_obstacles_behind_person_] angle="<<angle<<"angle_companion_="<<angle_companion_<< std::endl;
+				//std::cout << " [PASAR POR DETRAS] !!!! (despues) (test, colision) angle="<<angle<< std::endl;
+				// TODO: temporal!!! el angulo solo va de 0 a angle_companion_=90grados, para colision!!!
+				/*if(angle>angle_companion_){
+					angle=angle_companion_;
+				}*/
+			}else{
+				//std::cout << " overpas delante persona "<< std::endl;
+				//angle=(180/3.14)*(asin((final_min_colision_distance)/(robot_person_companion_distance_))); //prueba 1.
+				//std::cout << " angle="<<angle <<"; final_min_colision_distance="<<final_min_colision_distance<<"; robot_person_companion_distance_"<<robot_person_companion_distance_<< std::endl;
+				//double division=(2*final_min_colision_distance)/(robot_person_proximity_distance_+2*robot_radi+little_augmented_collision_margin_);
+				double division;
+//				double radi_force_influence=0.91; // la A!
+				if(case_dynamic_){
+					//std::cout << " entro an case dynamic"<< std::endl;
+					//division=(final_min_colision_distance-robot_radi-radi_force_influence)/(real_robot_person_distance2/2);
+					if((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2)<0){
+						division=0;
+					}else{
+						division=((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2))/((real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_)/2);
+					}
+
+
+				}else{
+					if((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2)<0){
+						division=0;
+					}else{
+					//division=(final_min_colision_distance-robot_radi)/(real_robot_person_distance2/2);
+						division=((final_min_colision_distance)-robot_radi-(little_augmented_collision_margin_/2))/((real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_)/2);
+					}
+					std::cout << " final_min_colision_distance="<<final_min_colision_distance<<"; robot_radi="<<robot_radi<<" little_augmented_collision_margin_="<<little_augmented_collision_margin_<<"; real_robot_person_distance2="<<real_robot_person_distance2<< std::endl;
+
+					std::cout << " division="<<division<< std::endl;
+				}
+
+
+
+
+				if(division>1){
+					division=1;
+				}else if(division<(-1)){
+					division=-1;
+				}
+				angle=(180/3.14)*(asin(division)); //prueba 1.
+
+				std::cout << " 1 angle="<<angle<< std::endl;
+				// TODO: temporal!!! el angulo solo va de 0 a angle_companion_=90grados, para colision!!!
+				if(angle>angle_companion_){
+					angle=angle_companion_;
+					//std::cout << " (angle>angle_companion_) angle="<<angle<< std::endl;
+				}
+
+				/*if(angle<0){
+					angle=angle*(-1);
+				}*/
+				std::cout << " 2 angle="<<angle<< std::endl;
+			}
+		}
+
+
+		if(debug_companion_){ // SI se choca con obstaculos habrá que arreglar esto!!!
+			std::cout << " (test, colision) angle="<<angle<< std::endl;
+			std::cout << " final_min_colision_distance="<<final_min_colision_distance<< std::endl;
+		}
+
+		// teniendo la distancia, la he de transformar en un angulo, sabiendo la robot_person_companion_distance_ (distancia maxima)
+		double act_companion_cost; // actual companion cost.
+		act_companion_cost=(0.00000015242)*(pow(angle-angle_companion_,4)); //act_companion_cost=(0.000000015242)*(pow(angle-angle_companion_,4));
+		//std::cout << "act_companion_cost="<<act_companion_cost<< std::endl;
+
+		// calculas si hay incremento de angulo, si lo hay, calculas el coste hacia atras y los angulos hacia atras en el path, para que no haya saltos en la orientación.
+		/*if(angle!=angle_companion_){
+			//std::cout << "calculate_companion_addition_cost_node_of_big_angle_difference"<< std::endl;
+			//aditional cost due tu angle difference between actual angle and parent_vertex_angle
+			double additional_cost=calculate_companion_addition_cost_node_of_big_angle_difference(parent_index, angle);
+			act_companion_cost=act_companion_cost+additional_cost;
+			//calculate_companion_path_angle_and_cost(parent_index, angle);
+		}*/
+		//std::cout << "n"<< std::endl;
+		//colision=false; // TODO: quitar cuando vaya lo del robot...
+		//act_companion_cost=0; // TODO: quitar cuando vaya lo del robot...
+				//angle=90; // TODO: quitar cuando vaya lo del robot...
+
+		vector_of_companion_collisions_.push_back(colision);
+
+
+		cost_companion_.push_back( cost_companion_.at(parent_index) + act_companion_cost );
+
+		//std::cout << "(antes push_back()) angle="<<angle<< std::endl;
+
+		orientation_person_robot_angles_.push_back(angle);
+
+		//min_step_collision_distance_.push_back(final_min_colision_distance);
+		//angles_colisions_.push_back(min_angle_collision_);
+		parent_index_vector_.push_back(parent_index);
+
+		/*if(angle_companion_temp_movil_>angle){
+			angle_companion_temp_movil_=angle; // cojes el angulo menor del path, será el otro angulo estable!!! (el menor con obstaculo, en teoría al pasar de obstaculo a 90 grados, como se cambia despues, no afectara...)
+		}*/
+		/*if(colision){
+			std::cout << "(calculate_companion_cost_node) => angle="<<angle<< std::endl;
+			std::cout << "(calculate_companion_cost_node) => min_distance_collision_="<<min_distance_collision_<< std::endl;
+
+		}*/
+
+		if(debug_companion_){
+			std::cout << "act_companion_cost="<<act_companion_cost<< std::endl;
+			std::cout << "cost_companion_.at(parent_index="<<parent_index<<")="<<cost_companion_.at(parent_index)<< std::endl;
+			std::cout << "cost_companion_.back() [actual_index="<<cost_companion_.size()<<"]="<<cost_companion_.back()<< std::endl;
+		}
+
+		if(debug_companion_){
+		 std::cout << "FIN Function: calculate_companion_cost_node" << std::endl;
+		}
+}
+/*** FIN calculate_companion_cost_node! ***/
+
+
+
+/*** INI calculate_companion_addition_cost_node_of_big_angle_difference! ***/
+
+double Cplan_local_nav_person_companion::calculate_companion_addition_cost_node_of_big_angle_difference( unsigned int parent_index, double actual_angle)
+{ // calcula el coste to add en el caso en que haya gran diferencia entre el angulo(robot<->persona) comparando el del nodo actual y el del nodo anterior.
+	if(debug_companion_){
+		std::cout << "INI Function: calculate_companion_addition_cost_node_of_big_angle_difference" << std::endl;
+	}
+	double additional_cost = 0.0;
+	double angle_diference;
+
+	if(actual_angle>orientation_person_robot_angles_[parent_index]){
+		angle_diference = actual_angle-orientation_person_robot_angles_[parent_index];
+		//std::cout << "case : (actual_angle>orientation_person_robot_angles_[parent_index]); angle_diference="<<angle_diference<<";actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index]<< std::endl;
+	}else{
+		angle_diference = orientation_person_robot_angles_[parent_index]-actual_angle;
+		//std::cout << "case : (actual_angle<<<orientation_person_robot_angles_[parent_index]); angle_diference="<<angle_diference<<"; actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index]<< std::endl;
+	}
+	if(debug_companion_){
+	 std::cout << " angle_diference=" << angle_diference << std::endl;
+	 std::cout << " orientation_person_robot_angles_[parent_index]=" << orientation_person_robot_angles_[parent_index] << std::endl;
+	}
+
+	if(angle_diference>angle_increment_of_increment_distance_){
+		double angle_diference2=angle_diference;
+		if(debug_comanion_good_){
+			std::cout << "INI Function: calculate_companion_addition_cost_node_of_big_angle_difference" << std::endl;
+		//if(debug_companion_){
+			std::cout << "in if; angle_diference="<<angle_diference<<"; angle_increment_of_increment_distance="<<angle_increment_of_increment_distance_<<";actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index] << std::endl;
+		//}
+		}
+		/*do{
+			angle_diference2=angle_diference2-angle_increment_of_increment_distance_;
+			if(debug_companion_){
+				std::cout << "angle_diference2="<<angle_diference2 << std::endl;
+			}
+			double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+			if(debug_companion_){
+				std::cout << "actual_angle_cost="<<actual_angle_cost << std::endl;
+			}
+			double act_companion_cost=(0.00000015242)*(pow(actual_angle_cost-angle_companion_,4)); // double act_companion_cost=(0.000000015242)*(pow(actual_angle_cost-angle_companion_,4));
+			if(debug_comanion_good_){
+				std::cout << " (do_while) angle_diference2="<<angle_diference2 <<"; actual_angle_cost="<<actual_angle_cost <<"; act_companion_cost="<<act_companion_cost<<"; additional_cost="<<additional_cost << std::endl;
+			}
+			additional_cost=additional_cost+act_companion_cost;
+		}while(angle_diference2>0);*/
+
+		//*** INICIO coste aproximado, para no incrementar coste computacional. ***//
+		if(angle_diference2>0){
+			angle_diference2=angle_diference2-angle_increment_of_increment_distance_;
+			if(debug_companion_){
+				std::cout << "angle_diference2="<<angle_diference2 << std::endl;
+			}
+			double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+			if(debug_companion_){
+				std::cout << "actual_angle_cost="<<actual_angle_cost << std::endl;
+			}
+			double act_companion_cost=(0.00000015242)*(pow(actual_angle_cost-angle_companion_,4)); // double act_companion_cost=(0.000000015242)*(pow(actual_angle_cost-angle_companion_,4));
+			if(debug_comanion_good_){
+				std::cout << " (do_while) angle_diference2="<<angle_diference2 <<"; actual_angle_cost="<<actual_angle_cost <<"; act_companion_cost="<<act_companion_cost<<"; additional_cost="<<additional_cost << std::endl;
+			}
+			additional_cost=additional_cost+(act_companion_cost*(angle_diference2/angle_increment_of_increment_distance_));
+
+		}
+		//*** FIN coste aproximado, para no incrementar coste computacional. ***//
+
+		if(debug_comanion_good_){
+			std::cout << " (final) additional_cost=" << additional_cost << std::endl;
+			std::cout << "FIN Function: calculate_companion_addition_cost_node_of_big_angle_difference" << std::endl;
+		}
+	}
+
+	return additional_cost;
+}
+/*** FIN calculate_companion_addition_cost_node_of_big_angle_difference! ***/
+
+void Cplan_local_nav_person_companion::return_next_robot_position_companion_cost_and_angle(unsigned int parent_index){
+	// siempre que el inicio del arbol sea una unica rama, sino, habria que ir hacia atras en los parent index, desde el min_index, hasta que el indice sea >0. osea, el minimo mayor que 0.
+
+	//std::cout << "INI see_companion_path_angle_and_cost_of_min_cost_paths"<< std::endl;
+	unsigned int index_min_dist;
+	double actual_parent_index=parent_index;
+	do{
+		//std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+		//std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+		//std::cout << "min_distance_collision_vector_[actual_parent_index]= " <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+		index_min_dist=actual_parent_index;
+		min_next_companion_angle_=orientation_person_robot_angles_[actual_parent_index];
+		min_next_companion_cost_=cost_companion_[actual_parent_index];
+		std::cout << " [return_next_robot_position_companion_cost_and_angle] min_next_companion_cost_="<<min_next_companion_cost_<<"(path) actual_parent_index="<<actual_parent_index<< std::endl;
+		before_initial_angle_=orientation_person_robot_angles_[actual_parent_index];
+		before_initial_cost_=cost_companion_[actual_parent_index];
+		//std::cout << "(path) actual_parent_index="<<actual_parent_index<< std::endl;
+		actual_parent_index=parent_index_vector_[actual_parent_index];
+	}while(actual_parent_index>0);
+		//std::cout << "(path) actual_parent_index="<<actual_parent_index<< std::endl;
+		//std::cout << "(final out_ path) actual_parent_index="<<actual_parent_index<< std::endl;
+		//std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<0<<"]=" <<orientation_person_robot_angles_[0]<< std::endl;
+		//std::cout << "(path) cost_companion_[actual_parent_index="<<0<<"]=" <<cost_companion_[0]<< std::endl;
+
+	//min_next_companion_angle_=orientation_person_robot_angles_[1];
+	//min_next_companion_cost_= cost_companion_[1];
+	if(debug_antes_subgoals_entre_AKP_goals_){
+		std::cout << "min_distance_collision_vector_["<<index_min_dist<<"]= " <<min_distance_collision_vector_[index_min_dist]<< std::endl;
+		std::cout << " OUT ANGLES!!! min_next_companion_angle_= "<<min_next_companion_angle_<<"min_next_companion_cost_="<<min_next_companion_cost_ << std::endl;
+	}
+	//before_initial_angle_=orientation_person_robot_angles_[1];
+	//before_initial_cost_=cost_companion_[1];
+
+}
+
+void Cplan_local_nav_person_companion::ini_increment_angle(){
+	// version 1: con velocidad maxima de las personas.
+	//double distance_between_robot_and_person=1; // suponemos 1m de distancia entre ellos.
+	if(actual_debug_){
+		std::cout << "*** ini_increment_angle() ***" << std::endl;
+	}
+	double distance_between_robot_and_person=robot_person_proximity_distance_; //calc_robot_person_companion_distance();//
+
+
+	double increment_time = dt_; // TODO: aquí se tienen en cuenta todos los dt_ iguales. si hicieramos ventana de vector de incremento de tiempos, sería más exacto y mejor.
+	// std::cout << " increment_time = dt_=" << increment_time << std::endl;
+	double people_max_velocity = (5*1000)/3600; //% 5km/seg *(1000m/1km)*(1h/3600seg)= 1.3888888889 metros/seg, aprox 1.4m/seg.
+	//double robot_velocity = robot_->get_desired_velocity();  // (probar las dos a ver) robot_->get_current_pose().v  o   robot_->get_desired_velocity()
+	double increment_person_distance_in_dt=people_max_velocity*increment_time;
+	if(debug_companion_){
+		std::cout << "increment_person_distance_in_dt=" << increment_person_distance_in_dt << std::endl;
+	}
+	angle_increment_of_increment_distance_=2*(180/3.14)*(asin((increment_person_distance_in_dt/2)/distance_between_robot_and_person));
+
+	if(actual_debug_){
+		std::cout << "(maximo_final) angle_increment_of_increment_distance=" << angle_increment_of_increment_distance_<< std::endl;
+	}
+
+	//if(debug_companion_){
+	// version 2: fija, constante, para hacerlo muy incremental
+	if(debug_nadal_){
+		std::cout << "FUNCTION ini_increment_angle(); angle_increment_of_increment_distance=" << angle_increment_of_increment_distance_<< std::endl;
+	}
+		angle_increment_of_increment_distance_=0.2; //5 grados, para que cambie antes, durante más rato y más progresivo...
+		if(debug_nadal_){
+		std::cout << "(constante_final) angle_increment_of_increment_distance=" << angle_increment_of_increment_distance_<< std::endl;
+		}
+	//}
+	// version 3: con velocidad real de la persona.
+	Cperson_abstract* person_obj;
+	find_person(id_person_companion_ , &person_obj);
+	//double vel=max_v_by_system_;//person_obj->get_desired_velocity();
+	double in_vel=robot_->get_current_pose().v;
+	in_vel=in_vel*in_vel;
+	double people_real_velocity = sqrt(in_vel);//(robot_->get_a_v_max())*(0.5);//(vel*1000)/3600;
+	increment_person_distance_in_dt=people_real_velocity*increment_time;
+	angle_increment_of_increment_distance_=2*(180/3.14)*(asin((increment_person_distance_in_dt/2)/distance_between_robot_and_person));
+
+	if(debug_real_test_companion_){
+		std::cout << "dt_=" << dt_<<"increment_time="<<increment_time<<"distance_between_robot_and_person="<<distance_between_robot_and_person<< std::endl;
+		std::cout << "(real_FINAL=v_robot) angle_increment_of_increment_distance=" << angle_increment_of_increment_distance_<< std::endl;
+	}
+	//vel=max_v_by_system_;//person_obj->get_desired_velocity();
+	//in_vel=person_obj->get_desired_velocity();//robot_->get_current_pose().v;//person_obj->get_desired_velocity();//robot_->get_current_pose().v;
+
+	if(person_obj->get_desired_velocity()>0.5){ // era 0.3
+		//in_vel=ini_vel_to_increment_angle_;
+		in_vel=person_obj->get_current_pointV().v();
+		//in_vel=0.5+person_obj->get_current_pointV().v()*10/100;
+		//person_obj->get_desired_velocity()-0.15;
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << "% (if(person_obj->get_desired_velocity()>0.3)) person_obj->get_desired_velocity()= "<<person_obj->get_desired_velocity()<<"\n";
+			fileMatlab2.close();
+		}
+	}else{
+		in_vel=person_obj->get_current_pointV().v();
+		//in_vel=0.5+person_obj->get_current_pointV().v()*10/100;
+		//in_vel=ini_vel_to_increment_angle_;
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << "  (else) in_vel=0.3; person_obj->get_desired_velocity()"<< person_obj->get_desired_velocity()<<"\n";
+			fileMatlab2.close();
+		}
+	}
+	in_vel=in_vel*in_vel;
+	people_real_velocity = sqrt(in_vel);//(robot_->get_a_v_max())*(0.5);//(vel*1000)/3600;
+	increment_person_distance_in_dt=people_real_velocity*increment_time;
+	angle_increment_of_increment_distance_=2*(180/3.14)*(asin((increment_person_distance_in_dt/2)/distance_between_robot_and_person));
+	//angle_increment_of_increment_distance_=0.05;
+	//angle_increment_of_increment_distance_vuelta_al_reves_=angle_increment_of_increment_distance_/2;
+	angle_increment_of_increment_distance_vuelta_al_reves_=3*angle_increment_of_increment_distance_/2;
+
+
+	/*if(!overpas_obstacles_behind_person_){
+		angle_increment_of_increment_distance_=0.2;
+		angle_increment_of_increment_distance_vuelta_al_reves_=0.2;
+		std::cout << "IMPORTANT! angle_increment_of_increment_distance_=" << angle_increment_of_increment_distance_<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+	}*/
+
+
+	if(debug_gazebo_journal_){
+		std::cout << "(real_FINAL) person_obj->get_desired_velocity()=" << person_obj->get_desired_velocity()<< std::endl;
+		std::cout << "(real_FINAL) person_obj->get_current_pointV().v()=" << person_obj->get_current_pointV().v()<< std::endl;
+		std::cout << "(real_FINAL) increment_time=" << increment_time<< std::endl;
+		std::cout << "(real_FINAL) distance_between_robot_and_person=" << distance_between_robot_and_person<< std::endl;
+		std::cout << "(real_FINAL) increment_person_distance_in_dt=" << increment_person_distance_in_dt<< std::endl;
+		std::cout << "(real_FINAL=v_persona) angle_increment_of_increment_distance=" << angle_increment_of_increment_distance_<< "; people_real_velocity =" << people_real_velocity << std::endl;
+	}
+
+
+
+	if(debug_file_robot_){
+		std::ofstream fileMatlab2;
+		fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+		fileMatlab2 << "% angle_increment_of_increment_distance_= "<<angle_increment_of_increment_distance_<<"\n";
+		fileMatlab2 << "% angle_increment_of_increment_distance_vuelta_al_reves_= "<<angle_increment_of_increment_distance_vuelta_al_reves_<<"\n";
+		fileMatlab2.close();
+	}
+
+	//angle_increment_of_increment_distance_=0.2;//2*(180/3.14)*(asin((increment_person_distance_in_dt/2)/distance_between_robot_and_person));
+	if(debug_nadal_){
+	std::cout << "(real_FINAL) robot_->get_current_pose().v=" << robot_->get_current_pose().v<< std::endl;
+	std::cout << "(real_FINAL) people_real_velocity=" << people_real_velocity<< std::endl;
+	std::cout << "(real_FINAL) increment_time=" << increment_time<< std::endl;
+	std::cout << "(real_FINAL) distance_between_robot_and_person=" << distance_between_robot_and_person<< std::endl;
+	std::cout << "(real_FINAL) increment_person_distance_in_dt=" << increment_person_distance_in_dt<< std::endl;
+	}
+	if(debug_real_test_companion4_){
+		std::cout << "TTTTTTTTTTTTTTTT (real_FINAL) angle_increment_of_increment_distance=" << angle_increment_of_increment_distance_<< std::endl;
+	}
+}
+
+
+void Cplan_local_nav_person_companion::ini_increment_angle_person_companion_akp(){
+	// version 1: con velocidad maxima de las personas.
+	//double distance_between_robot_and_person=1; // suponemos 1m de distancia entre ellos.
+
+	double distance_between_robot_and_person=robot_person_proximity_distance_;
+	double increment_time = dt_; // TODO: aquí se tienen en cuenta todos los dt_ iguales. si hicieramos ventana de vector de incremento de tiempos, sería más exacto y mejor.
+	// version 3: con velocidad real de la persona.
+	//Cperson_abstract* person_obj;
+	//find_person(id_person_companion_ , &person_obj);
+	//double vel=max_v_by_system_;//person_obj->get_desired_velocity();
+	double in_vel=person_companion_->get_current_pose().v;
+	//in_vel=person_obj->get_desired_velocity();
+	in_vel=in_vel*in_vel;
+	double people_real_velocity = sqrt(in_vel);//(robot_->get_a_v_max())*(0.5);//(vel*1000)/3600;
+	double increment_person_distance_in_dt=people_real_velocity*increment_time;
+	angle_increment_of_increment_distance_=2*(180/3.14)*(asin((increment_person_distance_in_dt/2)/distance_between_robot_and_person));
+	angle_increment_of_increment_distance_vuelta_al_reves_=angle_increment_of_increment_distance_/2;
+
+	if(debug_person_companion_increment_angle_){
+		std::cout << " angle_increment_of_increment_distance_=" << angle_increment_of_increment_distance_ << std::endl;
+		std::cout << " angle_increment_of_increment_distance_vuelta_al_reves_=" << angle_increment_of_increment_distance_vuelta_al_reves_ << std::endl;
+	}
+}
+
+
+void Cplan_local_nav_person_companion::calculate_companion_path_angle_and_cost(unsigned int parent_index, double actual_angle){
+	// calcula el coste to add en el caso en que haya gran diferencia entre el angulo(robot<->persona) comparando el del nodo actual y el del nodo anterior.
+	// calcula los angulos que hay que moverse en ese path.
+	if(debug_companion_){
+		std::cout << "INI Function: calculate_companion_path_angle_and_cost" << std::endl;
+	}
+	//double additional_cost = 0.0;
+	double angle_diference;
+	unsigned int caso_angulo;
+
+	if(actual_angle>orientation_person_robot_angles_[parent_index]){
+		angle_diference = actual_angle-orientation_person_robot_angles_[parent_index];
+		//std::cout << "case : (actual_angle>orientation_person_robot_angles_[parent_index]); angle_diference="<<angle_diference<<";actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index]<< std::endl;
+		caso_angulo=0;
+	}else{
+		angle_diference = orientation_person_robot_angles_[parent_index]-actual_angle;
+		//std::cout << "case : (actual_angle<<<orientation_person_robot_angles_[parent_index]); angle_diference="<<angle_diference<<"; actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index]<< std::endl;
+		caso_angulo=1;
+	}
+	if(debug_companion_){
+		std::cout << " angle_diference=" << angle_diference << std::endl;
+		std::cout << " orientation_person_robot_angles_[parent_index]=" << orientation_person_robot_angles_[parent_index] << std::endl;
+	}
+
+	if((angle_diference>angle_increment_of_increment_distance_)&&(caso_angulo==1)){
+		double angle_diference2=angle_diference;
+		if(debug_companion_){
+			std::cout << "INI Function: calculate_companion_addition_cost_node_of_big_angle_difference" << std::endl;
+			std::cout << " actual_angle=" <<actual_angle<<"; orientation_person_robot_angles_[parent_index]="<<orientation_person_robot_angles_[parent_index]<< std::endl;
+		}
+		double actual_angle_cost=actual_angle;
+		double actual_parent_index=parent_index;
+
+		do{
+			angle_diference2=angle_diference2-angle_increment_of_increment_distance_;
+			if(caso_angulo==0){
+				actual_angle_cost=actual_angle_cost-angle_increment_of_increment_distance_;
+			}else{
+				actual_angle_cost=actual_angle_cost+angle_increment_of_increment_distance_;
+				if(actual_angle_cost>angle_companion_){
+					actual_angle_cost=angle_companion_;
+				}
+			}
+
+			double act_companion_cost=(0.00000015242)*(pow(actual_angle_cost-angle_companion_,4)); //double act_companion_cost=(0.000000015242)*(pow(actual_angle_cost-angle_companion_,4));
+			if(debug_antes_subgoals_entre_AKP_goals_){
+				std::cout << "aditional act_companion_cost="<<act_companion_cost << std::endl;
+				std::cout << "(aditional cost antes) cost_companion_["<<actual_parent_index<<"]="<<cost_companion_[actual_parent_index] << std::endl;
+			}
+			cost_companion_[actual_parent_index]=cost_companion_[actual_parent_index]+act_companion_cost; // (cambias el cost companion anteriores) // o cost_companion_[actual_parent_index]=cost_companion_[actual_parent_index]+act_companion_cost;
+			if(debug_antes_subgoals_entre_AKP_goals_){
+				std::cout << "(aditional cost despues) cost_companion_["<<actual_parent_index<<"]="<<cost_companion_[actual_parent_index] << std::endl;
+			}
+			//orientation_person_robot_angles_[actual_parent_index]=actual_angle_cost; // modificas los angulos anteriores para que sea menos abrupto el cambio.
+
+			if(debug_companion_){
+				std::cout <<"actual_angle_cost= "<<actual_angle_cost<<"; cost_companion_["<<actual_parent_index<<"]="<<cost_companion_[actual_parent_index] <<"; orientation_person_robot_angles_[actual_parent_index]="<<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+			}
+			actual_parent_index=parent_index_vector_[actual_parent_index];
+			/*if(actual_angle_cost==orientation_person_robot_angles_[parent_index]){
+				std::cout << " (break do_while) actual_angle_cost==orientation_person_robot_angles_[parent_index] "<< std::endl;
+				break;
+			}*/
+		}while((angle_diference2>0)&&(actual_parent_index>=0));
+
+		if(debug_companion_){
+			std::cout << "FIN Function: calculate_companion_path_angle_and_cost;" << std::endl;
+		}
+	}
+
+}
+
+void Cplan_local_nav_person_companion::only_cost_calculate_companion_path_angle_and_cost(unsigned int parent_index, double actual_angle){
+	// calcula el coste to add en el caso en que haya gran diferencia entre el angulo(robot<->persona) comparando el del nodo actual y el del nodo anterior.
+	// calcula los angulos que hay que moverse en ese path.
+	if(debug_companion_){
+		std::cout << "INI Function: calculate_companion_path_angle_and_cost" << std::endl;
+	}
+	double additional_cost = 0.0;
+	double angle_diference;
+
+	if(actual_angle>orientation_person_robot_angles_[parent_index]){
+		angle_diference = actual_angle-orientation_person_robot_angles_[parent_index];
+		//std::cout << "case : (actual_angle>orientation_person_robot_angles_[parent_index]); angle_diference="<<angle_diference<<";actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index]<< std::endl;
+	}else{
+		angle_diference = orientation_person_robot_angles_[parent_index]-actual_angle;
+		//std::cout << "case : (actual_angle<<<orientation_person_robot_angles_[parent_index]); angle_diference="<<angle_diference<<"; actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index]<< std::endl;
+	}
+	if(debug_companion_){
+		std::cout << " angle_diference=" << angle_diference << std::endl;
+		std::cout << " orientation_person_robot_angles_[parent_index]=" << orientation_person_robot_angles_[parent_index] << std::endl;
+	}
+
+	if(angle_diference>angle_increment_of_increment_distance_){
+		double angle_diference2=angle_diference;
+		if(actual_debug_){
+			std::cout << "INI Function: calculate_companion_addition_cost_node_of_big_angle_difference" << std::endl;
+		}
+		if(debug_companion_){
+			std::cout << "in if; angle_diference="<<angle_diference<<"; angle_increment_of_increment_distance="<<angle_increment_of_increment_distance_<<";actual_angle="<<actual_angle<<"; orientation_person_robot_angles_[parent_index]"<< orientation_person_robot_angles_[parent_index] << std::endl;
+		}
+		double actual_parent_index=parent_index;
+		do{
+			angle_diference2=angle_diference2-angle_increment_of_increment_distance_;
+			double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+			double act_companion_cost=(0.00000015242)*(pow(actual_angle_cost-angle_companion_,4)); //double act_companion_cost=(0.000000015242)*(pow(actual_angle_cost-angle_companion_,4));
+
+			cost_companion_[actual_parent_index]=cost_companion_[actual_parent_index]+act_companion_cost; // (cambias el cost companion anteriores) // o cost_companion_[actual_parent_index]=cost_companion_[actual_parent_index]+act_companion_cost;
+			//orientation_person_robot_angles_[actual_parent_index]=actual_angle_cost; // modificas los angulos anteriores para que sea menos abrupto el cambio.
+
+			actual_parent_index=parent_index_vector_[actual_parent_index];
+
+			if(debug_companion_){
+				std::cout << "angle_diference2="<<angle_diference2 << std::endl;
+				std::cout << "actual_angle_cost="<<actual_angle_cost << std::endl;
+			}
+			if(debug_companion_){
+				std::cout << " (do_while) angle_diference2="<<angle_diference2 <<"; actual_angle_cost="<<actual_angle_cost <<"; act_companion_cost="<<act_companion_cost<<"; additional_cost="<<additional_cost << std::endl;
+			}
+
+		}while((angle_diference2>0)&&(actual_parent_index>=0));
+			if(debug_companion_){
+				std::cout << "FIN Function: calculate_companion_path_angle_and_cost" << std::endl;
+			}
+	}
+
+}
+
+
+void Cplan_local_nav_person_companion::only_angle_in_final_tree_calculate_companion_path_angle_and_cost(unsigned int i){
+	// calcula el coste to add en el caso en que haya gran diferencia entre el angulo(robot<->persona) comparando el del nodo actual y el del nodo anterior.
+		// calcula los angulos que hay que moverse en ese path.
+	if(debug_comanion_good_){
+		std::cout << "INI only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+	}
+	BEST_path_parent_index_vector_.clear(); // de atras a delante. (en el ultimo coges el primer indice.)
+
+	unsigned int actual_index=i; // recorrete todo el path the este final de camino.
+	unsigned int actual_parent_index=parent_index_vector_[actual_index];
+	double actual_angle=orientation_person_robot_angles_[actual_index];
+	double actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+
+	double diff_angle=actual_parent_angle-actual_angle; // saltos posibles 1- 90grad a 180grad o 0 grad.
+	if(debug_comanion_good_){																		// 2- de 0grad o 180grad a 90grad.
+		std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+	}
+	BEST_path_parent_index_vector_.push_back(actual_index);
+
+		if((cost_companion_[i]!=0)&&(actual_angle<actual_parent_angle)&&(diff_angle>angle_increment_of_increment_distance_)){ // si hay cost companion
+			do{
+				actual_angle=orientation_person_robot_angles_[actual_index];
+				actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+				/*if(actual_angle>actual_parent_angle){
+					std::cout << " Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					diff_angle=actual_angle-actual_parent_angle;
+					if(diff_angle>angle_increment_of_increment_distance_){
+						orientation_person_robot_angles_[actual_parent_index]=actual_angle-angle_increment_of_increment_distance_;
+					}
+				}*/
+				if(actual_angle<actual_parent_angle){
+					if(debug_comanion_good_){
+						std::cout << " Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					}
+					diff_angle=actual_parent_angle-actual_angle;
+					if(actual_debug_){
+						std::cout << "diff_angle=" <<diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+					}
+					if(diff_angle>angle_increment_of_increment_distance_){
+						orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+
+						if(actual_debug_){
+							std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+							std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+							std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+							std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+							std::cout << "(path) min_distance_collision_vector_="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+
+						}
+
+						if(orientation_person_robot_angles_[actual_parent_index]>angle_companion_){
+								orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+						}
+					}
+					diff_angle=diff_angle-angle_increment_of_increment_distance_;
+				}
+
+				/*else{
+					diff_angle=actual_parent_angle-actual_angle;
+					if(diff_angle>angle_increment_of_increment_distance_){
+
+					}
+				}*/
+				if(debug_comanion_good_){
+					std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+					std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+					std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+					std::cout << "(path) min_distance_collision_vector_="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+				}
+
+				/*if(diff_angle>angle_increment_of_increment_distance_){
+					angle_diference2=angle_diference2-angle_increment_of_increment_distance_;
+					double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+					//double act_companion_cost=(0.000000015242)*(pow(actual_angle_cost-angle_companion_,4));
+				}*/
+
+				//double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+				//orientation_person_robot_angles_[actual_parent_index]=actual_angle_cost; // modificas los angulos anteriores para que sea menos abrupto el cambio.
+				actual_index=actual_parent_index;
+				actual_parent_index=parent_index_vector_[actual_index]; //busca el nodo anterior de este path.
+				BEST_path_parent_index_vector_.push_back(actual_index);
+			}while((actual_parent_index>0)&&(diff_angle>angle_increment_of_increment_distance_));
+			// PARA EL INDICE =0, PQ SINO ENTRA EN BUCLE INFINITO!
+			actual_angle=orientation_person_robot_angles_[actual_index];
+			actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+			if(actual_angle<actual_parent_angle){
+				diff_angle=actual_parent_angle-actual_angle;
+				if(diff_angle>angle_increment_of_increment_distance_){
+					orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+					if(orientation_person_robot_angles_[actual_parent_index]>angle_companion_){
+						orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+					}
+				}
+			}
+			BEST_path_parent_index_vector_.push_back(actual_parent_index);
+			if(debug_comanion_good_){
+				std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+				std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<0<<"]=" <<orientation_person_robot_angles_[0]<< std::endl;
+				std::cout << "(path) cost_companion_[actual_parent_index="<<0<<"]=" <<cost_companion_[0]<< std::endl;
+				std::cout << "(path) min_distance_collision_vector_="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+			}
+
+		}
+
+		if(debug_comanion_good_){
+			if(!BEST_path_parent_index_vector_.empty()){
+				for(unsigned int f=0;f<BEST_path_parent_index_vector_.size();f++){
+					std::cout << "(BEST path index) f="<<f<<"; index=" <<BEST_path_parent_index_vector_[f]<< std::endl;
+				}
+			}
+			std::cout << "FIN only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+		}
+}
+
+
+void Cplan_local_nav_person_companion::only_angle_in_final_tree_calculate_companion_path_angle_and_cost2(unsigned int i){
+	// calcula los angulos que hay que moverse en ese path.
+	//if(debug_comanion_good_){
+		std::cout << "    !!!    INI only_angle_in_final_tree_calculate_companion_path_angle_and_cost2"<< std::endl;
+	//}
+	BEST_path_parent_index_vector_.clear(); // de atras a delante. (en el ultimo coges el primer indice.)
+
+	unsigned int actual_index2; // recorrete todo el path the este final de camino.
+	unsigned int actual_parent_index2;
+	//if(calc_goal_companion_with_group_path_){
+		actual_index2=i;
+		actual_parent_index2=parent_index_vector_[actual_index2];
+		BEST_path_parent_index_vector_.push_back(actual_index2);
+		//std::cout << " (ini while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+		do{
+			BEST_path_parent_index_vector_.push_back(actual_index2);
+			actual_index2=actual_parent_index2;
+			actual_parent_index2=parent_index_vector_[actual_index2];
+		}while(actual_parent_index2>0);
+		BEST_path_parent_index_vector_.push_back(actual_parent_index2);
+
+
+
+
+
+
+	// CASE 1: actual_angle < actual_parent_angle. Dar vuelta hacia atras del arbol (primera vuelta).
+	unsigned int actual_index=i; // recorrete todo el path the este final de camino.
+	unsigned int actual_parent_index=parent_index_vector_[actual_index];
+	double actual_angle=orientation_person_robot_angles_[actual_index];
+	double actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+
+	double diff_angle=actual_parent_angle-actual_angle; // saltos posibles 1- 90grad a 180grad o 0 grad.
+	//if(debug_real_test_companion4_){																		// 2- de 0grad o 180grad a 90grad.
+		std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+	//}
+	bool caso_vuelta_al_reves=false;
+	//BEST_path_parent_index_vector_.push_back(actual_index);
+	std::cout << " (ini while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+		if((cost_companion_[i]!=0)){//&&(actual_angle<actual_parent_angle)&&(diff_angle>angle_increment_of_increment_distance_)){ // si hay cost companion
+
+			//double sum_angles_increment1=0;
+			//int count_sum=0;
+			do{
+				actual_angle=orientation_person_robot_angles_[actual_index];
+				actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+				/*if(actual_angle>actual_parent_angle){
+					std::cout << " Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					diff_angle=actual_angle-actual_parent_angle;
+					if(diff_angle>angle_increment_of_increment_distance_){
+						orientation_person_robot_angles_[actual_parent_index]=actual_angle-angle_increment_of_increment_distance_;
+					}
+				}*/
+
+				//sum_angles_increment1=sum_angles_increment1+(orientation_person_robot_angles_[actual_index]-orientation_person_robot_angles_[actual_parent_index]);
+				//count_sum++;
+				if(debug_real_test_companion4_){
+					std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+				}
+
+				if(actual_angle<actual_parent_angle){
+					caso_vuelta_al_reves=true;
+					diff_angle=actual_parent_angle-actual_angle;
+
+					if(diff_angle>angle_increment_of_increment_distance_){
+						if(debug_comanion_good_){
+							std::cout << " (DO-WILE) Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+						}
+						if(actual_debug_){
+							std::cout << "diff_angle=" <<diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+						}
+
+						//std::cout << "(DO-WILE) (!!!CASE!!! actual_angle < actual_parent_angle)"<< std::endl;
+						orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+
+						if(actual_debug2_){
+							std::cout << "if (CASE: entro en obstaculo)"<< std::endl;
+							std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+							std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+							std::cout << "(path) orientation_person_robot_angles_[actual_index="<<actual_index<<"]=" <<orientation_person_robot_angles_[actual_index]<< std::endl;
+							std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+							std::cout << "(path) min_distance_collision_vector_[actual_index="<<actual_index<<"]=" <<min_distance_collision_vector_[actual_index]<< std::endl;
+							std::cout << "(path) min_distance_collision_vector_[actual_parent_index="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+							//std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+						}
+						if(orientation_person_robot_angles_[actual_parent_index]>angle_companion_){
+								orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+						}
+					}
+					diff_angle=diff_angle-angle_increment_of_increment_distance_;
+
+
+
+				}else{ // CASE: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+				}
+
+				/*else{
+					diff_angle=actual_parent_angle-actual_angle;
+					if(diff_angle>angle_increment_of_increment_distance_){
+
+					}
+				}*/
+				if(debug_comanion_good_){
+					std::cout << "[POSIBLE change of angle] actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+					std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+					std::cout << "(path) = this could change!!! orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+				}
+
+				/*if(diff_angle>angle_increment_of_increment_distance_){
+					angle_diference2=angle_diference2-angle_increment_of_increment_distance_;
+					double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+					//double act_companion_cost=(0.000000015242)*(pow(actual_angle_cost-angle_companion_,4));
+				}*/
+
+				//double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+				//orientation_person_robot_angles_[actual_parent_index]=actual_angle_cost; // modificas los angulos anteriores para que sea menos abrupto el cambio.
+				actual_index=actual_parent_index;
+				actual_parent_index=parent_index_vector_[actual_index]; //busca el nodo anterior de este path.
+				//BEST_path_parent_index_vector_.push_back(actual_index);
+				//std::cout << " (final while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+
+			}while(actual_parent_index>0);//&&(diff_angle>angle_increment_of_increment_distance_));
+			// PARA EL INDICE =0, PQ SINO ENTRA EN BUCLE INFINITO!
+			actual_angle=orientation_person_robot_angles_[actual_index];
+			actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+			if(actual_angle<actual_parent_angle){
+				diff_angle=actual_parent_angle-actual_angle;
+				if(diff_angle>angle_increment_of_increment_distance_){
+					orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+					if(orientation_person_robot_angles_[actual_parent_index]>angle_companion_){
+						orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+					}
+				}
+			}
+			//BEST_path_parent_index_vector_.push_back(actual_parent_index);
+
+			//sum_angles_increment1=sum_angles_increment1/count_sum;
+			//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment1="<<sum_angles_increment1<< std::endl;
+
+
+			//std::cout << " (final while) actual_parent_index="<<actual_parent_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+			//if(actual_debug_){
+				std::cout << " BEST_path_parent_index_vector_.size()="<<BEST_path_parent_index_vector_.size()<< std::endl;
+			//}
+			//if(debug_comanion_good_){
+				std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+				std::cout << "(path) (last angle that could change!!! ) orientation_person_robot_angles_[actual_parent_index="<<0<<"]=" <<orientation_person_robot_angles_[0]<< std::endl;
+				std::cout << "(path) cost_companion_[actual_parent_index="<<0<<"]=" <<cost_companion_[0]<< std::endl;
+			//}
+
+/*  caso_vuelta_al_reves!!!!   */
+			if(!caso_vuelta_al_reves){
+
+				std::cout << " CASO VUELTA AL REVES: "<< std::endl;
+
+				// INICIO vuelta hacia delante!
+				//bool flag_return_90_dg=false;
+				//unsigned int second_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2];
+				//double second_angle=orientation_person_robot_angles_[second_index];
+				/*if((second_angle==angle_companion_)&&(orientation_person_robot_angles_[0]==angle_companion_)){//(orientation_person_robot_angles_[0]>(angle_companion_-5))&&(orientation_person_robot_angles_[0]<(angle_companion_+5))){
+				//	std::cout << "flag_return_90_dg=true"<< std::endl;
+					flag_return_90_dg=true;
+				}*/
+
+				//double sum_angles_increment=0;
+
+				for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+					unsigned int act_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g];
+					unsigned int next_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2-g];
+					double act_angle=orientation_person_robot_angles_[act_index];
+					double next_angle=orientation_person_robot_angles_[next_index];
+					double diff_angle=next_angle-act_angle;
+
+					//if((act_index!=0)&&(diff_angle>angle_increment_of_increment_distance_)){
+					if(((diff_angle>angle_increment_of_increment_distance_))&&(diff_angle>0)){
+
+						std::cout << " In if (!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+						std::cout << "  act_angle="<<act_angle<<"; next_angle="<<next_angle<<";  diff_angle="<< diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+
+					//	std::cout << "(!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+							// CASE 2: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+						std::cout << "(before modif) orientation_person_robot_angles_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_[next_index]<< std::endl;
+
+						if(actual_debug_){
+							std::cout << "if (CASE: salgo de obstaculo)"<< std::endl;
+						}
+						//if(next_index!=0){
+							double new_angle=act_angle+angle_increment_of_increment_distance_;
+							if(new_angle>angle_companion_){
+								orientation_person_robot_angles_[next_index]=angle_companion_;
+							}else{
+								orientation_person_robot_angles_[next_index]=new_angle;
+							}
+							//if(actual_debug_){
+								std::cout << "(modif) orientation_person_robot_angles_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_[next_index]<< std::endl;
+							//}
+						//}
+					}else{
+						//if(next_index!=0){
+						/*orientation_person_robot_angles_[next_index]=orientation_person_robot_angles_[act_angle]+angle_increment_of_increment_distance_;
+							if(orientation_person_robot_angles_[next_index]>angle_companion_){
+								orientation_person_robot_angles_[next_index]=angle_companion_;
+							}*/
+						//}
+						//	std::cout << " (FOR) (real) next_angle="<<orientation_person_robot_angles_[next_index]<< std::endl;
+
+					}
+					/*else if((diff_angle>angle_increment_of_increment_distance_)&&(flag_return_90_dg)){
+						// CASE 3: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+						// caso: orientation_person_robot_angles_[0=[BEST_path_parent_index_vector_.size()-1]<angle_companion_
+						// &
+						if(actual_debug_){
+							std::cout << "(caso0) if (CASE: salgo de obstaculo)"<< std::endl;
+						}
+						double new_angle=act_angle+angle_increment_of_increment_distance_;
+						if(new_angle>angle_companion_){
+							orientation_person_robot_angles_[next_index]=angle_companion_;
+						}else{
+							orientation_person_robot_angles_[next_index]=new_angle;
+						}
+						if(actual_debug_){
+							std::cout << "(modif_caso0) orientation_person_robot_angles_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_[next_index]<< std::endl;
+						}
+					}*/
+
+
+					//sum_angles_increment=sum_angles_increment+orientation_person_robot_angles_[act_index];
+
+				} // fin for vuelta hacia delante
+
+				//sum_angles_increment=sum_angles_increment/BEST_path_parent_index_vector_.size();
+				//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment="<<sum_angles_increment<< std::endl;
+
+			}
+		} // fin if(cost_companion!=0)
+
+////////////////////////////
+		std::cout << " INICIO vuelta para mantenerse a 90 grados!!! "<< std::endl;
+
+		//std::cout << " tercera pasada, ahora mismo no se para que!"<< std::endl;
+		// es para mantenerte a 90 grados si decrece tu valor en orientacion!!! Te adelantas demasiado
+		if(!BEST_path_parent_index_vector_.empty()){
+			bool we_have_path_collisions=false;
+			for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+
+				//if(debug_angles_){
+					std::cout << " BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]="<<BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]<< std::endl;
+					std::cout << " vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]="<<vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]<< std::endl;
+					std::cout << " angle="<<orientation_person_robot_angles_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]<< std::endl;
+					std::cout << " angle_companion_+2*angle_increment_of_increment_distance_="<<angle_companion_+2*angle_increment_of_increment_distance_<< std::endl;
+				//}
+
+				if((vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]])&&(orientation_person_robot_angles_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]>(angle_companion_+2*angle_increment_of_increment_distance_))){
+					we_have_path_collisions=true;
+				}
+			}
+
+			//if(debug_angles_){
+				std::cout << " !BEST_path_parent_index_vector_.empty()="<<!BEST_path_parent_index_vector_.empty()<<"; BEST_path_parent_index_vector_.size()="<<BEST_path_parent_index_vector_.size()<< std::endl;
+				std::cout << " !we_have_path_collisions="<<!we_have_path_collisions<<"; angle_companion_="<<angle_companion_<< std::endl;
+			//}
+
+			double ini_act_angle_out=initial_angle_;
+
+			//if(debug_angles_){
+				std::cout << " ini_act_angle_out="<< ini_act_angle_out << std::endl;
+			//}
+
+			if((!we_have_path_collisions)&&(ini_act_angle_out<angle_companion_)){
+
+				std::cout << "in if! "<< std::endl;
+
+				for(unsigned int g=1;g<BEST_path_parent_index_vector_.size();g++){
+					std::cout << "in for! "<< std::endl;
+
+
+					unsigned int act_index;//=best_plan_vertex_index_[best_plan_vertex_index_.size()-g];
+
+					unsigned int next_index=BEST_path_parent_index_vector_[0+g];
+					double act_angle;//=orientation_person_robot_angles_[act_index];
+					if(g==1){
+						act_angle=ini_act_angle_out;
+						act_index=0;
+					}else{
+						act_angle=orientation_person_robot_angles_[act_index];
+					}
+
+					double next_angle=act_angle+5*angle_increment_of_increment_distance_;
+
+					std::cout << " (before modify) act_index="<< act_index<<"; next_index="<<next_index<<"; act_angle="<<act_angle<<"; next_angle="<<next_angle<< std::endl;
+					std::cout << "orientation_person_robot_angles_[next_index]="<< orientation_person_robot_angles_[next_index]<< std::endl;
+
+					if(next_angle>angle_companion_){
+						//next_angle=orientation_person_robot_angles_[act_index]-angle_increment_of_increment_distance_;
+						orientation_person_robot_angles_[next_index]=angle_companion_;
+					}else{
+						orientation_person_robot_angles_[next_index]=next_angle;
+					}
+
+					//if(debug_angles_){
+						std::cout << "( after )  act_index="<< act_index<<"; next_index="<<next_index<<"; act_angle="<<act_angle<<"; next_angle="<<next_angle<< std::endl;
+						std::cout << "orientation_person_robot_angles_[next_index]="<< orientation_person_robot_angles_[next_index]<< std::endl;
+					//}
+
+					act_index=next_index;
+				}
+			}
+		}
+
+
+
+///////////////////
+
+		//if(debug_comanion_good_){
+			if(!BEST_path_parent_index_vector_.empty()){
+				for(unsigned int f=0;f<BEST_path_parent_index_vector_.size();f++){
+					std::cout << "(BEST path index) f="<<f<<"; index=" <<BEST_path_parent_index_vector_[f]<< std::endl;
+				}
+			}
+
+			std::cout << "SHOW!!! orientation_person_robot_angles_:"<< std::endl;
+
+			for(unsigned int p=0; p<orientation_person_robot_angles_.size();p++){
+				std::cout << "SHOW!!! orientation_person_robot_angles_[p="<<p<<"]="<<orientation_person_robot_angles_[p]<< std::endl;
+
+			}
+
+
+		//}
+
+		std::cout << "FIN only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+}
+
+/*  Arreglar angulos para pasar detras del robot   */
+void Cplan_local_nav_person_companion::go_behind_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost3(unsigned int i){
+
+	// TODO: arreglar para que vaya por detras de la persona en los obstaculos y no por delante!!!
+
+	/*std::cout << "    INI orientation_person_robot_angles_[g]: "<< std::endl;
+
+	for(unsigned int y=0;y<orientation_person_robot_angles_.size();y++){
+		std::cout << "    orientation_person_robot_angles_[y]="<<orientation_person_robot_angles_[y]<< std::endl;
+	}*/
+
+
+
+	// calcula los angulos que hay que moverse en ese path.
+	if(debug_real_test_companion2_){
+		std::cout << "    !!!    INI go_behind_robot-only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+	}
+	BEST_path_parent_index_vector_.clear(); // de atras a delante. (en el ultimo coges el primer indice.)
+
+	// CASE 1: actual_angle < actual_parent_angle. Dar vuelta hacia atras del arbol (primera vuelta).
+	unsigned int actual_index;
+	unsigned int actual_parent_index;
+
+	if(calc_goal_companion_with_group_path_){
+		actual_index=i; // recorrete todo el path the este final de camino.
+		actual_parent_index=parent_index_vector_[actual_index];
+	}else{
+		actual_index=orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1; // recorrete todo el path the este final de camino.
+		actual_parent_index=orientation_person_robot_angles_with_prediction_of_person_companion_.size()-2;
+	}
+
+	double actual_angle;
+	double actual_parent_angle;
+
+	if(calc_goal_companion_with_group_path_){
+		actual_angle=orientation_person_robot_angles_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+	}else{
+		actual_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index];
+	}
+
+	double diff_angle=actual_parent_angle-actual_angle; // saltos posibles 1- 90grad a 180grad o 0 grad.
+
+	if(debug_real_test_companion2_){																		// 2- de 0grad o 180grad a 90grad.
+		std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+	}
+
+	//bool caso_vuelta_al_reves=true;
+
+	unsigned int actual_index2; // recorrete todo el path the este final de camino.
+	unsigned int actual_parent_index2;
+	//if(calc_goal_companion_with_group_path_){
+		actual_index2=i;
+		actual_parent_index2=parent_index_vector_[actual_index2];
+		BEST_path_parent_index_vector_.push_back(actual_index2);
+		//std::cout << " (ini while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+		do{
+			BEST_path_parent_index_vector_.push_back(actual_index2);
+			actual_index2=actual_parent_index2;
+			actual_parent_index2=parent_index_vector_[actual_index2];
+
+		}while(actual_parent_index2>0);
+		BEST_path_parent_index_vector_.push_back(actual_parent_index2);
+	///} //else nada en este caso.
+
+	// 1- vuelta del final del path al principio!
+	//double sum_angles_increment1=0;
+	//int count_sum=0;
+	do{
+		//std::cout << " do while 1 "<< std::endl;
+		if(calc_goal_companion_with_group_path_){
+			actual_angle=orientation_person_robot_angles_[actual_index];
+			actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+		}else{
+			actual_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_index];
+			actual_parent_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index];
+		}
+
+		if(debug_real_test_companion2_){
+			std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+		}
+		//std::cout << " actual_angle"<<actual_angle<<";> actual_parent_angle="<<actual_parent_angle << std::endl;
+		if(actual_angle>actual_parent_angle){
+			//caso_vuelta_al_reves=true;
+			//std::cout << " do while 3 "<< std::endl;
+			diff_angle=actual_angle-actual_parent_angle;
+			//std::cout << " diff_angle="<<diff_angle<< std::endl;
+			if(diff_angle>angle_increment_of_increment_distance_){
+				//if(debug_comanion_good_){
+				//	std::cout << " (DO-WILE) Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+				//}
+				//std::cout << " do while 5 "<< std::endl;
+				if(debug_angles_){
+					std::cout << "(caso vuelta diff_algle +)= actual_angle - actual_parent_angle = diff_angle=" <<diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+				}
+				//std::cout << " do while 6 "<< std::endl;
+				//std::cout << "(DO-WILE) (!!!CASE!!! actual_angle < actual_parent_angle)"<< std::endl;
+				if(calc_goal_companion_with_group_path_){
+					orientation_person_robot_angles_[actual_parent_index]=actual_angle-angle_increment_of_increment_distance_;
+				}else{
+					orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=actual_angle-angle_increment_of_increment_distance_;
+				}
+				//std::cout << " do while 7 "<< std::endl;
+
+
+
+				if(actual_debug2_){
+					std::cout << "if (CASE: entro en obstaculo)"<< std::endl;
+					std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+					std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+					std::cout << "(path) orientation_person_robot_angles_[actual_index="<<actual_index<<"]=" <<orientation_person_robot_angles_[actual_index]<< std::endl;
+					std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					std::cout << "(path) min_distance_collision_vector_[actual_index="<<actual_index<<"]=" <<min_distance_collision_vector_[actual_index]<< std::endl;
+					std::cout << "(path) min_distance_collision_vector_[actual_parent_index="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+					//std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+				}
+				//std::cout << " do while 8 "<< std::endl;
+				if(calc_goal_companion_with_group_path_){
+					if(orientation_person_robot_angles_[actual_parent_index]<angle_companion_){
+						orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+					}
+					if(orientation_person_robot_angles_[actual_parent_index]>180){
+						orientation_person_robot_angles_[actual_parent_index]=180;
+					}
+				}else{
+					if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]<angle_companion_){
+						orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=angle_companion_;
+					}
+					if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]>180){
+						orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=180;
+					}
+				}
+
+				//std::cout << " do while 9 "<< std::endl;
+				if(debug_angles_){
+					std::cout << "orientation_person_robot_angles_[actual_parent_index]"<< orientation_person_robot_angles_[actual_parent_index]<<" actual_angle-angle_increment_of_increment_distance_="<<actual_angle-angle_increment_of_increment_distance_<< std::endl;
+				}
+
+			}
+			diff_angle=diff_angle-angle_increment_of_increment_distance_;
+		}else{ // CASE: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+		}
+
+		if(debug_comanion_good_){
+			std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+			std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+			std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+			std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+		}
+		//std::cout << " do while 10 "<< std::endl;
+		if(calc_goal_companion_with_group_path_){
+			actual_index=actual_parent_index;
+			actual_parent_index=parent_index_vector_[actual_index]; //busca el nodo anterior de este path.
+		}else{
+			actual_index=actual_index-1;
+			actual_parent_index=actual_parent_index-1; //busca el nodo anterior de este path.
+		}
+		//std::cout << " do while 11 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+		//std::cout << " (final while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+
+	}while(actual_parent_index>0);//&&(diff_angle>angle_increment_of_increment_distance_));
+	// PARA EL INDICE =0, PQ SINO ENTRA EN BUCLE INFINITO!
+
+	if(calc_goal_companion_with_group_path_){
+		actual_angle=orientation_person_robot_angles_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+	}else{
+		actual_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index];
+	}
+
+	//std::cout << " do while 12 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+	if(actual_angle<actual_parent_angle){
+		diff_angle=actual_parent_angle-actual_angle;
+		if(diff_angle>angle_increment_of_increment_distance_){
+
+			if(debug_angles_){
+				std::cout << "(caso vuelta diff_algle +)= actual_angle - actual_parent_angle = diff_angle=" <<diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+			}
+			//std::cout << " do while 13 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+			if(calc_goal_companion_with_group_path_){
+				orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+				if(orientation_person_robot_angles_[actual_parent_index]<angle_companion_){
+					orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+				}
+				if(orientation_person_robot_angles_[actual_parent_index]>180){
+					orientation_person_robot_angles_[actual_parent_index]=180;
+				}
+			}else{
+				orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+				if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]<angle_companion_){
+					orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=angle_companion_;
+				}
+				if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]>180){
+					orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=180;
+				}
+			}
+			//std::cout << " do while 14 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+			if(debug_angles_){
+				std::cout << "orientation_person_robot_angles_[actual_parent_index]"<< orientation_person_robot_angles_[actual_parent_index]<<" actual_angle-angle_increment_of_increment_distance_="<<actual_angle-angle_increment_of_increment_distance_<< std::endl;
+			}
+		}
+	}
+	//std::cout << " do while 15 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+	//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment1="<<sum_angles_increment1<< std::endl;
+
+
+	/*std::cout << "  2  INI orientation_person_robot_angles_[g]: "<< std::endl;
+
+		for(unsigned int y=0;y<orientation_person_robot_angles_.size();y++){
+			std::cout << "    orientation_person_robot_angles_[y]="<<orientation_person_robot_angles_[y]<< std::endl;
+		}*/
+
+
+	if(!calc_goal_companion_with_group_path_){
+		// TODO: usar funcion, vueltas_hacia_delante_arreglar_angulos_para_caso_min_companion_angle_con_prediccion.
+		//std::cout << " do while 16 "<< std::endl;
+
+		fix_angles_to_use_person_prediction_for_the_companion_goal();
+		//std::cout << " do while 17 "<< std::endl;
+
+
+
+
+	}else{
+	///////////////77
+		//std::cout << " (final while) actual_parent_index="<<actual_parent_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+		if(actual_debug_){
+			std::cout << " BEST_path_parent_index_vector_.size()="<<BEST_path_parent_index_vector_.size()<< std::endl;
+		}
+		if(debug_comanion_good_){
+			std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+			std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<0<<"]=" <<orientation_person_robot_angles_[0]<< std::endl;
+			std::cout << "(path) cost_companion_[actual_parent_index="<<0<<"]=" <<cost_companion_[0]<< std::endl;
+		}
+
+		unsigned int act_index1=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1];
+		unsigned int next_index1=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2];
+		double act_angle1=orientation_person_robot_angles_[act_index1];
+		double next_angle1=orientation_person_robot_angles_[next_index1];
+		double diff_angle1=act_angle1-next_angle1;
+		if(diff_angle1>angle_increment_of_increment_distance_){
+			//caso_vuelta_al_reves=true;
+		}
+
+		// 2- vuelta del principio al final
+	/*  caso_vuelta_al_reves!!!!   */
+
+		for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+
+			if(debug_angles_){
+				std::cout << " 2 (vuelta al reves!) BEST_path_parent_index_vector_.size()-1-g="<<BEST_path_parent_index_vector_.size()-1-g<<"; BEST_path_parent_index_vector_.size()-2-g="<<BEST_path_parent_index_vector_.size()-2-g<< std::endl;
+			}
+
+			unsigned int act_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g];
+			unsigned int next_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2-g];
+
+			double act_angle=orientation_person_robot_angles_[act_index];
+			double next_angle=orientation_person_robot_angles_[next_index];
+
+			if((act_index==0)){
+				act_angle=initial_angle_;
+			}
+			if(next_angle==0){
+				next_angle=initial_angle_;
+			}
+
+			if(debug_angles_){
+				std::cout << " 2 (vuelta hacia delante de INI_angle_act_angle al qur necesitas para pasar.!) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+			}
+
+			if((BEST_path_parent_index_vector_.size()-1-g)==0){
+				act_angle=initial_angle_;
+			}
+
+			double diff_angle=act_angle-next_angle;
+
+			if(debug_angles_){
+				std::cout << "act_angle["<<act_index<<"]="<<act_angle<<"next_angle["<<next_index<<"]"<<next_angle<<"diff_angle=act_angle-next_angle="<<diff_angle<<" > angle_increment_of_increment_distance_="<< angle_increment_of_increment_distance_<<" and diff_angle>0"<< std::endl;
+			}
+
+			if(((diff_angle>(2*angle_increment_of_increment_distance_)))&&(diff_angle>0)){
+				//std::cout << "ENTRO EN IF !!!"<< std::endl;
+
+				//	std::cout << " (FOR) ANT (!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+				//	std::cout << "  act_angle="<<act_angle<<"; next_angle="<<next_angle<<";  diff_angle="<< diff_angle<< std::endl;
+
+				//	std::cout << "(!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+				// CASE 2: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+				if(actual_debug_){
+					std::cout << "if (CASE: salgo de obstaculo)"<< std::endl;
+				}
+
+				double new_angle=act_angle-(2*angle_increment_of_increment_distance_);
+
+				//if(debug_gazebo_journal_){
+				//	std::cout << "new_angle ["<<next_index<<"]="<<new_angle<< std::endl;
+				//}
+
+				if(new_angle<angle_companion_){
+					orientation_person_robot_angles_[next_index]=angle_companion_;
+					//std::cout << "if(new_angle<angle_companion_) angle_companion_="<<angle_companion_<< std::endl;
+				}else{
+					orientation_person_robot_angles_[next_index]=new_angle;
+					//std::cout << "else if(new_angle<angle_companion_)new_angle="<<new_angle<< std::endl;
+				}
+				if(new_angle>180){
+					orientation_person_robot_angles_[next_index]=180;
+				}
+				if(actual_debug_){
+					std::cout << "(modif) orientation_person_robot_angles_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_[next_index]<< std::endl;
+				}
+
+			}else{
+
+				//std::cout << "ENTRO EN ELSE !!!"<< std::endl;
+
+				//	std::cout << " (FOR) (real) next_angle="<<orientation_person_robot_angles_[next_index]<< std::endl;
+
+			}
+
+			//sum_angles_increment=sum_angles_increment+orientation_person_robot_angles_[act_index];
+
+		} // fin for vuelta hacia delante
+
+		//sum_angles_increment=sum_angles_increment/BEST_path_parent_index_vector_.size();
+		//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment="<<sum_angles_increment<< std::endl;
+		//std::cout << " tercera pasada, ahora mismo no se para que!"<< std::endl;
+		// es para mantenerte a 90 grados si decrece tu valor en orientacion!!! Te adelantas demasiado
+		if(!BEST_path_parent_index_vector_.empty()){
+			bool we_have_path_collisions=false;
+			for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+
+				if(debug_angles_){
+					std::cout << " BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]="<<BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]<< std::endl;
+					std::cout << " vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]="<<vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]<< std::endl;
+					std::cout << " angle="<<orientation_person_robot_angles_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]<< std::endl;
+					std::cout << " angle_companion_+2*angle_increment_of_increment_distance_="<<angle_companion_+2*angle_increment_of_increment_distance_<< std::endl;
+				}
+
+				if((vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]])&&(orientation_person_robot_angles_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]>(angle_companion_+2*angle_increment_of_increment_distance_))){
+					we_have_path_collisions=true;
+				}
+			}
+
+			if(debug_angles_){
+				std::cout << " !BEST_path_parent_index_vector_.empty()="<<!BEST_path_parent_index_vector_.empty()<< std::endl;
+				std::cout << " !we_have_path_collisions="<<!we_have_path_collisions<<"; angle_companion_="<<angle_companion_<< std::endl;
+			}
+
+			double ini_act_angle_out=initial_angle_;
+
+			if(debug_angles_){
+				std::cout << " ini_act_angle_out="<< ini_act_angle_out<< std::endl;
+			}
+
+			if((!we_have_path_collisions)&&(ini_act_angle_out>angle_companion_)){
+				for(unsigned int g=1;g<BEST_path_parent_index_vector_.size();g++){
+					unsigned int act_index;//=best_plan_vertex_index_[best_plan_vertex_index_.size()-g];
+
+					unsigned int next_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g];
+					double act_angle;//=orientation_person_robot_angles_[act_index];
+					if(g==1){
+						act_angle=ini_act_angle_out;
+						act_index=0;
+					}else{
+						act_angle=orientation_person_robot_angles_[act_index];
+					}
+
+					double next_angle=act_angle-5*angle_increment_of_increment_distance_;
+					if(next_angle<angle_companion_){
+						//next_angle=orientation_person_robot_angles_[act_index]-angle_increment_of_increment_distance_;
+						orientation_person_robot_angles_[next_index]=angle_companion_;
+					}else{
+						orientation_person_robot_angles_[next_index]=next_angle;
+					}
+
+					if(debug_angles_){
+						std::cout << " act_index="<< act_index<<"; next_index="<<next_index<<"; act_angle="<<act_angle<<"; next_angle="<<next_angle<< std::endl;
+						std::cout << "orientation_person_robot_angles_[next_index]="<< orientation_person_robot_angles_[next_index]<< std::endl;
+					}
+
+					act_index=next_index;
+				}
+			}
+		}
+
+
+		if(debug_comanion_good_){
+			if(!BEST_path_parent_index_vector_.empty()){
+				for(unsigned int f=0;f<BEST_path_parent_index_vector_.size();f++){
+					std::cout << "(BEST path index) f="<<f<<"; index=" <<BEST_path_parent_index_vector_[f]<< std::endl;
+				}
+			}
+
+			std::cout << "FIN only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+		}
+
+	///////////////////////77777777
+	}
+
+
+
+	/*std::cout << "  3  INI orientation_person_robot_angles_[g]: "<< std::endl;
+
+				for(unsigned int y=0;y<orientation_person_robot_angles_.size();y++){
+					std::cout << "    orientation_person_robot_angles_[y]="<<orientation_person_robot_angles_[y]<< std::endl;
+				}*/
+
+	//std::cout << "FIN go_behind_robot ..."<< std::endl;
+
+}
+
+
+
+
+/*  Arreglar angulos para pasar detras del robot   */
+void Cplan_local_nav_person_companion::go_behind_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost2(unsigned int i){
+
+	// TODO: arreglar para que vaya por detras de la persona en los obstaculos y no por delante!!!
+
+
+	// calcula los angulos que hay que moverse en ese path.
+	if(debug_real_test_companion2_){
+		std::cout << "    !!!    INI go_behind_robot-only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+	}
+	BEST_path_parent_index_vector_.clear(); // de atras a delante. (en el ultimo coges el primer indice.)
+
+	// CASE 1: actual_angle < actual_parent_angle. Dar vuelta hacia atras del arbol (primera vuelta).
+	unsigned int actual_index=i; // recorrete todo el path the este final de camino.
+	unsigned int actual_parent_index=parent_index_vector_[actual_index];
+	double actual_angle=orientation_person_robot_angles_[actual_index];
+	double actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+
+	double diff_angle=actual_parent_angle-actual_angle; // saltos posibles 1- 90grad a 180grad o 0 grad.
+	if(debug_real_test_companion2_){																		// 2- de 0grad o 180grad a 90grad.
+		std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+	}
+	bool caso_vuelta_al_reves=false;
+	BEST_path_parent_index_vector_.push_back(actual_index);
+	//std::cout << " (ini while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+		//if((cost_companion_[i]!=0)){//&&(actual_angle<actual_parent_angle)&&(diff_angle>angle_increment_of_increment_distance_)){ // si hay cost companion
+
+	do{
+		BEST_path_parent_index_vector_.push_back(actual_index);
+		actual_index=actual_parent_index;
+		actual_parent_index=parent_index_vector_[actual_index];
+	}while(actual_parent_index>0);
+	BEST_path_parent_index_vector_.push_back(actual_parent_index);
+
+
+		// 1- vuelta del final del path al principio!
+			//double sum_angles_increment1=0;
+			//int count_sum=0;
+			do{
+				actual_angle=orientation_person_robot_angles_[actual_index];
+				actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+				/*if(actual_angle>actual_parent_angle){
+					std::cout << " Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					diff_angle=actual_angle-actual_parent_angle;
+					if(diff_angle>angle_increment_of_increment_distance_){
+						orientation_person_robot_angles_[actual_parent_index]=actual_angle-angle_increment_of_increment_distance_;
+					}
+				}*/
+
+				//sum_angles_increment1=sum_angles_increment1+(orientation_person_robot_angles_[actual_index]-orientation_person_robot_angles_[actual_parent_index]);
+				//count_sum++;
+				if(debug_real_test_companion2_){
+					std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+				}
+
+				if(actual_angle>actual_parent_angle){
+					caso_vuelta_al_reves=true;
+					diff_angle=actual_angle-actual_parent_angle;
+
+					if(diff_angle>angle_increment_of_increment_distance_){
+						//if(debug_comanion_good_){
+						//	std::cout << " (DO-WILE) Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+						//}
+						if(debug_real_test_companion2_){
+							std::cout << "diff_angle=" <<diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+						}
+
+						//std::cout << "(DO-WILE) (!!!CASE!!! actual_angle < actual_parent_angle)"<< std::endl;
+						orientation_person_robot_angles_[actual_parent_index]=actual_angle-angle_increment_of_increment_distance_;
+
+						if(actual_debug2_){
+							std::cout << "if (CASE: entro en obstaculo)"<< std::endl;
+							std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+							std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+							std::cout << "(path) orientation_person_robot_angles_[actual_index="<<actual_index<<"]=" <<orientation_person_robot_angles_[actual_index]<< std::endl;
+							std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+							std::cout << "(path) min_distance_collision_vector_[actual_index="<<actual_index<<"]=" <<min_distance_collision_vector_[actual_index]<< std::endl;
+							std::cout << "(path) min_distance_collision_vector_[actual_parent_index="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+							//std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+						}
+						if(orientation_person_robot_angles_[actual_parent_index]<angle_companion_){
+								orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+						}
+						if(orientation_person_robot_angles_[actual_parent_index]>180){
+							orientation_person_robot_angles_[actual_parent_index]=180;
+						}
+					}
+					diff_angle=diff_angle-angle_increment_of_increment_distance_;
+				}else{ // CASE: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+				}
+
+				/*else{
+					diff_angle=actual_parent_angle-actual_angle;
+					if(diff_angle>angle_increment_of_increment_distance_){
+
+					}
+				}*/
+				if(debug_comanion_good_){
+					std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+					std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+					std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+				}
+
+				/*if(diff_angle>angle_increment_of_increment_distance_){
+					angle_diference2=angle_diference2-angle_increment_of_increment_distance_;
+					double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+					//double act_companion_cost=(0.000000015242)*(pow(actual_angle_cost-angle_companion_,4));
+				}*/
+
+				//double actual_angle_cost=actual_angle-angle_increment_of_increment_distance_;
+				//orientation_person_robot_angles_[actual_parent_index]=actual_angle_cost; // modificas los angulos anteriores para que sea menos abrupto el cambio.
+				actual_index=actual_parent_index;
+				actual_parent_index=parent_index_vector_[actual_index]; //busca el nodo anterior de este path.
+				//BEST_path_parent_index_vector_.push_back(actual_index);
+				//std::cout << " (final while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+
+			}while(actual_parent_index>0);//&&(diff_angle>angle_increment_of_increment_distance_));
+			// PARA EL INDICE =0, PQ SINO ENTRA EN BUCLE INFINITO!
+			actual_angle=orientation_person_robot_angles_[actual_index];
+			actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+			if(actual_angle<actual_parent_angle){
+				diff_angle=actual_parent_angle-actual_angle;
+				if(diff_angle>angle_increment_of_increment_distance_){
+					orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+					if(orientation_person_robot_angles_[actual_parent_index]<angle_companion_){
+						orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+					}
+					if(orientation_person_robot_angles_[actual_parent_index]>180){
+						orientation_person_robot_angles_[actual_parent_index]=180;
+					}
+				}
+			}
+
+
+			//sum_angles_increment1=sum_angles_increment1/count_sum;
+			//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment1="<<sum_angles_increment1<< std::endl;
+
+
+			//std::cout << " (final while) actual_parent_index="<<actual_parent_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+			if(actual_debug_){
+				std::cout << " BEST_path_parent_index_vector_.size()="<<BEST_path_parent_index_vector_.size()<< std::endl;
+			}
+			if(debug_comanion_good_){
+				std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+				std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<0<<"]=" <<orientation_person_robot_angles_[0]<< std::endl;
+				std::cout << "(path) cost_companion_[actual_parent_index="<<0<<"]=" <<cost_companion_[0]<< std::endl;
+			}
+
+			unsigned int act_index1=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1];
+			unsigned int next_index1=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2];
+			double act_angle1=orientation_person_robot_angles_[act_index1];
+			double next_angle1=orientation_person_robot_angles_[next_index1];
+			double diff_angle1=act_angle1-next_angle1;
+			if(diff_angle1>angle_increment_of_increment_distance_){
+				caso_vuelta_al_reves=true;
+			}
+
+			// 2- vuelta del principio al final
+/*  caso_vuelta_al_reves!!!!   */
+			if(!caso_vuelta_al_reves){
+				// INICIO vuelta hacia delante!
+				//bool flag_return_90_dg=false;
+				//unsigned int second_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2];
+				//double second_angle=orientation_person_robot_angles_[second_index];
+				/*if((second_angle==angle_companion_)&&(orientation_person_robot_angles_[0]==angle_companion_)){//(orientation_person_robot_angles_[0]>(angle_companion_-5))&&(orientation_person_robot_angles_[0]<(angle_companion_+5))){
+				//	std::cout << "flag_return_90_dg=true"<< std::endl;
+					flag_return_90_dg=true;
+				}*/
+
+				//double sum_angles_increment=0;
+
+				for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+					//std::cout << "BEST_path_parent_index_vector_.size()-1-g="<<BEST_path_parent_index_vector_.size()-1-g<<"; BEST_path_parent_index_vector_.size()-2-g="<<BEST_path_parent_index_vector_.size()-2-g<< std::endl;
+
+					unsigned int act_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g];
+					unsigned int next_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2-g];
+					double act_angle=orientation_person_robot_angles_[act_index];
+					double next_angle=orientation_person_robot_angles_[next_index];
+					double diff_angle=act_angle-next_angle;
+
+					//std::cout << "act_angle["<<act_index<<"]="<<act_angle<<"next_angle["<<next_index<<"]"<<next_angle<<"diff_angle=act_angle-next_angle="<<diff_angle<<" > angle_increment_of_increment_distance_="<< angle_increment_of_increment_distance_<<" and diff_angle>0"<< std::endl;
+
+					//if((act_index!=0)&&(diff_angle>angle_increment_of_increment_distance_)){
+					if(((diff_angle>angle_increment_of_increment_distance_))&&(diff_angle>0)){
+						//std::cout << "ENTRO EN IF !!!"<< std::endl;
+
+					//	std::cout << " (FOR) ANT (!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+					//	std::cout << "  act_angle="<<act_angle<<"; next_angle="<<next_angle<<";  diff_angle="<< diff_angle<< std::endl;
+
+					//	std::cout << "(!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+							// CASE 2: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+						if(actual_debug_){
+							std::cout << "if (CASE: salgo de obstaculo)"<< std::endl;
+						}
+						//if(next_index!=0){
+							double new_angle=act_angle-angle_increment_of_increment_distance_;
+							//std::cout << "new_angle="<<new_angle<< std::endl;
+
+							if(new_angle<angle_companion_){
+								orientation_person_robot_angles_[next_index]=angle_companion_;
+								//std::cout << "if(new_angle<angle_companion_) angle_companion_="<<angle_companion_<< std::endl;
+							}else{
+								orientation_person_robot_angles_[next_index]=new_angle;
+								//std::cout << "else if(new_angle<angle_companion_)new_angle="<<new_angle<< std::endl;
+							}
+							if(new_angle>180){
+								orientation_person_robot_angles_[next_index]=180;
+							}
+							if(actual_debug_){
+								std::cout << "(modif) orientation_person_robot_angles_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_[next_index]<< std::endl;
+							}
+						//}
+					}else{
+
+						//std::cout << "ENTRO EN ELSE !!!"<< std::endl;
+
+						//if(next_index!=0){
+							/*orientation_person_robot_angles_[next_index]=orientation_person_robot_angles_[act_angle]+angle_increment_of_increment_distance_;
+							if(orientation_person_robot_angles_[next_index]>angle_companion_){
+								orientation_person_robot_angles_[next_index]=angle_companion_;
+							}*/
+						//}
+						//	std::cout << " (FOR) (real) next_angle="<<orientation_person_robot_angles_[next_index]<< std::endl;
+
+					}
+					//else if((diff_angle>angle_increment_of_increment_distance_)&&(flag_return_90_dg)){
+						// CASE 3: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+						// caso: orientation_person_robot_angles_[0=[BEST_path_parent_index_vector_.size()-1]<angle_companion_
+						// &
+					//	if(actual_debug_){
+					//		std::cout << "(caso0) if (CASE: salgo de obstaculo)"<< std::endl;
+					//	}
+					//	double new_angle=act_angle+angle_increment_of_increment_distance_;
+					//	if(new_angle>angle_companion_){
+					//		orientation_person_robot_angles_[next_index]=angle_companion_;
+					//	}else{
+					//		orientation_person_robot_angles_[next_index]=new_angle;
+					//	}
+					//	if(actual_debug_){
+					//		std::cout << "(modif_caso0) orientation_person_robot_angles_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_[next_index]<< std::endl;
+					//	}
+					//}
+
+
+					//sum_angles_increment=sum_angles_increment+orientation_person_robot_angles_[act_index];
+
+				} // fin for vuelta hacia delante
+
+				//sum_angles_increment=sum_angles_increment/BEST_path_parent_index_vector_.size();
+				//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment="<<sum_angles_increment<< std::endl;
+
+			}
+
+
+			bool we_have_path_collisions=false;
+			for(unsigned int g=0;g<vector_of_companion_collisions_.size();g++){
+				if(vector_of_companion_collisions_[g]){
+					we_have_path_collisions=true;
+				}
+			}
+			//std::cout << " !BEST_path_parent_index_vector_.empty()="<<!BEST_path_parent_index_vector_.empty()<< std::endl;
+			//std::cout << " we_have_path_collisions="<<we_have_path_collisions<< std::endl;
+
+			if(!BEST_path_parent_index_vector_.empty()){
+				if((!we_have_path_collisions)&&(BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2]!=angle_companion_)){
+					for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+						unsigned int act_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g];
+						unsigned int next_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2-g];
+						double act_angle=orientation_person_robot_angles_[act_index];
+						double next_angle=orientation_person_robot_angles_[act_index]-angle_increment_of_increment_distance_;
+						orientation_person_robot_angles_[next_index]=next_angle;
+						if(debug_person_companion_general_){
+						std::cout << " act_index="<< act_index<<"; next_index="<<next_index<<"; act_angle="<<act_angle<<"; next_angle="<<next_angle<< std::endl;
+						}
+						//std::cout << "orientation_person_robot_angles_[next_index]="<< orientation_person_robot_angles_[next_index]<< std::endl;
+					}
+				}
+			}
+
+		//} // fin if(cost_companion!=0)
+
+
+
+		if(debug_comanion_good_){
+			if(!BEST_path_parent_index_vector_.empty()){
+				for(unsigned int f=0;f<BEST_path_parent_index_vector_.size();f++){
+					std::cout << "(BEST path index) f="<<f<<"; index=" <<BEST_path_parent_index_vector_[f]<< std::endl;
+				}
+			}
+
+			std::cout << "FIN only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+		}
+}
+
+
+
+/////////////
+
+/*  Arreglar angulos para pasar detras del robot   */
+void Cplan_local_nav_person_companion::go_in_front_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost3(unsigned int i){
+
+	// TODO: arreglar para que vaya por detras de la persona en los obstaculos y no por delante!!!
+
+	/*std::cout << "    INI orientation_person_robot_angles_[g]: "<< std::endl;
+
+	for(unsigned int y=0;y<orientation_person_robot_angles_.size();y++){
+		std::cout << "    orientation_person_robot_angles_[y]="<<orientation_person_robot_angles_[y]<< std::endl;
+	}*/
+
+
+
+	/*std::cout << "  INI go_in_front_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost3 INI : orientation_person_robot_angles_:"<< std::endl;
+
+				for(unsigned int y=0;y<orientation_person_robot_angles_.size();y++){
+					std::cout << "    orientation_person_robot_angles_[y="<<y<<"]="<<orientation_person_robot_angles_[y]<< std::endl;
+				}*/
+
+
+
+
+
+	// calcula los angulos que hay que moverse en ese path.
+
+	BEST_path_parent_index_vector_.clear(); // de atras a delante. (en el ultimo coges el primer indice.)
+
+	// CASE 1: actual_angle < actual_parent_angle. Dar vuelta hacia atras del arbol (primera vuelta).
+	unsigned int actual_index;
+	unsigned int actual_parent_index;
+
+	if(calc_goal_companion_with_group_path_){
+		actual_index=i; // recorrete todo el path the este final de camino.
+		actual_parent_index=parent_index_vector_[actual_index];
+	}else{
+		actual_index=orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1; // recorrete todo el path the este final de camino.
+		actual_parent_index=orientation_person_robot_angles_with_prediction_of_person_companion_.size()-2;
+	}
+
+	double actual_angle;
+	double actual_parent_angle;
+
+	if(calc_goal_companion_with_group_path_){
+		actual_angle=orientation_person_robot_angles_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+	}else{
+		actual_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index];
+	}
+
+	double diff_angle=actual_parent_angle-actual_angle; // saltos posibles 1- 90grad a 180grad o 0 grad.
+
+	if(debug_real_test_companion2_){																		// 2- de 0grad o 180grad a 90grad.
+		std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+	}
+
+	//bool caso_vuelta_al_reves=true;
+
+	unsigned int actual_index2; // recorrete todo el path the este final de camino.
+	unsigned int actual_parent_index2;
+	//if(calc_goal_companion_with_group_path_){
+		actual_index2=i;
+		actual_parent_index2=parent_index_vector_[actual_index2];
+		BEST_path_parent_index_vector_.push_back(actual_index2);
+		//std::cout << " (ini while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+		do{
+			BEST_path_parent_index_vector_.push_back(actual_index2);
+			actual_index2=actual_parent_index2;
+			actual_parent_index2=parent_index_vector_[actual_index2];
+		}while(actual_parent_index2>0);
+		BEST_path_parent_index_vector_.push_back(actual_parent_index2);
+	///} //else nada en este caso.
+
+
+
+
+	// 1- vuelta del final del path al principio!
+	//double sum_angles_increment1=0;
+	//int count_sum=0;
+	do{
+
+		if(calc_goal_companion_with_group_path_){
+			actual_angle=orientation_person_robot_angles_[actual_index];
+			actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+		}else{
+			actual_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_index];
+			actual_parent_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index];
+		}
+
+		//std::cout << " actual_angle"<<actual_angle<<";> actual_parent_angle="<<actual_parent_angle << std::endl;
+		if(actual_angle<actual_parent_angle){
+			//caso_vuelta_al_reves=true;
+			//std::cout << " do while 3 "<< std::endl;
+			diff_angle=actual_parent_angle-actual_angle;
+
+			if(diff_angle>angle_increment_of_increment_distance_){
+				//if(debug_comanion_good_){
+				//	std::cout << " (DO-WILE) Int if ->(path BEFORE CHANGE) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+				//}
+				//std::cout << " do while 5 "<< std::endl;
+				if(debug_angles_){
+					std::cout << "(caso vuelta diff_algle +)= actual_angle - actual_parent_angle = diff_angle=" <<diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+				}
+				//std::cout << " do while 6 "<< std::endl;
+
+
+				if(calc_goal_companion_with_group_path_){
+					orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+				}else{
+					orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+				}
+				//std::cout << " do while 7 "<< std::endl;
+
+
+
+				if(actual_debug2_){
+					std::cout << "if (CASE: entro en obstaculo)"<< std::endl;
+					std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+					std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+					std::cout << "(path) orientation_person_robot_angles_[actual_index="<<actual_index<<"]=" <<orientation_person_robot_angles_[actual_index]<< std::endl;
+					std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+					std::cout << "(path) min_distance_collision_vector_[actual_index="<<actual_index<<"]=" <<min_distance_collision_vector_[actual_index]<< std::endl;
+					std::cout << "(path) min_distance_collision_vector_[actual_parent_index="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+					//std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+				}
+				//std::cout << " do while 8 "<< std::endl;
+				if(calc_goal_companion_with_group_path_){
+					if(orientation_person_robot_angles_[actual_parent_index]>angle_companion_){
+						orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+					}
+					if(orientation_person_robot_angles_[actual_parent_index]<0){
+						orientation_person_robot_angles_[actual_parent_index]=0;
+					}
+				}else{
+					if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]>angle_companion_){
+						orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=angle_companion_;
+					}
+					if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]<0){
+						orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=0;
+					}
+				}
+
+				//std::cout << " do while 9 "<< std::endl;
+				if(debug_angles_){
+					std::cout << "orientation_person_robot_angles_[actual_parent_index]"<< orientation_person_robot_angles_[actual_parent_index]<<" actual_angle-angle_increment_of_increment_distance_="<<actual_angle-angle_increment_of_increment_distance_<< std::endl;
+				}
+
+			}
+			diff_angle=diff_angle-angle_increment_of_increment_distance_;
+		}else{ // CASE: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+		}
+
+		if(debug_comanion_good_){
+			std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+			std::cout << "actual_angle=" <<actual_angle<<"; actual_parent_angle="<<actual_parent_angle<<"; diff_angle="<<diff_angle<< std::endl;
+			std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+			std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+		}
+		//std::cout << " do while 10 "<< std::endl;
+		if(calc_goal_companion_with_group_path_){
+			actual_index=actual_parent_index;
+			actual_parent_index=parent_index_vector_[actual_index]; //busca el nodo anterior de este path.
+		}else{
+			actual_index=actual_index-1;
+			actual_parent_index=actual_parent_index-1; //busca el nodo anterior de este path.
+		}
+		//std::cout << " do while 11 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+		//std::cout << " (final while) actual_index="<<actual_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+
+	}while(actual_parent_index>0);//&&(diff_angle>angle_increment_of_increment_distance_));
+	// PARA EL INDICE =0, PQ SINO ENTRA EN BUCLE INFINITO!
+
+	if(calc_goal_companion_with_group_path_){
+		actual_angle=orientation_person_robot_angles_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_[actual_parent_index];
+	}else{
+		actual_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_index];
+		actual_parent_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index];
+	}
+
+	//std::cout << " do while 12 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+	/*if(actual_angle<actual_parent_angle){
+		diff_angle=sqrt((actual_parent_angle-actual_angle)*(actual_parent_angle-actual_angle));
+		if(diff_angle>angle_increment_of_increment_distance_){
+
+			if(debug_angles_){
+				std::cout << "(caso vuelta diff_algle +)= actual_angle - actual_parent_angle = diff_angle=" <<diff_angle<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+			}
+			//std::cout << " do while 13 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+			if(calc_goal_companion_with_group_path_){
+				orientation_person_robot_angles_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+				if(orientation_person_robot_angles_[actual_parent_index]>angle_companion_){
+					orientation_person_robot_angles_[actual_parent_index]=angle_companion_;
+				}
+				if(orientation_person_robot_angles_[actual_parent_index]<0){
+					orientation_person_robot_angles_[actual_parent_index]=0;
+				}
+			}else{
+				orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=actual_angle+angle_increment_of_increment_distance_;
+				if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]>angle_companion_){
+					orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=angle_companion_;
+				}
+				if(orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]<0){
+					orientation_person_robot_angles_with_prediction_of_person_companion_[actual_parent_index]=0;
+				}
+			}
+			//std::cout << " do while 14 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+			if(debug_angles_){
+				std::cout << "orientation_person_robot_angles_[actual_parent_index]"<< orientation_person_robot_angles_[actual_parent_index]<<" actual_angle-angle_increment_of_increment_distance_="<<actual_angle-angle_increment_of_increment_distance_<< std::endl;
+			}
+		}
+	}*/
+	//std::cout << " do while 15 "<<"; actual_index="<<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+
+	//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment1="<<sum_angles_increment1<< std::endl;
+
+
+	/*std::cout << "  2  INI orientation_person_robot_angles_[g]: "<< std::endl;
+
+		for(unsigned int y=0;y<orientation_person_robot_angles_.size();y++){
+			std::cout << "    orientation_person_robot_angles_[y]="<<orientation_person_robot_angles_[y]<< std::endl;
+		}*/
+
+
+	if(!calc_goal_companion_with_group_path_){
+		// TODO: usar funcion, vueltas_hacia_delante_arreglar_angulos_para_caso_min_companion_angle_con_prediccion.
+		//std::cout << " do while 16 "<< std::endl;
+
+		fix_angles_to_use_person_prediction_for_the_companion_goal(); // TODO: mirar que hace!
+		//std::cout << " do while 17 "<< std::endl;
+
+
+
+
+	}else{
+	///////////////77
+		//std::cout << " (final while) actual_parent_index="<<actual_parent_index<<"; BEST_path_parent_index_vector_.back()"<<BEST_path_parent_index_vector_.back()<< std::endl;
+		if(actual_debug_){
+			std::cout << " BEST_path_parent_index_vector_.size()="<<BEST_path_parent_index_vector_.size()<< std::endl;
+		}
+		if(debug_comanion_good_){
+			std::cout << "actual_index=" <<actual_index<<"; actual_parent_index="<<actual_parent_index<< std::endl;
+			std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<0<<"]=" <<orientation_person_robot_angles_[0]<< std::endl;
+			std::cout << "(path) cost_companion_[actual_parent_index="<<0<<"]=" <<cost_companion_[0]<< std::endl;
+		}
+
+		unsigned int act_index1=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1];
+		unsigned int next_index1=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2];
+		double act_angle1=orientation_person_robot_angles_[act_index1];
+		double next_angle1=orientation_person_robot_angles_[next_index1];
+		double diff_angle1=act_angle1-next_angle1;
+		if(diff_angle1>angle_increment_of_increment_distance_){
+			//caso_vuelta_al_reves=true;
+		}
+
+
+	/*  caso_vuelta_al_reves!!!!   */
+
+	/*	for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+
+			if(debug_angles_){
+				std::cout << " 2 (vuelta al reves!) BEST_path_parent_index_vector_.size()-1-g="<<BEST_path_parent_index_vector_.size()-1-g<<"; BEST_path_parent_index_vector_.size()-2-g="<<BEST_path_parent_index_vector_.size()-2-g<< std::endl;
+			}
+
+			unsigned int act_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g];
+			unsigned int next_index=BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2-g];
+
+			double act_angle=orientation_person_robot_angles_[act_index];
+			double next_angle=orientation_person_robot_angles_[next_index];
+
+			if((act_index==0)){
+				act_angle=initial_angle_;
+			}
+			if(next_angle==0){
+				next_angle=initial_angle_;
+			}
+
+			if(debug_angles_){
+				std::cout << " 2 (vuelta hacia delante de INI_angle_act_angle al qur necesitas para pasar.!) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+			}
+
+			if((BEST_path_parent_index_vector_.size()-1-g)==0){
+				act_angle=initial_angle_;
+			}
+
+			double diff_angle=sqrt((act_angle-next_angle)*(act_angle-next_angle));
+
+			//if(debug_angles_){
+				std::cout << "act_angle["<<act_index<<"]="<<act_angle<<"next_angle["<<next_index<<"]"<<next_angle<<"diff_angle=act_angle-next_angle="<<diff_angle<<" > angle_increment_of_increment_distance_="<< angle_increment_of_increment_distance_<<" and diff_angle>0"<< std::endl;
+			//}
+
+			if(((diff_angle>(2*angle_increment_of_increment_distance_)))&&(diff_angle>0)){
+				std::cout << "ENTRO EN IF !!!"<< std::endl;
+
+				//	std::cout << " (FOR) ANT (!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+				//	std::cout << "  act_angle="<<act_angle<<"; next_angle="<<next_angle<<";  diff_angle="<< diff_angle<< std::endl;
+
+				//	std::cout << "(!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+				// CASE 2: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+				if(actual_debug_){
+					std::cout << "if (CASE: salgo de obstaculo)"<< std::endl;
+				}
+
+				double new_angle=act_angle-(2*angle_increment_of_increment_distance_);
+
+				//if(debug_gazebo_journal_){
+				//	std::cout << "new_angle ["<<next_index<<"]="<<new_angle<< std::endl;
+				//}
+
+				if(new_angle>angle_companion_){
+					orientation_person_robot_angles_[next_index]=angle_companion_;
+					//std::cout << "if(new_angle<angle_companion_) angle_companion_="<<angle_companion_<< std::endl;
+				}else{
+					orientation_person_robot_angles_[next_index]=new_angle;
+					//std::cout << "else if(new_angle<angle_companion_)new_angle="<<new_angle<< std::endl;
+				}
+				if(new_angle<0){
+					orientation_person_robot_angles_[next_index]=0;
+				}
+				if(actual_debug_){
+					std::cout << "(modif) orientation_person_robot_angles_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_[next_index]<< std::endl;
+				}
+
+			}else{
+
+				//std::cout << "ENTRO EN ELSE !!!"<< std::endl;
+
+				//	std::cout << " (FOR) (real) next_angle="<<orientation_person_robot_angles_[next_index]<< std::endl;
+
+			}
+
+			//sum_angles_increment=sum_angles_increment+orientation_person_robot_angles_[act_index];
+
+		} // fin for vuelta hacia delante
+*/
+		//sum_angles_increment=sum_angles_increment/BEST_path_parent_index_vector_.size();
+		//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment="<<sum_angles_increment<< std::endl;
+		////////////////////////////
+
+				//std::cout << " tercera pasada, ahora mismo no se para que!"<< std::endl;
+				// es para mantenerte a 90 grados si decrece tu valor en orientacion!!! Te adelantas demasiado
+				if(!BEST_path_parent_index_vector_.empty()){
+					bool we_have_path_collisions=false;
+					for(unsigned int g=0;g<BEST_path_parent_index_vector_.size();g++){
+
+						if((vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]])&&(orientation_person_robot_angles_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]<(angle_companion_-2*angle_increment_of_increment_distance_))){
+							we_have_path_collisions=true;
+						}else{
+
+						}
+					}
+
+					double ini_act_angle_out=initial_angle_;
+
+					if((!we_have_path_collisions)&&(ini_act_angle_out<angle_companion_)){
+
+						for(unsigned int g=1;g<BEST_path_parent_index_vector_.size();g++){
+
+							unsigned int act_index;//=best_plan_vertex_index_[best_plan_vertex_index_.size()-g];
+
+							unsigned int next_index=BEST_path_parent_index_vector_[0+g];
+							double act_angle;//=orientation_person_robot_angles_[act_index];
+							if(g==1){
+								act_angle=ini_act_angle_out;
+								act_index=0;
+							}else{
+								act_angle=orientation_person_robot_angles_[act_index];
+							}
+
+							double next_angle=act_angle+5*angle_increment_of_increment_distance_;
+
+							if(next_angle>angle_companion_){
+								//next_angle=orientation_person_robot_angles_[act_index]-angle_increment_of_increment_distance_;
+								orientation_person_robot_angles_[next_index]=angle_companion_;
+							}else{
+								orientation_person_robot_angles_[next_index]=next_angle;
+							}
+
+							act_index=next_index;
+						}
+					}
+				}
+
+	}
+
+
+}
+
+
+
+
+
+
+
+void Cplan_local_nav_person_companion::see_companion_path_angle_and_cost_of_min_cost_paths(double parent_index){
+
+
+	std::cout << "INI see_companion_path_angle_and_cost_of_min_cost_paths "<< std::endl;
+	std::cout << "orientation_person_robot_angles_.size()= "<<orientation_person_robot_angles_.size()<< std::endl;
+	std::cout << "cost_companion_.size()= "<<cost_companion_.size()<< std::endl;
+	std::cout << "parent_index_vector_.size()= "<<parent_index_vector_.size()<< std::endl;
+	double sum_angles_increment=0;
+	double sum_inc_entre_angles=0;
+
+	double actual_parent_index=parent_index;
+	do{
+		double sum1=orientation_person_robot_angles_[actual_parent_index];
+
+		std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<actual_parent_index<<"]=" <<orientation_person_robot_angles_[actual_parent_index]<< std::endl;
+		std::cout << "(path) cost_companion_[actual_parent_index="<<actual_parent_index<<"]=" <<cost_companion_[actual_parent_index]<< std::endl;
+		std::cout << "(path) min_distance_collision_vector_[actual_parent_index="<<actual_parent_index<<"]=" <<min_distance_collision_vector_[actual_parent_index]<< std::endl;
+
+		actual_parent_index=parent_index_vector_[actual_parent_index];
+		double sum2=orientation_person_robot_angles_[actual_parent_index];
+
+		sum_angles_increment=sum_angles_increment+orientation_person_robot_angles_[actual_parent_index];
+		sum_inc_entre_angles=sum_inc_entre_angles+(sum1-sum2);
+		 if(debug_nadal_){
+			 std::cout << "antes while actual_parent_index="<<actual_parent_index<< std::endl;
+		 }
+
+	}while(actual_parent_index>0);
+	sum_inc_entre_angles=sum_inc_entre_angles/orientation_person_robot_angles_.size();
+	sum_angles_increment=sum_angles_increment/orientation_person_robot_angles_.size();
+
+	std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment="<<sum_angles_increment<< std::endl;
+	std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_inc_entre_angles="<<sum_inc_entre_angles<< std::endl;
+
+	std::cout << "despues while"<< std::endl;
+	std::cout << "(path) actual_parent_index="<<actual_parent_index<< std::endl;
+
+	std::cout << "(path) orientation_person_robot_angles_[actual_parent_index="<<0<<"]=" <<orientation_person_robot_angles_[0]<< std::endl;
+	std::cout << "(path) cost_companion_[actual_parent_index="<<0<<"]=" <<cost_companion_[0]<< std::endl;
+
+}
+
+
+
+
+
+
+
+
+
+double Cplan_local_nav_person_companion::calc_robot_person_companion_distance(){
+//
+	double robot_person_distance;
+	//Spose act_robot_pose=robot_->get_current_pose();
+	//std::cout << "Initia, out, robot pose="<< std::endl;
+	//act_robot_pose.print();
+	//std::cout << "Initia, out, robot print="<< std::endl;
+	//robot_initial_pose_.print();
+
+	//const std::list<Cperson_abstract *>* person_list = get_scene( );
+	//for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin(); iit!=person_list->end(); iit++ )
+	//{
+	 	//if((*iit)->get_id()==id_person_companion_){
+	    	companion_person_position_=actual_person_Companion_SpointV_;
+	    //}
+	//}
+	robot_person_distance=robot_initial_pose_.distance( (Spoint) companion_person_position_);
+	//std::cout << "(calc_robot_person_companion_distance()) robot_person_distance="<<robot_person_distance<< std::endl;
+	//std::cout << "robot_initial_pose_:"<< std::endl;
+	//robot_initial_pose_.print();
+	//std::cout << "companion_person_position_:"<< std::endl;
+	//companion_person_position_.print();
+
+	return robot_person_distance;//=act_robot_pose.distance(companion_person_position_);
+}
+
+
+
+
+
+double Cplan_local_nav_person_companion::calc_robot_person_companion_distance_companion_person_akp(){
+//
+	double robot_person_distance;
+	//Spose act_robot_pose=robot_->get_current_pose();
+	//std::cout << "Initia, out, robot pose="<< std::endl;
+	//act_robot_pose.print();
+	//std::cout << "Initia, out, robot print="<< std::endl;
+	//robot_initial_pose_.print();
+
+	companion_person_position_=person_companion_->get_current_pointV();
+
+	robot_person_distance=robot_initial_pose_.distance( (Spoint) companion_person_position_);
+	//std::cout << "(calc_robot_person_companion_distance_companion_person_akp()) robot_person_distance="<<robot_person_distance<< std::endl;
+	//std::cout << "companion_person_position_:"<< std::endl;
+	//companion_person_position_.print();
+
+	return robot_person_distance;//=act_robot_pose.distance(companion_person_position_);
+}
+
+
+// velocidad robot!!!
+
+void Cplan_local_nav_person_companion::vel_robot_normal(double d_min){
+	   // calculate the desired robot velocity depending on the nearbiest obstacle/person and goal
+		double distance_to_goal = robot_->get_current_pointV().distance( goal_);
+		// when the goal, starts to stop, higher priority than ppl
+	    if( distance_to_goal < distance_to_stop_ ){
+	    	 //std::cout <<" distance_to_goal < distance_to_stop_ (near goal) "<< std::endl;
+			robot_->set_v_max( max_v_by_system_ * distance_to_goal / distance_to_stop_  );//distance_to_stop is never 0
+	    // if not near the goal, normal velocity regulation according to nearby ppl
+	    }else if ( d_min < 1.0 ){
+	    	// std::cout <<" d_min < 1.0 "<< std::endl;
+	    	robot_->set_v_max( max_v_by_system_ * 0.75 );
+	    }else if ( d_min < 2.0){
+	    	// std::cout <<" d_min < 2.0 "<< std::endl;
+	    	robot_->set_v_max( max_v_by_system_ * 0.85);
+	    /*else if ( d_min < 5.0 )
+	    	robot_->set_v_max( max_v_by_system_ * 0.95 );*/
+	    }else{
+	    	 //std::cout <<" (reactive and repulsive) CASE else"<< std::endl;
+	    	robot_->set_v_max( max_v_by_system_  );
+	    }
+
+	    //std::cout <<"UUUUUU  max_v_by_system_="<< max_v_by_system_<< std::endl;
+
+}
+
+void Cplan_local_nav_person_companion::vel_robot_companion(double d_min , double robot_person_distance, Spoint before_next_goal_of_robot, Cperson_abstract::companion_reactive reactive){
+	/* (companion) Fin calculo angulo correspondiente a distancia de choque*/
+	if(debug_real_test_companion4_){
+		std::cout <<"IN vel_robot_companion!!! UUUUUU  d_min="<< d_min<< std::endl;
+	}
+
+	Spoint Spoint_pose_command2=(Spoint) robot_->get_current_pointV(); // calculas la distancia al obstaculo desde el centro de ambos (persona y robot).
+
+	//double min_dist_colli_act_global=check_collision_companion_goal_GLOBAL(Spoint_pose_command2,0); //TODO: OJO! parece que no se usa! si es verdad. eliminar!!!
+
+	// calculate the desired robot velocity depending on the nearbiest obstacle/person and goal
+
+	Spose robot1=robot_initial_pose_;
+
+	if(debug_real_test_companion_){
+		std::cout << " robot1=robot_->get_current_pose(); robot1.x="<<robot1.x <<"; robot1.y="<<robot1.y<< std::endl;
+		std::cout << " robot_initial_pose_.x"<<robot_initial_pose_.x<<"; robot_initial_pose_.y="<<robot_initial_pose_.y << std::endl;
+	}
+
+	Cperson_abstract* person_obj1;
+	find_person(id_person_companion_ , &person_obj1);
+	Sdestination person_companion_goal=person_obj1->get_best_dest();
+	SpointV_cov person1 = person_obj1->get_current_pointV();
+
+	//if(debug_output_screen_mesages_){
+	//	std::cout << " person1 = person_obj1->getvel_robot_companion_current_pointV(); person1.x="<<person1.x <<"; person1.y="<<person1.y<< std::endl;
+	//	std::cout << " person1 = person_obj1->getvel_robot_companion_current_pointV(); person1.vx="<<person1.vx <<"; person1.vy="<<person1.vy<< std::endl;
+	//	std::cout << " person1 = person_obj1->getvel_robot_companion_current_pointV(); person1.vdes="<<person_obj1->get_desired_velocity()<< std::endl;
+
+	//}
+
+	//Cperson_abstract* person_obj2;
+	//bool find_second_pers=find_person(id_SECOND_person_companion_ , &person_obj2);
+	//Sdestination person_companion_goal2;
+	//SpointV_cov person2;
+	/*if(find_second_pers){
+		person_companion_goal2=person_obj2->get_best_dest();
+		person2 = person_obj2->get_current_pointV();
+
+			//if(debug_output_screen_mesages_){
+			//	std::cout << " person2 = person_obj1->getvel_robot_companion_current_pointV(); person2.x="<<person2.x <<"; person1.y="<<person2.y<< std::endl;
+			//	std::cout << " person2 = person_obj1->getvel_robot_companion_current_pointV(); person2.vx="<<person2.vx <<"; person1.vy="<<person2.vy<< std::endl;
+			//	std::cout << " person2 = person_obj1->getvel_robot_companion_current_pointV(); person2.vdes="<<person_obj2->get_desired_velocity()<< std::endl;
+
+			//}
+	}*/
+
+
+	if(debug_real_test_companion_){
+
+
+		std::cout << " companion_person_position_.x"<<companion_person_position_.x<<"; companion_person_position_.y="<<companion_person_position_.y << std::endl;
+	}
+
+	double angle1;
+
+////////// Inicio calculo correcto initial angle!!! /////////////////////////////////////
+	if(debug_real_test_companion_){
+		std::cout << " !!! Inicio calculo correcto initial angle !!! "<< std::endl;
+	}
+	//Spose robot=robot_->get_current_pose();
+	// o
+	Spose robot=robot_initial_pose_;
+
+	double distance_between_ini_pose_and_final_next_goal;
+	double dist2;
+	double adequate_velocity;
+	if(reactive==Cperson_abstract::Akp_planning){
+		//std::cout << " ANTES CALCULO ARREGLAR VEL "<< std::endl;
+		//std::cout <<" TEST obtain better velocity of robot!!! time_stamp_before="<<before_next_goal_of_robot.time_stamp <<"; time_stamp_robot_Act="<<robot_initial_pose_.time_stamp<< std::endl;
+
+		distance_between_ini_pose_and_final_next_goal=sqrt((robot_initial_pose_.x-before_next_goal_of_robot.x)*(robot_initial_pose_.x-before_next_goal_of_robot.x)+(robot_initial_pose_.y-before_next_goal_of_robot.y)*(robot_initial_pose_.y-before_next_goal_of_robot.y));
+		dist2=distance_between_ini_pose_and_final_next_goal;
+		adequate_velocity=dist2/dt_;
+
+		if(adequate_velocity>max_v_by_system_){ // TODO: substituir el 0.9 por max_velocity del robot!
+			adequate_velocity=max_v_by_system_;
+		}
+	}
+
+
+
+
+	// substituir la person velocity por la adequate person velocity.
+	/*std::cout <<" TEST obtain better velocity of robot!!! time_stamp_before="<<before_next_goal_of_robot.time_stamp <<"; time_stamp_robot_Act="<<robot_initial_pose_.time_stamp<< std::endl;
+
+	std::cout <<" TEST obtain better velocity of robot!!! ; initial_person_companion_point_.vx="<<initial_person_companion_point_.vx<<"; initial_person_companion_point_.vy="<<initial_person_companion_point_.vy<< std::endl;
+	std::cout <<"  robot_initial_pose_.x="<<robot_initial_pose_.x<<"; robot_initial_pose_.y="<<robot_initial_pose_.y<<"; before_next_goal_of_robot.x="<<before_next_goal_of_robot.x<<"; before_next_goal_of_robot.y="<<before_next_goal_of_robot.y<< std::endl;
+	std::cout <<" TEST obtain better velocity of robot!!! distance_between_ini_pose_and_final_next_goal="<<distance_between_ini_pose_and_final_next_goal<< std::endl;
+	 */
+//	std::cout <<" TEST obtain better velocity of robot!!! adequate_velocity="<<adequate_velocity<<"; dt_="<<dt_<< std::endl;
+
+
+	//Cperson_abstract* person_obj;
+	//find_person(id_person_companion_ , &person_obj);
+
+	//SpointV_cov person = person_obj->get_current_pointV();
+	//std::cout << " peta en velocidad (1) "<< std::endl;
+   	// ini calcular nuevo angulo theta con orientación dirección movimiento persona.
+    		Cperson_abstract* person_obj;
+    		bool finded_person=find_person(id_person_companion_ , &person_obj);
+    		//std::cout << " peta en velocidad (2) "<< std::endl;
+    	    //std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+
+    	    if(debug_real_test_companion2_){
+    	    	std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+    	    }
+
+    	    if(debug_antes_subgoals_entre_AKP_goals_){
+    	    	std::cout << " (Case: far of the person position) finded_person="<<finded_person<< std::endl;
+    	    	std::cout << " person_obj->print(), person_pose_companion:"<< std::endl;
+    	    	person_obj->print();
+    	    	std::cout << " despues print person"<< std::endl;
+    	    }
+
+    	    SpointV_cov person = person_obj->get_current_pointV();
+    		//std::cout << " peta en velocidad (3) "<< std::endl;
+    	    if(debug_correct_angle_person_vel_robot_companion_){
+    	    std::cout <<" perso_print="<< std::endl;
+    	    person.print();
+    	    }
+    	    //const std::vector<SpointV_cov> person_tracj=person_obj->get_planning_trajectory();
+    	    if(debug_correct_angle_person_vel_robot_companion_){ std::cout <<" person_tracj.size()="<<person_obj->get_past_trajectory()->size()<< std::endl;}
+
+    	  //  std::cout <<" antes calculo theta 7"<< std::endl;
+
+    	    double theta=calc_person_companion_orientation();
+    		//std::cout << " peta en velocidad (4) "<< std::endl;
+    	    //double theta_pers=theta;
+    	    /*double x;
+    	    double y;
+    	    if(person_obj->get_past_trajectory()->size()>num_steps_orientation_){
+    	    	if(debug_correct_angle_person_vel_robot_companion_){std::cout <<" perso_print_back_traj(size-num_steps_orientation_)="<< std::endl;
+    	    	person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).print();}
+    	    	x=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).x;
+    	    	y=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).y;
+    	    }else{
+    	    	if(debug_correct_angle_person_vel_robot_companion_){std::cout <<" perso_print_back_traj(0)="<< std::endl;
+    	    	person_obj->get_past_trajectory()->at(0).print();}
+    	    	x=person_obj->get_past_trajectory()->at(0).x;
+    	    	y=person_obj->get_past_trajectory()->at(0).y;
+    	    }
+    	    double pers_dx=person.x-x;
+    	    double pers_dy=person.y-y;
+			x=person_obj->get_best_dest().x;
+			y=person_obj->get_best_dest().y;
+			pers_dx=person.x-x;//person_obj->get_current_pointV().vx;
+			pers_dy=person.y-y;//person_obj->get_current_pointV().vy;
+    	    if(debug_correct_angle_person_vel_robot_companion_){std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;}
+    	    double theta_pers=atan2(pers_dy , pers_dx);
+    	    theta=atan2(pers_dy , pers_dx);
+
+    	    */
+
+
+    	    if(debug_correct_angle_person_vel_robot_companion_){ std::cout <<" (person) theta="<<theta*180/3.14<< std::endl;
+    	    std::cout << " extern_robot_goal_.x-person.x="<<extern_robot_goal_.x-person.x<<"; extern_robot_goal_.y-person.y"<<extern_robot_goal_.y-person.y << std::endl;}
+    	    // fin calcular nuevo angulo theta con orientación dirección movimiento persona.
+   // std::cout << " peta en velocidad (6) "<< std::endl;
+    if(companion_same_person_goal_){
+		theta = atan2(person_obj->get_best_dest().y-person.y ,person_obj->get_best_dest().x-person.x); // angulo entre la destinacion a la que va la persona y la posicion de la persona.
+		//std::cout << " (companion_same_person_goal_) person_obj->get_best_dest().x ="<<person_obj->get_best_dest().x <<"; person_obj->get_best_dest().y="<<person_obj->get_best_dest().y<< std::endl;
+		//extern_robot_goal_=person_obj->get_best_dest();
+	}else{
+		theta = atan2(extern_robot_goal_.y-person.y , extern_robot_goal_.x-person.x);
+	}
+	//std::cout << " peta en velocidad (7) "<< std::endl;
+	person_orient_=theta;
+	if(debug_real_test_companion_){
+		std::cout << " (Global PERSON ORIENTATION) theta ="<<theta << std::endl;
+	}
+	double angle=atan2(person.y-robot.y , person.x-robot.x);
+	//std::cout << " peta en velocidad (8) "<< std::endl;
+	/*if(angle<0){
+	 * if((angle<0)&&(ini_angle_act>-180)){
+	 * ini_angle_act=sqrt(ini_angle_act*ini_angle_act);
+		angle=2*3.14+angle; //ya que angle es negativo!
+	}*/
+
+	////////
+	angle=angle*(180/3.14);
+
+	if(angle<0){
+	angle=360+angle;
+	if(debug_cout_robot_){
+				std::cout << " [change] diff_angle < 0 (1) angle ="<<angle << std::endl;
+			}
+	}
+	//std::cout << " peta en velocidad (9) "<< std::endl;
+// valido SOLO para el caso trasero SIEMPRE!!!
+	if((angle>=90)&&(angle<=180)){
+		angle=angle;
+			if(debug_cout_robot_){
+				std::cout << " [change] diff_angle [0<->180] (1) angle ="<<angle << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " [change] diff_angle [0<->180] (1) angle ="<<angle <<"\n";
+				fileMatlab2.close();
+			}
+		}else if((angle<90)&&(angle>=0)){
+			angle=180-angle;
+
+			if(debug_cout_robot_){
+				std::cout << " [change] diff_angle [0<-> -180] (1) angle ="<<angle << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " [change] diff_angle [0<-> -180] (1) angle ="<<angle <<"\n";
+				fileMatlab2.close();
+			}
+		}else if((angle>180)&&(angle<=270)){
+			angle=360-angle;
+
+			if(debug_cout_robot_){
+				std::cout << " [change] diff_angle [180<-> 360] (1) angle ="<<angle << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [180<-> 360] (1) angle ="<<angle <<"\n";
+				fileMatlab2.close();
+			}
+		}
+		else if((angle <( 360))&&(angle>=(270))){
+			angle=sqrt(angle*angle);
+			angle=angle-180;
+
+			if(debug_cout_robot_){
+				std::cout << " [change] diff_angle [-180<-> -360] (1) angle ="<<angle << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [-180<-> -360] (1) angle ="<<angle <<"\n";
+				fileMatlab2.close();
+			}
+		}else if(angle>360){
+			 unsigned int n_360_g=angle/360;
+			 angle=angle-n_360_g*360;
+		     std::cout << " OJO!!! caso mayor 360 ; angle=angle-n_360_g*360="<<angle<<"; n_360_g="<<n_360_g<< std::endl;
+		}else{
+			std::cout << " OJO!!! caso NO contemplado angle="<<angle<< std::endl;
+		}
+	angle=angle*(3.14/180);
+	////////
+	//std::cout << " peta en velocidad (10) "<< std::endl;
+	double ini_angle_act;
+	double ant_ini_angle;
+	ant_ini_angle=(robot_->get_current_pointV().angle_heading_point((Spoint) companion_person_position_))*(180/3.14);
+	//double dif_ang=angle-theta;
+
+	//if( diffangle(theta, angle) < 0 ){
+	//if( dif_ang > 0 ){
+	if( diffangle( angle, theta) < 0 ){
+		ini_angle_act=angle*(180/3.14);//(theta + angle)*(180/3.14);//(angle)*(180/3.14);
+		//ini_angle_act=(angle-theta)*(180/3.14);
+		if(debug_cout_robot_){
+			std::cout << " !!!!!!!!!! (IF) ini_angle_act ="<<ini_angle_act <<"; theta*(180/3.14)="<<theta*(180/3.14)<<"angle*(180/3.14)="<<angle*(180/3.14)<<"ant_ini_angle="<<ant_ini_angle<< std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << " !!!!!!!!!! (IF) ini_angle_act ="<<ini_angle_act <<"; theta*(180/3.14)="<<theta*(180/3.14)<<"angle*(180/3.14)="<<angle*(180/3.14)<<"ant_ini_angle="<<ant_ini_angle<< "\n";
+			fileMatlab2.close();
+
+		}
+
+	}else{
+
+		ini_angle_act=angle*(180/3.14);//(theta - angle)*(180/3.14);//(angle)*(180/3.14);
+		//ini_angle_act=(theta + angle)*(180/3.14);
+		ant_ini_angle=(robot_->get_current_pointV().angle_heading_point((Spoint) companion_person_position_))*(180/3.14);
+		if(debug_cout_robot_){
+			std::cout << " !!!!!!!!!! (ELSE) ini_angle_act ="<<ini_angle_act <<"; theta*(180/3.14)="<<theta*(180/3.14)<<"angle*(180/3.14)="<<angle*(180/3.14)<<"ant_ini_angle="<<ant_ini_angle<< std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << " !!!!!!!!!! (ELSE) ini_angle_act ="<<ini_angle_act <<"; theta*(180/3.14)="<<theta*(180/3.14)<<"angle*(180/3.14)="<<angle*(180/3.14)<<"ant_ini_angle="<<ant_ini_angle<<"\n";
+			 fileMatlab2.close();
+		}
+	}
+	//std::cout << " peta en velocidad (11) "<< std::endl;
+	//std::cout << " CALC INI ANGLE!!!!! [ini] (1) ini_angle_act ="<<ini_angle_act << std::endl;
+
+	if((ini_angle_act>=0)&&(ini_angle_act<=180)){
+		ini_angle_act=ini_angle_act;
+		if(debug_cout_robot_){
+			std::cout << " [change] diff_angle [0<->180] (1) ini_angle_act ="<<ini_angle_act << std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << " [change] diff_angle [0<->180] (1) ini_angle_act ="<<ini_angle_act <<"\n";
+			fileMatlab2.close();
+		}
+	}else if((ini_angle_act<0)&&(ini_angle_act>=(-180))){
+		//ini_angle_act=180+ini_angle_act;
+		ini_angle_act=sqrt(ini_angle_act*ini_angle_act);
+		if(debug_cout_robot_){
+			std::cout << " [change] diff_angle [0<-> -180] (1) ini_angle_act ="<<ini_angle_act << std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << " [change] diff_angle [0<-> -180] (1) ini_angle_act ="<<ini_angle_act <<"\n";
+			fileMatlab2.close();
+		}
+	}else if((ini_angle_act>180)&&(ini_angle_act<=360)){
+		ini_angle_act=360-ini_angle_act;
+
+		if(debug_cout_robot_){
+			std::cout << " [change] diff_angle [180<-> 360] (1) ini_angle_act ="<<ini_angle_act << std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << " diff_angle [180<-> 360] (1) ini_angle_act ="<<ini_angle_act <<"\n";
+			fileMatlab2.close();
+		}
+	}
+	else if((ini_angle_act <( -180))&&(ini_angle_act>=(-360))){
+		ini_angle_act=sqrt(ini_angle_act*ini_angle_act);
+		ini_angle_act=360-ini_angle_act;
+
+		if(debug_cout_robot_){
+			std::cout << " [change] diff_angle [-180<-> -360] (1) ini_angle_act ="<<ini_angle_act << std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << " diff_angle [-180<-> -360] (1) ini_angle_act ="<<ini_angle_act <<"\n";
+			fileMatlab2.close();
+		}
+	}else if(ini_angle_act>360){
+		 unsigned int n_360_g=ini_angle_act/360;
+		 ini_angle_act=ini_angle_act-n_360_g*360;
+	     std::cout << " OJO!!! caso mayor 360 ; ini_angle_act=ini_angle_act-n_360_g*360="<<ini_angle_act<<"; n_360_g="<<n_360_g<< std::endl;
+	}else{
+		std::cout << " OJO!!! caso NO contemplado ini_angle_act="<<ini_angle_act<< std::endl;
+	}
+
+	initial_angle_=ini_angle_act;
+	if(debug_real_test_companion_){
+		std::cout << " initial_angle_ ="<<initial_angle_ << std::endl;
+		std::cout << " !!! FIN calculo correcto initial angle !!! "<< std::endl;
+	}
+	angle1=initial_angle_;
+	//std::cout << " peta en velocidad (12) "<< std::endl;
+////////// Fin calculo correcto initial angle!!! //////////////////////////////////////
+
+	//std::cout << " [IMPORTANTE] !!!! angle_companion_temp_movil_="<<angle_companion_temp_movil_<< std::endl;
+	//std::cout << " [IMPORTANTE] !!!! angle_companion_temp_movil_complementarion_detras_="<<angle_companion_temp_movil_complementarion_detras_<< std::endl;
+	if(debug_nadal2_){
+		std::cout << " (after) !!!! angle1="<<angle1<<"; orientation_person_robot_angles_[0]="<<orientation_person_robot_angles_[0]<< std::endl;
+	}
+
+
+
+	double vel_per=sqrt((person1.vy)*(person1.vy) + (person1.vx)*(person1.vx));
+	//std::cout << " peta en velocidad (13) "<< std::endl;
+	////vel_per=adequate_velocity;
+	real_vel_per=sqrt((person1.vy)*(person1.vy) + (person1.vx)*(person1.vx));
+
+
+	if((reactive==Cperson_abstract::Akp_planning)){// &&(!Zanlungo_model_)
+
+		//if(debug_output_screen_mesages_){
+		//	std::cout << "IN IMPORTANT IF!!! antes change  vel_per= ; beta_companion_="<<beta_companion_<<"; alpha_companion_="<<alpha_companion_<< std::endl;
+		//}
+
+		if(distance_between_ini_pose_and_final_next_goal>3){ // distancia mayor que 3 metros
+			adequate_velocity=max_v_by_system_;
+		}else if(distance_between_ini_pose_and_final_next_goal<treshold_distance_between_steps_){ // TODO: sacar este 0.1 a fuera!!!
+			double vpers_v=vel_per;
+			adequate_velocity=vpers_v; // v_person
+		}else{
+			double vpers_v=vel_per;
+			double x=distance_between_ini_pose_and_final_next_goal;
+			adequate_velocity=((max_v_by_system_-vpers_v)/(3-treshold_distance_between_steps_))*(x-treshold_distance_between_steps_)+vpers_v;
+		}
+
+		vel_per=adequate_velocity;
+
+		if(vel_per>max_v_by_system_){
+			vel_per=max_v_by_system_;
+		}
+
+		//if(debug_output_screen_mesages_){
+		//	std::cout << "distance_between_ini_pose_and_final_next_goal="<<distance_between_ini_pose_and_final_next_goal<<"; adequate_velocity="<<adequate_velocity<< std::endl;
+
+		//}
+
+		//std::cout << " initial_robot_spoint_.vx="<<initial_robot_spoint_.vx<<"; initial_robot_spoint_.vy="<<initial_robot_spoint_.vy<< std::endl;
+		//std::cout << " initial_person_companion_point_.vx="<<initial_person_companion_point_.vx<<"; initial_person_companion_point_.vy="<<initial_person_companion_point_.vy<< std::endl;
+		//std::cout << " (in) vel_per="<<vel_per<<"; adequate_velocity="<<adequate_velocity<< std::endl;
+		//std::cout << " (in) distance_between_ini_pose_and_final_next_goal="<<distance_between_ini_pose_and_final_next_goal<< std::endl;
+
+	}
+
+	//std::cout << " (out) vel_per="<<vel_per<<"; adequate_velocity="<<adequate_velocity<<"; real_vel_per="<<real_vel_per<< std::endl;
+	//std::cout << " (out) distance_between_ini_pose_and_final_next_goal="<<distance_between_ini_pose_and_final_next_goal<< std::endl;
+
+	//std::cout << " peta en velocidad (14) "<< std::endl;
+
+	//if(debug_output_screen_mesages_){
+	//	std::cout << " !!!!!!!!!!!!!77777777!!!!!!!!!1 vel_per="<<vel_per<< std::endl;
+	//}
+
+	Spoint Robot_spoint_act(initial_robot_spoint_.x,initial_robot_spoint_.y,initial_robot_spoint_.time_stamp);
+	double distance_PR7=person1.distance(Robot_spoint_act);
+
+	Sdestination person_goal=person_obj1->get_best_dest();
+	double per_to_goal_angle = (180/3.14)*atan2(person1.y-person_goal.y , person1.x-person_goal.x);
+	Spoint robot_goal=get_robot_goal();
+	double robot_to_goal_angle = (180/3.14)*atan2(initial_robot_spoint_.y-robot_goal.y , initial_robot_spoint_.x-robot_goal.x);
+	if(actual_debug2_){
+		std::cout << " !!!!  !!! robot_to_goal_angle="<<robot_to_goal_angle<<"; robot_goal.x="<<robot_goal.x<<"; robot_goal.y="<<robot_goal.y<< std::endl;
+		std::cout << " !!!!  !!! per_to_goal_angle="<<per_to_goal_angle<< std::endl;
+		std::cout << " !!!!  !!! [reduce robot max velocity] angle1="<<angle1<< std::endl;
+		std::cout << " !!!!  !!! min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+		std::cout << " !!!!  !!! vel_per="<<vel_per<< std::endl;
+		std::cout << " !!!!  !!! person_obj1->get_desired_velocity() ="<<person_obj1->get_desired_velocity()<< std::endl;
+		std::cout << " distance_PR7="<<distance_PR7<< std::endl;
+		std::cout << " (out if's) v_max_="<<robot_->get_v_max()<< std::endl; // quizas hay que limitar la angular tambien...
+		std::cout << " (out if's) w_max_="<<robot_->get_w_max()<< std::endl;
+		std::cout << " (out if's) v_break_="<<robot_->get_a_v_break()<< std::endl;
+		std::cout << " (out if's) a_v_max_="<<robot_->get_a_v_max()<< std::endl;
+		std::cout << " (out if's) a_w_max_="<<robot_->get_a_w_max()<< std::endl;
+	}
+	// SOLUCION PROVISIONAL!
+	// when the goal, starts to stop, higher priority than ppl
+
+	//double mult_per_vel=1.1; // antes 1.2
+	double near_obst=1;
+	if(debug_nadal2_){
+		std::cout << " (COLISION,OBSTACLE) vel_per="<<vel_per<< std::endl;
+	}
+	// find min dist to near obstacle. If obstacle a 2m => near_obst=1.5, multiplicador de velocidad. TODO= Lo mejor sería siempre aumentar la ventana temporal de gonzalo segun la velocidad. y tener una ventana siempre del mismo radio.
+
+	double min_dist_colli_act_global2=check_collision_companion_goal(Spoint_pose_command2,0);
+	/* (companion) Inicio calculo angulo correspondiente a distancia de choque*/
+
+	if(debug_cout_robot_){
+		std::cout <<"; (DISTANCIA al obstaculo desde el centro actual de ambos!!!) min_dist_colli_act_global2="<<min_dist_colli_act_global2<< std::endl;
+	}
+	if(debug_file_robot_){
+		std::ofstream fileMatlab2;
+		fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+		fileMatlab2 << "; (DISTANCIA al obstaculo desde el centro actual de ambos!!!) min_dist_colli_act_global2="<<min_dist_colli_act_global2<<"\n";
+		fileMatlab2.close();
+	}
+
+	if(debug_nadal2_){
+		std::cout <<" (initialize) angle1="<<angle1<<"; min_next_companion_angle_="<<min_next_companion_angle_<<"; (DISTANCIA al obstaculo desde el centro actual de ambos!!!) min_dist_colli_act_global2="<<min_dist_colli_act_global2<< std::endl;
+	}
+	double angle_colision=angle_companion_; // in grad.
+	if((min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_)){
+		angle_colision=angle_companion_;
+	}else{
+		angle_colision=(180/3.14)*(asin((min_dist_colli_act_global2)/(robot_person_companion_distance_)));
+		if(debug_nadal_){
+			std::cout <<" (initialize, colision) angle_colision="<<angle_colision<<"; robot_person_companion_distance_="<<robot_person_companion_distance_<< "; min_dist_colli_act_global2"<<min_dist_colli_act_global2<< std::endl;
+		}
+	}
+
+	if(debug_nadal_){
+		std::cout <<" (initialize) d_min ="<<d_min <<"; marge_angle_companion_"<<marge_angle_companion_<< std::endl;
+	}
+
+	double circunferencia_tope=(robot_person_proximity_distance_+robot_person_proximity_tolerance_+offset_atractive_);
+	//double distance_to_goal = robot_->get_current_pointV().distance( goal_);
+	if(debug_nadal_){
+		std::cout << " circunferencia_tope="<<circunferencia_tope<<"; robot_person_distance="<<robot_person_distance<<"; min_next_companion_angle_"<<min_next_companion_angle_<<"; min_dist_colli_act_global2="<<min_dist_colli_act_global2<<"; robot_person_companion_distance_="<<robot_person_companion_distance_<< std::endl;
+	}
+	//std::cout << std::endl;
+	//std::cout << std::endl;
+	//std::cout <<" [IMPORTANTE] robot_person_distance ="<<robot_person_distance <<"; < circunferencia_tope"<<circunferencia_tope<<"; angle1="<<angle1<<"; marge_angle_companion_="<<marge_angle_companion_<<"; min_next_companion_angle_"<<min_next_companion_angle_<< std::endl;
+	//std::cout <<" [IMPORTANTE] angle1="<<angle1<<" > (angle_companion_temp_movil_-marge_angle_companion_) ="<<angle_companion_temp_movil_-marge_angle_companion_ <<"; angle1="<<angle1<<" < (angle_companion_temp_movil_+marge_angle_companion_)="<<angle_companion_temp_movil_+marge_angle_companion_<< std::endl;
+	//std::cout <<" [IMPORTANTE] min_next_companion_angle_="<<min_next_companion_angle_<<" > (angle_companion_temp_movil_-marge_angle_companion_))="<<angle_companion_temp_movil_-marge_angle_companion_<<"; min_next_companion_angle_="<<min_next_companion_angle_<<" < (angle_companion_temp_movil_+marge_angle_companion_))="<<angle_companion_temp_movil_+marge_angle_companion_<< std::endl;
+	//std::cout << std::endl;
+	//std::cout << std::endl;
+	robot_orient_=false;
+	// INICIO Calculate the robot velocity to increment People distance + angle_increment_of_increment_distance_ [grados]
+	double distance_L_with_this_people_angle_increment=angle_increment_of_increment_distance_*(3.14/180)*(1/robot_person_proximity_distance_);
+	double distance_people_travelled=vel_per*dt_;
+	double actual_V_Robot=(distance_people_travelled+distance_L_with_this_people_angle_increment)/dt_;
+
+	if(debug_real_test_companion4_){
+		std::cout << "[(distance_people_travelled+distance_L_with_this_people_angle_increment)/dt_] actual_V_Robot="<<actual_V_Robot<< std::endl;
+	}
+
+	double distance_angle_diference_person_robot;
+	if(min_next_companion_angle_>angle1){
+		distance_angle_diference_person_robot=(min_next_companion_angle_-angle1)*(3.14/180)*(1/robot_person_proximity_distance_); // angulo que necesitas - angulo que tienes realmente.
+
+		if(debug_real_test_companion3_){
+			std::cout << " min_next_companion_angle_-angle1="<<min_next_companion_angle_-angle1<< "; min_next_companion_angle_="<<min_next_companion_angle_<<"; angle1="<<angle1<< std::endl;
+		}
+
+	}else{
+		distance_angle_diference_person_robot=(angle1-min_next_companion_angle_)*(3.14/180)*(1/robot_person_proximity_distance_);
+		if(debug_real_test_companion3_){
+			std::cout << " angle1-min_next_companion_angle_="<<angle1-min_next_companion_angle_<< "; min_next_companion_angle_="<<min_next_companion_angle_<<"; angle1="<<angle1<< std::endl;
+		}
+		//std::cout << " w=(angle1-min_next_companion_angle_)/0.2="<<(angle1-min_next_companion_angle_)/0.2<< std::endl;
+	}
+	if(debug_real_test_companion3_){
+		std::cout << " w=(min_next_companion_angle_-angle1)/0.2="<<(min_next_companion_angle_-angle1)/0.2<< std::endl; // el angulo_al_que_quiero_ir - el_angulo_real_que_tengo
+	}
+	double actual_V_Robot2=(distance_people_travelled+distance_angle_diference_person_robot)/dt_;
+
+	if(debug_real_test_companion3_){
+		std::cout << " actual_V_Robot="<<actual_V_Robot<< std::endl;
+		std::cout << "theta="<<theta<<"; actual_V_Robot2="<<actual_V_Robot2<< std::endl;
+	}
+
+	if(debug_real_test_companion_){
+		std::cout << " distance_L_with_this_people_angle_increment="<<distance_L_with_this_people_angle_increment<< std::endl;
+		std::cout << " dt_="<<dt_<< std::endl;
+		std::cout << " distance_people_travelled="<<distance_people_travelled<< std::endl;
+		std::cout << " actual_V_Robot="<<actual_V_Robot<< std::endl;
+	}
+	// FIN Calculate the robot velocity to increment People distance + angle_increment_of_increment_distance_ [grados]
+
+	// INICIO Calculate the robot velocity en giros!
+	// hay que calcular la distancia real que se desplaza la persona desde esta iteración a la siguiente según su predicción.
+	// o la distancia de la posición actual del robot a la siguiente que tiene que ir (calculada con la rama ganadora del path).
+	//  FIN  Calculate the robot velocity en giros!
+
+	double margen_angle_colision=1; // inicial era =15
+	if(debug_real_test_companion2_){
+		std::cout << " VELOCIDAAAAAAAAAAADDDDD"<< std::endl;
+		std::cout << " robot_person_distance="<<robot_person_distance<<"; circunferencia_tope="<<circunferencia_tope<<"; angle1="<<angle1<<"; min_next_companion_angle_="<<min_next_companion_angle_<<"; angle_companion_="<<angle_companion_<<"; marge_angle_companion_="<<marge_angle_companion_<<std::endl;
+		std::cout <<"; min_dist_colli_act_global2="<<min_dist_colli_act_global2<<"; robot_person_companion_distance_="<<robot_person_companion_distance_<< std::endl;
+		std::cout <<"; actual INCREMENT angle=angle1-min_next_companion_angle_=angulo_al_que_voy-angulo_al_que_quiero_ir"<<sqrt((angle1-min_next_companion_angle_)*(angle1-min_next_companion_angle_))<< std::endl;
+	}
+	/*  calcular velocidad persona maxima */
+	if(vel_per_max_caso_robot_a_0_o_180_grados_<vel_per){
+		vel_per_max_caso_robot_a_0_o_180_grados_=vel_per;
+	}
+
+	//std::cout << " ( d_min < 1.0 ) !!!!!!!!! (ini_plan) VELOCIDAAAAAAAAAAADDDDD; d_min ="<<d_min << std::endl;
+	if(debug_real_test_companion2_){
+		std::cout << " robot_person_distance="<<robot_person_distance<<"; circunferencia_tope="<<circunferencia_tope<<"; robot_person_proximity_distance_="<<robot_person_proximity_distance_<<"; marge_in_distance_="<<marge_in_distance_<<std::endl;
+	}
+	if(debug_real_test_companion4_){
+		std::cout <<" (!!! INITIAL replan_last_step !!!) angle1="<<angle1<<"; min_next_companion_angle_="<<min_next_companion_angle_<<"; robot_person_distance="<<robot_person_distance<<" vel_per="<<vel_per<< std::endl;
+	}
+
+
+	real_angle_person_robot_=angle1; // for results in matlab.
+	real_distance_person_robot_=robot_person_distance;
+
+	//std::cout << " IMPORTANT!!!! real_angle_person_robot_="<<real_angle_person_robot_<<"; real_distance_person_robot_="<<real_distance_person_robot_<<"; angle_companion_"<<angle_companion_<<"; marge_angle_companion_="<<marge_angle_companion_<< std::endl;
+
+
+	vel_per_ok_=Cperson_abstract::Far_goal;
+	go_with_vel_per_=false;
+
+	save_angle_between_person_and_robot_=angle1;
+	save_distance_between_person_and_robot_=robot_person_distance;
+
+
+/*
+	if((number_of_group_people_>1)&&(Zanlungo_model_)){ // TODO if only need the prefered vel of the robot for the Zanlungo model. Maybe I need also in the robot prediction. Test it.
+		double v_people=sqrt(mean_people_Zalungo_.vx*mean_people_Zalungo_.vx+mean_people_Zalungo_.vy*mean_people_Zalungo_.vy);
+		vel_per=Companion_Zanlungo_Model_.vp2v(v_people);
+		vel_per=Companion_Zanlungo_Model_.vp2v_vers2(v_people);
+		genome_params_.set_normal_pref_vel(vel_per);
+	}
+*/
+
+	/*if(Zanlungo_model_){
+		// ini zanlungo model
+		double act_module_force_total_ant=sqrt((ant_final_force_total_.fx*ant_final_force_total_.fx)+(ant_final_force_total_.fy*ant_final_force_total_.fy));
+		SpointV first_person=actual_person_Companion_pointer_->get_current_pointV();
+		SpointV robot_act_it=robot_->get_current_pointV();
+		double distance_p1_r=sqrt((robot_act_it.x-first_person.x)*(robot_act_it.x-first_person.x)+(robot_act_it.y-first_person.y)*(robot_act_it.y-first_person.y));
+		double distance_p2_r=10.0;
+		//std::cout << " (vel margin) Francesco V_stability (maxV) robot_act_it.x-first_person.x="<<sqrt((robot_act_it.x-first_person.x)*(robot_act_it.x-first_person.x))<<"; (robot_act_it.y-first_person.y)="<<sqrt((robot_act_it.y-first_person.y)*(robot_act_it.y-first_person.y))<<"; distance_p1_r="<<distance_p1_r<< std::endl;
+
+		if((number_of_group_people_>1)&&(we_have_pointer_to_second_person_)){
+
+			SpointV secon_person_comp=second_group_companion_person_obj_->get_current_pointV();
+			distance_p2_r=sqrt((robot_act_it.x-secon_person_comp.x)*(robot_act_it.x-secon_person_comp.x)+(robot_act_it.y-secon_person_comp.y)*(robot_act_it.y-secon_person_comp.y));
+			//std::cout << " (vel margin) Francesco V_stability (maxV) robot_act_it.x-secon_person_comp.x="<<sqrt((robot_act_it.x-secon_person_comp.x)*(robot_act_it.x-secon_person_comp.x))<<"; (robot_act_it.y-secon_person_comp.y)="<<sqrt((robot_act_it.y-secon_person_comp.y)*(robot_act_it.y-secon_person_comp.y))<<"; distance_p2_r="<<distance_p2_r<< std::endl;
+
+		}
+
+		//std::cout << " (vel margin) Francesco V_stability; !!! act_module_force_total_ant="<<act_module_force_total_ant<< std::endl;
+		if(act_module_force_total_ant < 0.2){  // threshold_max_total_force_=0.2
+			//robot_->set_v_max( vel_per*near_obst );
+			robot_->set_v_max( real_vel_per*near_obst );
+			//std::cout << " (vel margin) Francesco V_stability (perV) real_vel_per=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+		}
+		else if((act_module_force_total_ant < threshold_max_total_force_)&&(act_module_force_total_ant>0.2)){ // TODO: sacar este threshold de fuerza a fuera!!! el 0.4.
+			//robot_->set_v_max( vel_per*near_obst );
+			//robot_->set_v_max( 0.577);
+			robot_->set_v_max( max_v_by_system_);
+			if(debug_output_screen_mesages_){
+				std::cout << " (vel margin) Francesco V_stability (perV) vel_per=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+			}
+
+		}else{
+			//robot_->set_v_max( vel_per*near_obst );
+
+			if((number_of_group_people_>1)&&(we_have_pointer_to_second_person_)){
+
+				if((distance_p1_r<2.5)&&(distance_p2_r<2.5)){ // TODO: sacar estos threshols de distancia a fuera!!! el 2.5m
+					//robot_->set_v_max( vel_per*near_obst );
+					if(debug_output_screen_mesages_){
+							std::cout << " (vel margin) Francesco V_stability (maxV) (adaptada a lo que abanzas) vel_per=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+					robot_->set_v_max( max_v_by_system_);
+				}else{
+					robot_->set_v_max( max_v_by_system_);
+					if(debug_output_screen_mesages_){
+							std::cout << " (vel margin) Francesco V_stability (maxV) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+
+				}
+			}else{
+
+				if((distance_p1_r<2.5)){ // TODO: sacar estos threshols de distancia a fuera!!! el 2.5m
+					//robot_->set_v_max( vel_per*near_obst );
+					if(debug_output_screen_mesages_){
+						std::cout << " (vel margin) Francesco V_stability (maxV) (adaptada a lo que abanzas) vel_per=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+					robot_->set_v_max( max_v_by_system_);
+				}else{
+					robot_->set_v_max( max_v_by_system_);
+					if(debug_output_screen_mesages_){
+						std::cout << " (vel margin) Francesco V_stability (maxV) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+
+				}
+			}
+
+
+
+		}
+		// fin zanlungo model*/
+	//}else{
+		// ini side-by-side:
+		//std::cout << "[INI!] (1) After velocity companion: v_max_act="<<robot_->get_a_v_max()<<"; d_min="<<d_min<<"; max_v_by_system_="<<max_v_by_system_<< std::endl;
+
+		/*if( distance_to_goal < distance_to_stop_ ){ // quitada, porque ya la tengo en cuenta internamente al propagar...
+			if(debug_nadal2_){
+				std::cout << " (ini_plan) VELOCIDAAAAAAAAAAADDDDD= (goal)"<< std::endl;
+			}
+			if(actual_debug2_){
+				std::cout << " max_v_by_system_ * distance_to_goal / distance_to_stop_="<<max_v_by_system_ * distance_to_goal / distance_to_stop_<< std::endl;
+			}
+			robot_->set_v_max( max_v_by_system_ * distance_to_goal / distance_to_stop_  );//distance_to_stop is never 0
+		}
+		// if not near the goal, normal velocity regulation according to nearby ppl
+		else*/ if ( d_min < 1.0 ){
+
+			if(debug_real_test_companion4_){
+				std::cout << " ( d_min < 1.0 ) !!!!!!!!! (ini_plan) VELOCIDAAAAAAAAAAADDDDD="<< std::endl;
+				std::cout << " robot_person_distance="<<robot_person_distance<<"; circunferencia_tope="<<circunferencia_tope<<"; angle1="<<angle1<<"; min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+				std::cout << " robot_person_proximity_distance_="<<robot_person_proximity_distance_<<"; marge_in_distance_="<<marge_in_distance_<<"; angle_companion_="<<angle_companion_<<"; marge_angle_companion_="<<marge_angle_companion_<< std::endl;
+			}
+			if((robot_person_distance>(robot_person_proximity_distance_-marge_in_distance_))&&(robot_person_distance<(robot_person_proximity_distance_+marge_in_distance_))&&(robot_person_distance<circunferencia_tope)&&(angle1<(angle_companion_+marge_angle_companion_))&&(angle1>(angle_companion_-marge_angle_companion_))&&(min_next_companion_angle_>(angle_companion_-5))&&(min_next_companion_angle_<(angle_companion_+5))){//&&((min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_))){
+
+				//if(debug_output_screen_mesages_){
+				//	std::cout << " caso d=1(1) in min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+				//}
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << " caso d=1 (1) caso if="<< std::endl;
+					std::cout << "vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << " caso d=1 (1) caso if=\n";
+					fileMatlab2 << "vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+
+				if(debug_real_test_companion4_){
+					std::cout << "max_v_by_system_ * 0.85= v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+
+				if(actual_debug2_){
+					std::cout << " v_max_="<<robot_->get_v_max()<< std::endl; // quizas hay que limitar la angular tambien...
+					std::cout << " w_max_="<<robot_->get_w_max()<< std::endl;
+					std::cout << " v_break_="<<robot_->get_a_v_break()<< std::endl;
+				}
+
+				if(actual_debug2_){
+					std::cout << " a_v_max_="<<robot_->get_a_v_max()<< std::endl;
+					std::cout << " a_w_max_="<<robot_->get_a_w_max()<< std::endl;
+				}
+
+			}else if((robot_person_distance<circunferencia_tope)&&(min_next_companion_angle_>(0-30))&&(min_next_companion_angle_<(0+30))&&(((angle1<(0+30))&&(angle1>(0-30)))||((angle1<(180+30))&&(angle1>(180-30))))&&(distance_PR7<(robot_person_proximity_distance_+0.5))&&(distance_PR7>(robot_person_proximity_distance_-0.2))){
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				//if(debug_output_screen_mesages_){
+				//	std::cout << "caso d=1 else if 2 (2) vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				//}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << "caso d=1 else if 2 (2) vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << "  max_v_by_system_ * 0.85= vel_per="<<vel_per<<"; v_max_="<<robot_->get_v_max()<< std::endl;
+					std::cout << " (1) caso else if= ( persona y robot van a 0 grados o 180 y a la distancia necesaria entre ellos.)"<< std::endl;
+				}
+
+			}else if((robot_person_distance<circunferencia_tope)&&(min_dist_colli_act_global2>=robot_person_companion_distance_)&&(min_next_companion_angle_>(angle_colision-margen_angle_colision))&&(min_next_companion_angle_<(angle_colision+margen_angle_colision))&&(angle1<(angle_colision+margen_angle_colision))&&(angle1>(angle_colision-margen_angle_colision))){
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << "(caso d=1) punto de equilibrio movil!!! if (3) vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << "(caso d=1) punto de equilibrio movil!!! if (3) vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " (1) caso else if= ( persona y robot van angle_colision )"<< std::endl;
+					std::cout << "  max_v_by_system_ * 0.75=vel_per="<<vel_per<< "; v_max_="<<robot_->get_v_max()<< std::endl;
+					std::cout << " w_max=(v_max)/R_r=(v_max)/0.5="<<(robot_->get_v_max())/0.5<< std::endl;
+				}
+
+			}else{
+
+				//if(debug_output_screen_mesages_){
+				//	std::cout << " (1) caso else="<< std::endl;
+				//}
+				if(debug_cout_robot_){
+					std::cout << "(1) caso else vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+
+				if((vel_per>0)&&(actual_V_Robot<max_v_by_system_)&&(actual_V_Robot>(max_v_by_system_ * 0.95))){
+					robot_->set_v_max( actual_V_Robot );
+					//robot_->set_v_max( max_v_by_system_ * 0.85 );
+					vel_per_ok_=Cperson_abstract::Far_goal;
+
+					//if(debug_output_screen_mesages_){
+					//	std::cout << " CASO ELSE (1.1.2)= actual_V_Robot"<< std::endl;
+					//	std::cout << " (1.1.2); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					//}
+					if(debug_file_robot_){
+						std::ofstream fileMatlab2;
+						fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+						fileMatlab2 << " CASO ELSE (1.1.2)= actual_V_Robot\n";
+						fileMatlab2 << " (1.1.2); robot_->get_v_max()="<<robot_->get_v_max()<<"\n";
+						fileMatlab2.close();
+					}
+
+				}else{
+					vel_per_ok_=Cperson_abstract::Far_goal;
+					robot_->set_v_max( max_v_by_system_ * 0.95 );  	  // OJO!!! antes era 0.75
+
+					//if(debug_output_screen_mesages_){
+					//	std::cout << " CASO ELSE (1.1.2)= max_v_by_system_ * 0.85 o vel_per2"<< std::endl;
+					//	std::cout << " (1.1.2); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					//}
+					if(debug_file_robot_){
+						std::ofstream fileMatlab2;
+						fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+						fileMatlab2 <<" CASO ELSE (1.1.2)= max_v_by_system_ * 0.85 o vel_per2\n";
+						fileMatlab2 << " (1.1.2); robot_->get_v_max()="<<robot_->get_v_max()<<"\n";
+						fileMatlab2.close();
+					}
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " CASO ELSE (1.1.2)= max_v_by_system_ * 0.85"<< std::endl;
+					std::cout << " (1.1.2); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+				}
+
+				if(debug_cout_robot_){
+					std::cout << "(1) caso else robot_->get_v_max()="<<robot_->get_v_max() <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+
+			}
+		}
+		else if ( d_min < 3.0){
+
+			//if(debug_output_screen_mesages_){
+			//	std::cout << "( d_min < 3.0) !!!!!!!!! (ini_plan) VELOCIDAAAAAAAAAAADDDDD="<< std::endl;
+			//	std::cout << " robot_person_distance="<<robot_person_distance<<"; circunferencia_tope="<<circunferencia_tope<<"; angle1="<<angle1<<"; min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+			//	std::cout << " robot_person_proximity_distance_="<<robot_person_proximity_distance_<<"; marge_in_distance_="<<marge_in_distance_<<"; angle_companion_="<<angle_companion_<<"; marge_angle_companion_="<<marge_angle_companion_<< std::endl;
+
+		//	}
+
+			if((robot_person_distance>(robot_person_proximity_distance_-marge_in_distance_))&&(robot_person_distance<(robot_person_proximity_distance_+marge_in_distance_))&&(robot_person_distance<circunferencia_tope)&&(angle1<(angle_companion_+marge_angle_companion_))&&(angle1>(angle_companion_-marge_angle_companion_))&&(min_next_companion_angle_>(angle_companion_-5))&&(min_next_companion_angle_<(angle_companion_+5))){//&&((min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_))){
+				//robot_person_distance<circunferencia_tope => es para estar al lado, cerca de la persona para limitar velocidad.
+				// min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_ => no tengo obstaculos cerca, limito velocidad.
+				// caso angulo_real_persona_robot == angulo que quieres por distancia == distancia_sphere_maxima, quieres estar a angle_companion_=90grados.
+				// caso angulo_real_persona_robot == angulo que quieres por distancia == distancia_sphere_maxima, quieres estar a angle_companion_=90grados.
+
+				if(actual_debug2_){
+					std::cout << " (2) in min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+				}
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+				//robot_->set_v_max( max_v_by_system_ * 0.85 );
+
+				if(debug_cout_robot_){
+					std::cout << "(caso d=2) if (1) vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << "(caso d=2) if (1) vel_per*near_obst ="<<vel_per*near_obst <<"; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+				vel_per_ok_=Cperson_abstract::Vel_per;
+
+				if(debug_real_test_companion4_){
+					std::cout << " (2) caso if=max_v_by_system_ * 0.90 "<< std::endl; // OJO! antes era 0.85!!!
+					std::cout << " v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+
+				if(actual_debug2_){
+					std::cout << " v_max_="<<robot_->get_v_max()<< std::endl; // quizas hay que limitar la angular tambien...
+					std::cout << " w_max_="<<robot_->get_w_max()<< std::endl;
+					std::cout << " v_break_="<<robot_->get_a_v_break()<< std::endl;
+					std::cout << " a_v_max_="<<robot_->get_a_v_max()<< std::endl;
+					std::cout << " a_w_max_="<<robot_->get_a_w_max()<< std::endl;
+				}
+
+			}else if((robot_person_distance<circunferencia_tope)&&(min_next_companion_angle_>(0-30))&&(min_next_companion_angle_<(0+30))&&(((angle1<(0+30))&&(angle1>(0-30)))||((angle1<(180+30))&&(angle1>(180-30))))&&(distance_PR7<(robot_person_proximity_distance_+0.5))&&(distance_PR7>(robot_person_proximity_distance_-0.2))){
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << " (caso d=2 )caso else if 1 (2) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << " (caso d=2 )caso else if 1 (2) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+
+				if(debug_real_test_companion4_){
+					std::cout << " (caso d=2 )caso else if (2) caso else if= max_v_by_system_ * 0.90 ( persona y robot van a 0 grados o 180 y a la distancia necesaria entre ellos.)"<< std::endl;
+					std::cout << " vel_per="<<vel_per<<"; v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+			}else if((robot_person_distance<circunferencia_tope)&&(min_dist_colli_act_global2>=robot_person_companion_distance_)&&(min_next_companion_angle_>(angle_colision-margen_angle_colision))&&(min_next_companion_angle_<(angle_colision+margen_angle_colision))&&(angle1<(angle_colision+margen_angle_colision))&&(angle1>(angle_colision-margen_angle_colision))){
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << " (caso d=2 ) caso else if 2, Caso punto equilibro movil caso else if (3)vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << " (caso d=2 )caso else if 2, Caso punto equilibro movil caso else if (3)vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " (2) caso else if= max_v_by_system_ * 0.85 "<< std::endl;
+					std::cout << " vel_per="<<vel_per<< "; v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+
+			}else{
+
+				if(debug_real_test_companion_){
+					std::cout << " (2) caso else="<< std::endl;
+				}
+
+				if((vel_per>0)&&(actual_V_Robot<max_v_by_system_)&&(actual_V_Robot>(max_v_by_system_ * 0.95))){
+					robot_->set_v_max( actual_V_Robot );
+					vel_per_ok_=Cperson_abstract::Far_goal;
+
+					if(debug_cout_robot_){
+						std::cout << " CASO ELSE (2.1.2)= actual_V_Robot"<< std::endl;
+						std::cout << " (2.1.2); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+					if(debug_file_robot_){
+						std::ofstream fileMatlab2;
+						fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+						fileMatlab2 <<  " CASO ELSE (2.1.2)= actual_V_Robot\n";
+						fileMatlab2 <<  " (2.1.2); robot_->get_v_max()="<<robot_->get_v_max()<<"\n";
+						fileMatlab2.close();
+					}
+				}else{
+					vel_per_ok_=Cperson_abstract::Far_goal;
+					robot_->set_v_max( max_v_by_system_ * 0.95 );  	  // OJO!!! antes era 0.75
+
+					if(debug_cout_robot_){
+						std::cout << " CASO ELSE (2.1.2)= max_v_by_system_ * 0.85 o vel_per2"<< std::endl;
+						std::cout << " (2.1.2); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+					if(debug_file_robot_){
+						std::ofstream fileMatlab2;
+						fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+						fileMatlab2 <<  " CASO ELSE (2.1.2)= max_v_by_system_ * 0.85 o vel_per2\n";
+						fileMatlab2 <<  " (2.1.2); robot_->get_v_max()="<<robot_->get_v_max()<<"\n";
+						fileMatlab2.close();
+					}
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " CASO ELSE (2.1)= max_v_by_system_ "<< std::endl;
+					std::cout << " (2.1); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+				}
+				if(debug_cout_robot_){
+					std::cout << "(2) caso else robot_->get_v_max()="<<robot_->get_v_max() <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+
+			}
+		}
+		else if ( d_min < 5.0 ){
+
+			//if(debug_output_screen_mesages_){
+			//	std::cout << " ( d_min < 5.0 ) !!!!!!!!! (ini_plan) VELOCIDAAAAAAAAAAADDDDD="<< std::endl;
+			//	std::cout << " robot_person_distance="<<robot_person_distance<<"; circunferencia_tope="<<circunferencia_tope<<"; angle1="<<angle1<<"; min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+			//	std::cout << " robot_person_proximity_distance_="<<robot_person_proximity_distance_<<"; marge_in_distance_="<<marge_in_distance_<<"; angle_companion_="<<angle_companion_<<"; marge_angle_companion_="<<marge_angle_companion_<< std::endl;
+
+			//}
+
+			if((robot_person_distance>(robot_person_proximity_distance_-marge_in_distance_))&&(robot_person_distance<(robot_person_proximity_distance_+marge_in_distance_))&&(robot_person_distance<circunferencia_tope)&&(angle1<(angle_companion_+marge_angle_companion_))&&(angle1>(angle_companion_-marge_angle_companion_))&&(min_next_companion_angle_>(angle_companion_-5))&&(min_next_companion_angle_<(angle_companion_+5))){//&&((min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_))){
+				//robot_person_distance<circunferencia_tope => es para estar al lado, cerca de la persona para limitar velocidad.
+				// min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_ => no tengo obstaculos cerca, limito velocidad.
+				// caso angulo_real_persona_robot == angulo que quieres por distancia == distancia_sphere_maxima, quieres estar a angle_companion_=90grados.
+				// caso angulo_real_persona_robot == angulo que quieres por distancia == distancia_sphere_maxima, quieres estar a angle_companion_=90grados.
+
+				if(debug_real_test_companion_){
+					std::cout << " (3) caso if="<< std::endl;
+				}
+				if(debug_real_test_companion4_){
+					std::cout << " (3) in min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+				}
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << "(caso d=3 )caso if (1) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << "(caso d=3 )caso if (1) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " max_v_by_system_ * 0.95= v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+
+			}else if((robot_person_distance<circunferencia_tope)&&(min_next_companion_angle_>(0-30))&&(min_next_companion_angle_<(0+30))&&(((angle1<(0+30))&&(angle1>(0-30)))||((angle1<(180+30))&&(angle1>(180-30))))&&(distance_PR7<(robot_person_proximity_distance_+0.5))&&(distance_PR7>(robot_person_proximity_distance_-0.2))){
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << " (caso d=3 )caso else if (2) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << " (caso d=3 )caso else if (2) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " (3) caso else if= ( persona y robot van a 0 grados o 180 y a la distancia necesaria entre ellos.)"<< std::endl;
+					std::cout << "  max_v_by_system_ * 0.95=vel_per="<<vel_per<<"; v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+			}else if((robot_person_distance<circunferencia_tope)&&(min_dist_colli_act_global2>=robot_person_companion_distance_)&&(min_next_companion_angle_>(angle_colision-margen_angle_colision))&&(min_next_companion_angle_<(angle_colision+margen_angle_colision))&&(angle1<(angle_colision+margen_angle_colision))&&(angle1>(angle_colision-margen_angle_colision))){
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << "(caso d=3 ) caso punto equilibrio movil!!! caso else if (3) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << "(caso d=3 ) caso punto equilibrio movil!!! caso else if (3) vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2.close();
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " (3) caso else if= ( persona y robot van angle_colision )"<< std::endl;
+					std::cout << "  max_v_by_system_ * 0.95=vel_per="<<vel_per<< "; v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+
+			}else{
+				if(debug_real_test_companion_){
+					std::cout << " (3) caso else="<< std::endl;
+				}
+				if((vel_per>0)&&(actual_V_Robot<max_v_by_system_)&&(actual_V_Robot>(max_v_by_system_ * 0.95))){
+					robot_->set_v_max( actual_V_Robot );
+					vel_per_ok_=Cperson_abstract::Far_goal;
+					if(debug_cout_robot_){
+						std::cout << " CASO ELSE (1.1.2)= actual_V_Robot"<< std::endl;
+						std::cout << " (3.1.2); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+					if(debug_file_robot_){
+						std::ofstream fileMatlab2;
+						fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+						fileMatlab2 << " CASO ELSE (1.1.2)= actual_V_Robot\n";
+						fileMatlab2 << " (3.1.2); robot_->get_v_max()="<<robot_->get_v_max()<<"\n";
+						fileMatlab2.close();
+					}
+				}else{
+
+					vel_per_ok_=Cperson_abstract::Far_goal;
+					robot_->set_v_max( max_v_by_system_ * 0.95 );  	  // OJO!!! antes era 0.75
+
+					if(debug_cout_robot_){
+						std::cout << " CASO ELSE (1.1.2)= max_v_by_system_ * 0.85 "<< std::endl;
+						std::cout << " (3.1.2); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+					if(debug_file_robot_){
+						std::ofstream fileMatlab2;
+						fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+						fileMatlab2 << "  CASO ELSE (1.1.2)= max_v_by_system_ * 0.85 \n";
+						fileMatlab2 << " (3.1.2); robot_->get_v_max()="<<robot_->get_v_max()<<"\n";
+						fileMatlab2.close();
+					}
+				}
+
+				if(debug_real_test_companion4_){
+					std::cout << " out CASO ELSE (3.1)= max_v_by_system_ * 0.95"<< std::endl;
+					std::cout << " (3.1); robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+				}
+				if(debug_cout_robot_){
+					std::cout << "(3) caso else robot_->get_v_max()="<<robot_->get_v_max() <<"; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+
+			}
+		}
+		else{
+			//if(debug_output_screen_mesages_){
+			//	std::cout << " else !!!!!!!!! (ini_plan) VELOCIDAAAAAAAAAAADDDDD="<< std::endl;
+			//	std::cout << " robot_person_distance="<<robot_person_distance<<"; circunferencia_tope="<<circunferencia_tope<<"; angle1="<<angle1<<"; min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+			//	std::cout << " robot_person_proximity_distance_="<<robot_person_proximity_distance_<<"; marge_in_distance_="<<marge_in_distance_<<"; angle_companion_="<<angle_companion_<<"; marge_angle_companion_="<<marge_angle_companion_<< std::endl;
+
+			//}
+
+			if((robot_person_distance>(robot_person_proximity_distance_-marge_in_distance_))&&(robot_person_distance<(robot_person_proximity_distance_+marge_in_distance_))&&(robot_person_distance<circunferencia_tope)&&(angle1<(angle_companion_+marge_angle_companion_))&&(angle1>(angle_companion_-marge_angle_companion_))&&(min_next_companion_angle_>(angle_companion_-5))&&(min_next_companion_angle_<(angle_companion_+5))){//&&((min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_))){
+			//robot_person_distance<circunferencia_tope => es para estar al lado, cerca de la persona para limitar velocidad.
+			// min_dist_colli_act_global2==robot_person_companion_distance_)||(min_dist_colli_act_global2>robot_person_companion_distance_ => no tengo obstaculos cerca, limito velocidad.
+			// caso angulo_real_persona_robot == angulo que quieres por distancia == distancia_sphere_maxima, quieres estar a angle_companion_=90grados.
+			// caso angulo_real_persona_robot == angulo que quieres por distancia == distancia_sphere_maxima, quieres estar a angle_companion_=90grados.
+			//if(debug_output_screen_mesages_){
+			//	std::cout << " (4) caso if="<< std::endl;
+			//}
+			if(actual_debug2_){
+				std::cout << " (4) in min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+			}
+			//if(!Zanlungo_model_){
+				// ini side-by-side:
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				//robot_->set_v_max( max_v_by_system_);
+				robot_->set_v_max( vel_per*near_obst );
+				// fin side-by-side
+			/*}else{
+				//ini zanlungo
+				double act_module_force_total_ant=sqrt((ant_final_force_total_.fx*ant_final_force_total_.fx)+(ant_final_force_total_.fy*ant_final_force_total_.fy));
+				if(act_module_force_total_ant< 0.4){
+					robot_->set_v_max( vel_per*near_obst );
+					//robot_->set_v_max( 0.577);
+					//robot_->set_v_max( max_v_by_system_);
+					if(debug_output_screen_mesages_){
+						std::cout << " (vel margin) Francesco V_stability (perV) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					}
+
+				}//else if((min_next_companion_angle_==angle_companion_)||(min_next_companion_angle_==0)||(min_next_companion_angle_==180)){
+				//	robot_->set_v_max(  vel_per*near_obst );
+				//	std::cout << " Francesco V_stability (perV-anlges) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+				//}
+				else{
+					//robot_->set_v_max( vel_per*near_obst );
+					robot_->set_v_max( max_v_by_system_);
+					//if(debug_output_screen_mesages_){
+					//	std::cout << " (vel margin) Francesco V_stability (maxV) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+					//}
+
+				}
+				// fin zanlungo.
+			}*/
+
+
+			if(debug_cout_robot_){
+				std::cout << "(4) if vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << "(4) if vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+				fileMatlab2.close();
+			}
+
+			//std::cout << "robot_->set_v_max( max_v_by_system_ );"<< std::endl;
+			if(debug_real_test_companion4_){
+				std::cout << " max_v_by_system_=v_max_="<<robot_->get_v_max()<< std::endl;
+			}
+
+			}else if((robot_person_distance<circunferencia_tope)&&(min_next_companion_angle_>(0-30))&&(min_next_companion_angle_<(0+30))&&(((angle1<(0+30))&&(angle1>(0-30)))||((angle1<(180+30))&&(angle1>(180-30))))&&(distance_PR7<(robot_person_proximity_distance_+0.5))&&(distance_PR7>(robot_person_proximity_distance_-0.2))){
+				//if(debug_output_screen_mesages_){
+				//	std::cout << " (4) caso else if= ( persona y robot van a 0 grados o 180 y a la distancia necesaria entre ellos.)"<< std::endl;
+				//}
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+				robot_->set_v_max( max_v_by_system_  );
+				//std::cout << "robot_->set_v_max( max_v_by_system_ );"<< std::endl;
+
+				if(debug_cout_robot_){
+					std::cout << "(4) else if 1 vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+					std::cout << " max_v_by_system_=vel_per="<<vel_per<<"; v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << "(4) else if 1 vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2 <<" max_v_by_system_=vel_per="<<vel_per<<"; v_max_="<<robot_->get_v_max()<< "\n";
+					fileMatlab2.close();
+				}
+
+			}else if((robot_person_distance<circunferencia_tope)&&(min_dist_colli_act_global2>=robot_person_companion_distance_)&&(min_next_companion_angle_>(angle_colision-margen_angle_colision))&&(min_next_companion_angle_<(angle_colision+margen_angle_colision))&&(angle1<(angle_colision+margen_angle_colision))&&(angle1>(angle_colision-margen_angle_colision))){
+				//if(debug_output_screen_mesages_){
+				//	std::cout << " (4) caso else if 2= ( persona y robot van angle_colision )"<< std::endl;
+				//}
+				vel_per_ok_=Cperson_abstract::Vel_per;
+				go_with_vel_per_=true;
+				robot_->set_v_max( vel_per*near_obst );
+
+				if(debug_cout_robot_){
+					std::cout << "(4) else if 2 vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<< std::endl;
+				}
+				if(debug_file_robot_){
+					std::ofstream fileMatlab2;
+					fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+					fileMatlab2 << "(4) else if 2 vel_per*near_obst ="<<vel_per*near_obst << "; go_with_vel_per_="<<go_with_vel_per_<<"\n";
+					fileMatlab2 <<" max_v_by_system_=vel_per="<<vel_per<<"; v_max_="<<robot_->get_v_max()<< "\n";
+					fileMatlab2.close();
+				}
+
+				if(debug_real_test_companion_){
+					std::cout << " max_v_by_system_=vel_per="<<vel_per<< "; v_max_="<<robot_->get_v_max()<< std::endl;
+				}
+			}else{
+				//if(debug_output_screen_mesages_){
+				//	std::cout << " (4) caso else="<< std::endl;
+				//}
+
+					//if(!Zanlungo_model_){
+						// ini side-by-side:
+						if((min_next_companion_angle_!=angle_companion_)||(min_next_companion_angle_!=0)||(min_next_companion_angle_!=180)){
+										vel_per_ok_=Cperson_abstract::Near_goal;
+										robot_->set_v_max( max_v_by_system_);
+
+										//if(debug_output_screen_mesages_){
+										//	std::cout << "(4) if 1 robot_->set_v_max( max_v_by_system_ ); max_v_by_system_="<<max_v_by_system_<< std::endl;
+										//}
+										if(debug_file_robot_){
+											std::ofstream fileMatlab2;
+											fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+											fileMatlab2 << " (4) if 1 robot_->set_v_max( max_v_by_system_ ); max_v_by_system_="<<max_v_by_system_<< "\n";
+											fileMatlab2.close();
+										}
+
+									}else{
+										vel_per_ok_=Cperson_abstract::Far_goal;
+										robot_->set_v_max( max_v_by_system_ );
+										//if(debug_output_screen_mesages_){
+										//	std::cout << "(4) else 1 robot_->set_v_max( max_v_by_system_ ); max_v_by_system_="<<max_v_by_system_<< std::endl;
+										//}
+										if(debug_file_robot_){
+											std::ofstream fileMatlab2;
+											fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+											fileMatlab2 << "(4) else 1robot_->set_v_max( max_v_by_system_ ); max_v_by_system_="<<max_v_by_system_<< "\n";
+											fileMatlab2.close();
+										}
+									}
+
+									if(debug_real_test_companion4_){
+										std::cout << " CASO ELSE (4.1)= max_v_by_system_ "<< std::endl;
+										std::cout << " (4.1); max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+									}
+									if(debug_cout_robot_){
+										std::cout << "(4) caso else robot_->get_v_max()="<<robot_->get_v_max() <<"; go_with_vel_per_="<<go_with_vel_per_<<"; max_v_by_system_="<<max_v_by_system_<< std::endl;
+									}
+
+					// fin side-by-side:
+					/*}else{
+
+						double act_module_force_total_ant=sqrt((ant_final_force_total_.fx*ant_final_force_total_.fx)+(ant_final_force_total_.fy*ant_final_force_total_.fy));
+						if(act_module_force_total_ant< 0.4){
+							robot_->set_v_max( vel_per*near_obst );
+							//robot_->set_v_max( 0.577);
+							//robot_->set_v_max( max_v_by_system_);
+							if(debug_output_screen_mesages_){
+								std::cout << " (vel margin) Francesco V_stability (perV) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+							}
+
+						}else if((min_next_companion_angle_==angle_companion_)||(min_next_companion_angle_==0)||(min_next_companion_angle_==180)){
+							robot_->set_v_max(  vel_per*near_obst );
+							std::cout << " Francesco V_stability (perV-anlges) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+						}
+						else{
+							//robot_->set_v_max( vel_per*near_obst );
+							robot_->set_v_max( max_v_by_system_);
+							if(debug_output_screen_mesages_){
+								std::cout << " (vel margin) Francesco V_stability (maxV) max_v_by_system_=robot_->get_v_max()="<<robot_->get_v_max()<< std::endl;
+							}
+
+						}
+
+
+					}*/
+
+
+
+
+	////////////
+			}
+		}
+
+		////////////////
+		// fin side-by-side
+	//}
+
+	//if(debug_output_screen_mesages_){
+	//	std::cout << " !!!!!!!!!!!!!! 77777777777!!!!!!!!!! robot_->get_v_max()="<<robot_->get_v_max() << std::endl;
+	//}
+
+	//std::cout << "(1) After velocity companion: v_max_act="<<robot_->get_a_v_max()<<"; d_min="<<d_min<<"; max_v_by_system_="<<max_v_by_system_<< std::endl;
+
+	//double v_max_act=robot_->get_v_max();
+	//std::cout << "v_max_act"<<v_max_act<< std::endl;
+
+	//if(initial_robot_spoint_.distance(initial_person_goal_point_)<2.0){
+		//robot_->set_v_max( 0.5 );
+		//std::cout << "NEAR PERSON GOAL reduce v_max_act="<<robot_->get_a_v_max()<< std::endl;
+	//}
+	//std::cout << "(2) After velocity companion: v_max_act="<<robot_->get_a_v_max()<<"; person_radi_="<<person_radi_<<"; max_v_by_system_="<<max_v_by_system_<< std::endl;
+
+
+	//std::cout << " OUT CHANGE VEL person!!!!  ; v_max_="<<robot_->get_v_max()<<"; max_v_by_system_="<<max_v_by_system_<< std::endl;
+}
+
+void Cplan_local_nav_person_companion::return_max_velocity_systemRobot_to_max_value(){
+
+	// ----------------------------------------------------------------------
+	    //select persons considered in the scene and reserve memory for planning
+	   /* Spoint robot_position = (Spoint) robot_->get_current_pointV();
+	    double d_ini,d_end,radii_2(workspace_radii_*workspace_radii_),d_min(1e10);
+	    nearby_person_list_.clear();
+	    for( auto iit: person_list_ )
+	    {
+	    	//It requires prior trajectory prediction, careful...
+	    	d_ini = iit->get_prediction_trajectory()->front().distance2( robot_position );
+	    	d_end = iit->get_prediction_trajectory()->back().distance2( robot_position );
+	    	if( d_ini < radii_2 || d_end < radii_2 )
+	    	{
+	    		//nearby_person_list_.push_back( iit );
+	    		//iit->clear_planning_trajectory();
+	    		//iit->reserve_planning_trajectory( max_iter_ );//if already of this size, does nothing
+	    	}
+
+	    	//check for the neares obstacle in roder to calculate velocities
+	    	if ( d_ini < d_min)
+	    		d_min = d_ini;
+	    }
+*/
+	    // ----------------------------------------------------------------------
+	    //number of nearby obstacles: first approach, just count them...
+	/*    int number_of_obstacles(0);
+	    for( auto iit: laser_obstacle_list_ )
+	    {
+	    	//d_ini = iit.distance2( robot_position );
+	    	d_ini = iit.distance( robot_position );
+	    	if( d_ini < radii_2  )
+	    	{
+	    		//number_of_obstacles++;
+	    	}
+	    	if ( d_ini < d_min )
+	    		d_min = d_ini;
+	    }*/
+
+	    //number_of_obstacles_=number_of_obstacles;
+
+	    // calculate the desired robot velocity depending on the nearbiest obstacle/person and goal
+	    double distance_to_goal = robot_->get_current_pointV().distance( goal_);
+		// when the goal, starts to stop, higher priority than ppl
+	    if( distance_to_goal < distance_to_stop_ )
+			robot_->set_v_max( max_v_by_system_ * distance_to_goal / distance_to_stop_  );//distance_to_stop is never 0
+	    // if not near the goal, normal velocity regulation according to nearby ppl
+	    else if ( d_min_global_ < 1.0 )
+	    	robot_->set_v_max( max_v_by_system_ * 0.75 );
+	    else if ( d_min_global_ < 2.0)
+	    	robot_->set_v_max( max_v_by_system_ * 0.85);
+	    /*else if ( d_min_global_ < 5.0 )
+	    	robot_->set_v_max( max_v_by_system_ * 0.95 );*/
+	    else
+	    	robot_->set_v_max( max_v_by_system_  );
+}
+
+
+void Cplan_local_nav_person_companion::calculate_actual_angle_person_robot(unsigned int index){
+		if(debug_real_test_companion_){
+			std::cout << " !!! calculate_actual_angle_person_robot() !!!" << std::endl;
+		}
+//	double theta=atan2(person_companion_goal_.y-companion_person_position_.y , person_companion_goal_.x-companion_person_position_.x);
+       	// ini calcular nuevo angulo theta con orientación dirección movimiento persona.
+        		Cperson_abstract* person_obj;
+        		bool finded_person=find_person(id_person_companion_ , &person_obj);
+
+        	    //std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+
+        	    if(debug_real_test_companion2_){
+        	    	std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+        	    }
+
+        	    if(debug_antes_subgoals_entre_AKP_goals_){
+        	    	std::cout << " (Case: far of the person position) finded_person="<<finded_person<< std::endl;
+        	    	std::cout << " person_obj->print(), person_pose_companion:"<< std::endl;
+        	    	person_obj->print();
+        	    	std::cout << " despues print person"<< std::endl;
+        	    }
+
+        	    SpointV_cov person = person_obj->get_current_pointV();
+
+        	    if(debug_correct_angle_person_calculate_actual_angle_person_robot_){
+        	    	std::cout <<" perso_print="<< std::endl;
+        	    	person.print();
+        	    	//const std::vector<SpointV_cov> person_tracj=person_obj->get_planning_trajectory();
+        	    	std::cout <<" person_tracj.size()="<<person_obj->get_past_trajectory()->size()<< std::endl;
+        	    }
+
+        	    //std::cout <<" antes calculo theta 8"<< std::endl;
+
+        	    double theta=calc_person_companion_orientation();
+        	   // double theta_pers=theta;
+
+        	   /* double x;
+        	    double y;
+        	    if(person_obj->get_past_trajectory()->size()>num_steps_orientation_){
+        	    	if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+        	    		std::cout <<" perso_print_back_traj(size-num_steps_orientation_)="<< std::endl;
+        	    		person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).print();
+        	    	}
+        	    	x=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).x;
+        	    	y=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).y;
+        	    }else{
+        	    	if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+        	    		std::cout <<" perso_print_back_traj(0)="<< std::endl;
+        	    		person_obj->get_past_trajectory()->at(0).print();
+        	    	}
+        	    	x=person_obj->get_past_trajectory()->at(0).x;
+        	    	y=person_obj->get_past_trajectory()->at(0).y;
+        	    }
+        	    double pers_dx=person.x-x;
+        	    double pers_dy=person.y-y;
+				x=person_obj->get_best_dest().x;
+				y=person_obj->get_best_dest().y;
+				pers_dx=person.x-x;//person_obj->get_current_pointV().vx;
+				pers_dy=person.y-y;//person_obj->get_current_pointV().vy;
+        	    if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+        	    	std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;
+        	    }
+        	    double theta_pers=atan2(pers_dy , pers_dx);
+        	    double theta=atan2(pers_dy , pers_dx);
+        	    */
+
+
+
+        	    if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+        	    	std::cout <<"(person) theta="<<theta*180/3.14<< std::endl;
+        	    	std::cout << " extern_robot_goal_.x-person.x="<<extern_robot_goal_.x-person.x<<"; extern_robot_goal_.y-person.y"<<extern_robot_goal_.y-person.y << std::endl;
+        	    }
+        	    // fin calcular nuevo angulo theta con orientación dirección movimiento persona.
+
+
+	 double angle=atan2(robot_initial_pose_.y-companion_person_position_.y , robot_initial_pose_.x-companion_person_position_.x);
+	 double actual_angle;
+
+	 if( diffangle(theta, angle) < 0 ){
+	 	actual_angle=theta+angle;
+	 	if(debug_real_test_companion_){
+			std::cout << "  diffangle(theta, angle)="<< diffangle(theta, angle)<< std::endl;
+			std::cout << " theta="<<(theta*180)/3.14 << " angle="<<(angle*180)/3.14<< std::endl;
+			std::cout << " actual_angle="<<(actual_angle*180)/3.14 << std::endl;
+	 	}
+	 }else{
+		 actual_angle=theta-angle;
+		 if(debug_real_test_companion_){
+			 std::cout << "  diffangle(theta, angle)="<< diffangle(theta, angle)<< std::endl;
+			 std::cout << " theta="<<(theta*180)/3.14 << " angle="<<(angle*180)/3.14<< std::endl;
+			 std::cout << " actual_angle="<<(actual_angle*180)/3.14 << std::endl;
+		 }
+	 }
+
+	 actual_angle=(actual_angle*180)/3.14;
+
+	 if((actual_angle>=0)&&( actual_angle<=180)){
+		 actual_angle=actual_angle;
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [0<->180] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if((actual_angle<0)&&(actual_angle>=(-180))){
+		 actual_angle=sqrt(actual_angle*actual_angle);
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [0<-> -180] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if((actual_angle>180)&&(actual_angle<=360)){
+		 actual_angle=360-actual_angle;
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [180<-> 360] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if((actual_angle<(-180))&&(actual_angle>=(-360))){
+		 actual_angle=sqrt(actual_angle*actual_angle);
+		 actual_angle=360-actual_angle;
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [-180<-> -360] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if(actual_angle>360){
+		 unsigned int n_360_g=actual_angle/360;
+		 actual_angle=actual_angle-n_360_g*360;
+		 if(debug_gazebo_journal2_){
+		     std::cout << "2  OJO!!! caso mayor 360 ; actual_angle=actual_angle-n_360_g*360="<<actual_angle<<"; n_360_g="<<n_360_g<< std::endl;
+		 }
+
+
+	 }else{
+		 if(debug_gazebo_journal2_){
+      	   	std::cout << " OJO!!! caso NO contemplado actual_angle="<<actual_angle<< std::endl;
+		 }
+
+	 }
+
+	 if(debug_real_test_companion_){
+	 std::cout << " min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+	 std::cout << " orientation_person_robot_angles_[next_plan_index]="<<orientation_person_robot_angles_[index]<< std::endl;
+	 }
+
+	 double angle_diference;
+	 if(actual_angle>min_next_companion_angle_){
+		 angle_diference=actual_angle-min_next_companion_angle_;
+	 }else{
+		 angle_diference=min_next_companion_angle_-actual_angle;
+	 }
+	 double distance_robot_L=angle_diference*(3.14/180)*(robot_person_proximity_distance_-1);
+	 double V_robot_theorical=distance_robot_L/0.2;
+
+	 if(debug_real_test_companion_){
+		 std::cout << " angle_diference="<<angle_diference<<"robot_person_proximity_distance_="<<robot_person_proximity_distance_<< std::endl;
+		 std::cout << " distance_robot_L="<<distance_robot_L<< std::endl;
+		 std::cout << " V_theorical="<<V_robot_theorical<< std::endl;
+		 std::cout << " max_v_by_system_="<<max_v_by_system_<< std::endl;
+	 }
+
+}
+
+
+double Cplan_local_nav_person_companion::calculate_actual_angle_person_robot(Spoint person, Spoint robot){
+	if(debug_real_test_companion_){
+		std::cout << " !!! calculate_actual_angle_person_robot() !!!" << std::endl;
+	}
+//	double theta=atan2(person_companion_goal_.y-companion_person_position_.y , person_companion_goal_.x-companion_person_position_.x);
+   	// ini calcular nuevo angulo theta con orientación dirección movimiento persona.
+    		Cperson_abstract* person_obj;
+    		bool finded_person=find_person(id_person_companion_ , &person_obj);
+
+    	    //std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+
+    	    if(debug_real_test_companion2_){
+    	    	std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+    	    }
+
+    	    if(debug_antes_subgoals_entre_AKP_goals_){
+    	    	std::cout << " (Case: far of the person position) finded_person="<<finded_person<< std::endl;
+    	    	std::cout << " person_obj->print(), person_pose_companion:"<< std::endl;
+    	    	person_obj->print();
+    	    	std::cout << " despues print person"<< std::endl;
+    	    }
+
+    	  //  SpointV_cov person = person_obj->get_current_pointV(); // ojo, lo mismo para la orientacion de la persona SOLO he de usar el punto actual de la persona que acompaña
+
+    	    if(debug_correct_angle_person_calculate_actual_angle_person_robot_){
+    	    	std::cout <<" perso_print="<< std::endl;
+    	    	person.print();
+    	    	//const std::vector<SpointV_cov> person_tracj=person_obj->get_planning_trajectory();
+    	    	std::cout <<" person_tracj.size()="<<person_obj->get_past_trajectory()->size()<< std::endl;
+    	    }
+    	   // std::cout <<" antes calculo theta 9"<< std::endl;
+
+    	    double theta=calc_person_companion_orientation();
+    	   // double theta_pers=theta;
+
+    	    /*double x;
+    	    double y;
+    	    if(person_obj->get_past_trajectory()->size()>num_steps_orientation_){
+    	    	if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+    	    		std::cout <<" perso_print_back_traj(size-num_steps_orientation_)="<< std::endl;
+    	    		person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).print();
+    	    	}
+    	    	x=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).x;
+    	    	y=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).y;
+    	    }else{
+    	    	if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+    	    		std::cout <<" perso_print_back_traj(0)="<< std::endl;
+    	    		person_obj->get_past_trajectory()->at(0).print();
+    	    	}
+    	    	x=person_obj->get_past_trajectory()->at(0).x;
+    	    	y=person_obj->get_past_trajectory()->at(0).y;
+    	    }
+    	    double pers_dx=person.x-x;
+    	    double pers_dy=person.y-y;
+
+			x=person_obj->get_best_dest().x;
+			y=person_obj->get_best_dest().y;
+			pers_dx=person.x-x;//person_obj->get_current_pointV().vx;
+			pers_dy=person.y-y;//person_obj->get_current_pointV().vy;
+    	    if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+    	    	std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;
+    	    }
+    	    //double theta_pers=atan2(pers_dy , pers_dx);
+    	    double theta=atan2(pers_dy , pers_dx);
+    	    */
+
+
+    	    if( debug_correct_angle_person_calculate_actual_angle_person_robot_){
+    	    	//std::cout <<" theta_pers="<<theta_pers*180/3.14<< std::endl;
+    	    	std::cout << " extern_robot_goal_.x-person.x="<<extern_robot_goal_.x-person.x<<"; extern_robot_goal_.y-person.y"<<extern_robot_goal_.y-person.y << std::endl;
+    	    }
+    	    // fin calcular nuevo angulo theta con orientación dirección movimiento persona.
+
+
+	 double angle=atan2(robot.y-person.y , robot.x-person.x);
+	 double actual_angle;
+
+	 if( diffangle(theta, angle) < 0 ){
+		actual_angle=theta+angle;
+		if(debug_real_test_companion_){
+			std::cout << "  diffangle(theta, angle)="<< diffangle(theta, angle)<< std::endl;
+			std::cout << " theta="<<(theta*180)/3.14 << " angle="<<(angle*180)/3.14<< std::endl;
+			std::cout << " actual_angle="<<(actual_angle*180)/3.14 << std::endl;
+		}
+	 }else{
+		 actual_angle=theta-angle;
+		 if(debug_real_test_companion_){
+			 std::cout << "  diffangle(theta, angle)="<< diffangle(theta, angle)<< std::endl;
+			 std::cout << " theta="<<(theta*180)/3.14 << " angle="<<(angle*180)/3.14<< std::endl;
+			 std::cout << " actual_angle="<<(actual_angle*180)/3.14 << std::endl;
+		 }
+	 }
+
+	 actual_angle=(actual_angle*180)/3.14;
+
+	 if((actual_angle>=0)&&( actual_angle<=180)){
+		 actual_angle=actual_angle;
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [0<->180] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if((actual_angle<0)&&(actual_angle>=(-180))){
+		 actual_angle=sqrt(actual_angle*actual_angle);
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [0<-> -180] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if((actual_angle>180)&&(actual_angle<=360)){
+		 actual_angle=360-actual_angle;
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [180<-> 360] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if((actual_angle<(-180))&&(actual_angle>=(-360))){
+		 actual_angle=sqrt(actual_angle*actual_angle);
+		 actual_angle=360-actual_angle;
+		 if(debug_real_test_companion_){
+			 std::cout << " actual_angle [-180<-> -360] (1) actual_angle ="<<actual_angle << std::endl;
+		 }
+	 }else if(actual_angle>360){
+		 unsigned int n_360_g=actual_angle/360;
+		 actual_angle=actual_angle-n_360_g*360;
+		 if(debug_real_test_companion_){
+		     std::cout << " 1 OJO!!! caso mayor 360 ; actual_angle=actual_angle-n_360_g*360="<<actual_angle<<"; n_360_g="<<n_360_g<< std::endl;
+		 }
+
+	 }else{
+					std::cout << " OJO!!! caso NO contemplado actual_angle="<<actual_angle<< std::endl;
+	 }
+
+	/* if(debug_real_test_companion_){
+		 std::cout << " min_next_companion_angle_="<<min_next_companion_angle_<< std::endl;
+		 std::cout << " orientation_person_robot_angles_[next_plan_index]="<<orientation_person_robot_angles_[index]<< std::endl;
+	 }*/
+
+	/* double angle_diference;
+	 if(actual_angle>min_next_companion_angle_){
+		 angle_diference=actual_angle-min_next_companion_angle_;
+	 }else{
+		 angle_diference=min_next_companion_angle_-actual_angle;
+	 }
+	 double distance_robot_L=angle_diference*(3.14/180)*(robot_person_proximity_distance_-1);
+	 double V_robot_theorical=distance_robot_L/0.2;
+
+	 if(debug_real_test_companion_){
+		 std::cout << " angle_diference="<<angle_diference<<"robot_person_proximity_distance_="<<robot_person_proximity_distance_<< std::endl;
+		 std::cout << " distance_robot_L="<<distance_robot_L<< std::endl;
+		 std::cout << " V_theorical="<<V_robot_theorical<< std::endl;
+		 std::cout << " max_v_by_system_="<<max_v_by_system_<< std::endl;
+	 }*/
+
+	 return actual_angle;
+
+}
+
+
+
+double Cplan_local_nav_person_companion::calculate_anisotropy( const SpointV_cov& center_person, const Spoint& interacting_person , double lambda )
+{
+	//setting the corresponding SFM parameters:
+	// if no forces param provided, exit program
+	// center_person == robot_pose
+	// interacting_person == obstacle (dynamic or static)
+	// lambda=>social_forces_param->at(1) =>  const std::vector<double>* social_forces_param =>
+
+	// if anisotropy < 0.5, ese objeto no ha de influir en los obstaculos, min distance colision, para posicionamiento del robot.
+	lambda=0.2;// provisional.
+
+	double d;
+	//geometry calculations
+	double dx = center_person.x - interacting_person.x;
+	double dy = center_person.y - interacting_person.y;
+	double vx = center_person.vx;
+	double vy = center_person.vy;
+	d = sqrt(dx*dx+dy*dy);
+	dx /= d;
+	dy /= d;
+
+	//force direction
+	double phi = diffangle( atan2(vy,vx), atan2(-dy,-dx) );//minus difference vector
+	double anisotropy = (lambda + (1-lambda)*(1 + cos(phi))/2 );
+
+	return anisotropy;
+}
+
+
+
+
+double Cplan_local_nav_person_companion::calculate_modif_person_robot_distance( double ite )
+{
+/* */
+	double modif_person_robot_distance=robot_person_proximity_distance_;
+
+	if(overpas_obstacles_behind_person_){
+		//modif_person_robot_distance=robot_person_proximity_distance_;
+
+		if(debug_cout_robot_){
+			std::cout << " if(overpas_obstacles_behind_person_)=>(1) ite="<<ite<< std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+			fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+			fileMatlab2 << " if(overpas_obstacles_behind_person_)=>(1) ite=\n";
+			fileMatlab2.close();
+		}
+
+		if((ite>=0)&&(ite<=90)){
+			ite=180-ite;
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [0<->90] (1) ite ="<<ite << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [0<->90] (1) ite ="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+		}else if((ite>90)&&(ite<=180)){
+			ite=ite;
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [90<->180] (1) ite ="<<ite << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [90<->180] (1) ite ="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+		}else if((ite < 0)&&(ite>=(-90))){
+			ite=sqrt(ite*ite);
+			ite=180-ite;
+			//ini_angle_act=sqrt(ini_angle_act*ini_angle_act);
+			//ini_angle_act=360-ini_angle_act;
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [0<-> -90] (1) ite ="<<ite << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [0<-> -90] (1) ite ="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+
+		}else if((ite < -90)&&(ite>=(-180))){
+			ite=sqrt(ite*ite);
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [-90<->-180] (1) ite ="<<ite << std::endl;
+			}
+
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [-90<->-180] (1) ite ="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+		}else if((ite>180)&&(ite<=270)){
+			ite=ite-180;
+			ite=180-ite;
+			//ini_angle_act=360-ini_angle_act;
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [180<-> 360] (1) ite ="<<ite << std::endl;
+			}
+
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [180<-> 360] (1) ite="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+		}else if((ite>270)&&(ite<=360)){
+			//ite=sqrt(((ite-270)-90)*((ite-270)-90));
+			ite=360-ite;
+			//ite=ite-180;
+			ite=180-ite;
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [180<-> 360] (1) ite ="<<ite << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [180<-> 360] (1) ite ="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+		}
+		else if((ite < ( -180))&&(ite>=(-270))){
+			ite=sqrt(ite*ite);
+			ite=ite-180;
+			ite=180-ite;
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [-180<-> -360] (1) ite ="<<ite << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [-180<-> -360] (1) ite="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+		}else if((ite < ( -270))&&(ite>=(-360))){
+			ite=sqrt(ite*ite);
+			ite=360-ite;
+			//ite=ite-180;
+			ite=180-ite;
+			if(debug_cout_robot_){
+				std::cout << " diff_angle [-180<-> -360] (1) ite ="<<ite << std::endl;
+			}
+			if(debug_file_robot_){
+				std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << " diff_angle [-180<-> -360] (1) ite ="<<ite <<"\n";
+				fileMatlab2.close();
+			}
+		}
+		else if(ite>360){
+			 unsigned int n_360_g=ite/360;
+			 ite=ite-n_360_g*360;
+		     std::cout << " OJO!!! caso mayor 360 ; ite=ite-n_360_g*360="<<ite<<"; n_360_g="<<n_360_g<< std::endl;
+
+		}else{
+			std::cout << " OJO!!! caso NO contemplado ite="<<ite<< std::endl;
+		}
+
+
+		//modif_person_robot_distance=(0.00024679)*pow((ite-135),2)+(robot_person_proximity_distance_-0.5); //pow(angle-angle_companion_,4)
+		//modif_person_robot_distance=(0.00024679)*(0.5-pow((ite-135),2))+(robot_person_proximity_distance_+1-0.5); //pow(angle-angle_companion_,4)
+
+		//modif_person_robot_distance=((0.00024679)*pow((ite-135),2))+(robot_person_proximity_distance_-0.5); //pow(angle-angle_companion_,4)
+
+		//modif_person_robot_distance=((0.5-(-0.010)*(ite-135)))+1.5;
+		//modif_person_robot_distance=((0.5-(-0.006)*(ite-135)))+2.5;//(0.00024679)*pow((ite-135),2)+(person_robot_actual_real_distance_-0.5); //pow(angle-angle_companion_,4)
+		//modif_person_robot_distance=(((-0.010)*(ite-135)))+1;
+		modif_person_robot_distance=(((-0.005)*(ite-135)))+0.75;
+
+		if(debug_cout_robot_){
+			std::cout << "ite="<<ite<<"; (real_distance) person_robot_actual_real_distance_="<<person_robot_actual_real_distance_<< std::endl;
+			std::cout << "(((-0.010)*(ite-135)))+1="<<(((-0.010)*(ite-135)))+1<<"; robot_person_proximity_distance_="<<robot_person_proximity_distance_<< std::endl;
+			std::cout << "modif_person_robot_distance=(0.00024679)*pow((ite-135),2)+(robot_person_proximity_distance_-0.5)="<<modif_person_robot_distance<< std::endl;
+		}
+		if(debug_file_robot_){
+			std::ofstream fileMatlab2;
+				fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+				fileMatlab2 << "ite="<<ite<<"; (real_distance) person_robot_actual_real_distance_="<<person_robot_actual_real_distance_<< "\n";
+				fileMatlab2 << "(((-0.010)*(ite-135)))+1="<<(((-0.010)*(ite-135)))+1<<"; robot_person_proximity_distance_="<<robot_person_proximity_distance_<< "\n";
+				fileMatlab2 << "modif_person_robot_distance=(0.00024679)*pow((ite-135),2)+(robot_person_proximity_distance_-0.5)="<<modif_person_robot_distance<< "\n";
+				fileMatlab2.close();
+		}
+
+	}else{
+		/*double ite;
+		if(min_next_companion_angle_!=angle_companion_){
+			ite=(theta+(min_next_companion_angle_*3.14/180))*(180/3.14);
+		}else{
+			ite=min_next_companion_angle_;
+		}*/
+		if(debug_real_test_companion_){
+			std::cout << "(1) ite="<<ite<< std::endl;
+		}
+
+		if((ite>=0)&&(ite<=90)){
+			ite=ite;
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [0<->90] (1) ite ="<<ite << std::endl;
+			}
+		}else if((ite>90)&&(ite<=180)){
+			ite=sqrt((ite-180)*(ite-180));
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [90<->180] (1) ite ="<<ite << std::endl;
+			}
+		}else if((ite < 0)&&(ite>=(-90))){
+			ite=sqrt(ite*ite);
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [0<-> -90] (1) ite ="<<ite << std::endl;
+			}
+		}else if((ite < -90)&&(ite>=(-180))){
+			ite=sqrt(ite*ite);
+			ite=sqrt((ite-180)*(ite-180));
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [-90<->-180] (1) ite ="<<ite << std::endl;
+			}
+		}else if((ite>180)&&(ite<=270)){
+			ite=ite-180;
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [180<-> 360] (1) ite ="<<ite << std::endl;
+			}
+		}else if((ite>270)&&(ite<=360)){
+			ite=sqrt(((ite-270)-90)*((ite-270)-90));
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [180<-> 360] (1) ite ="<<ite << std::endl;
+			}
+		}
+		else if((ite < ( -180))&&(ite>=(-270))){
+			ite=sqrt(ite*ite);
+			ite=ite-180;
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [-180<-> -360] (1) ite ="<<ite << std::endl;
+			}
+		}else if((ite < ( -270))&&(ite>=(-360))){
+			ite=sqrt(ite*ite);
+			ite=sqrt(((ite-270)-90)*((ite-270)-90));
+			if(debug_real_test_companion_){
+				std::cout << " diff_angle [-180<-> -360] (1) ite ="<<ite << std::endl;
+			}
+		}else if(ite>360){
+			 unsigned int n_360_g=ite/360;
+			 ite=ite-n_360_g*360;
+		     std::cout << " OJO!!! caso mayor 360 ; ite=ite-n_360_g*360="<<ite<<"; n_360_g="<<n_360_g<< std::endl;
+		}
+		else{
+			 std::cout << " OJO!!! caso NO contemplado ite="<<ite<< std::endl;
+		}
+
+
+		modif_person_robot_distance=(0.00024679)*pow((ite-45),2)+(robot_person_proximity_distance_-0.5); //pow(angle-angle_companion_,4)
+
+		if(debug_real_test_companion_){
+			std::cout << "ite="<<ite<< std::endl;
+			std::cout << "(0.00024679)*pow((ite-45),2)="<<(0.00024679)*pow((ite-45),2)<< std::endl;
+			std::cout << "modif_person_robot_distance="<<modif_person_robot_distance<< std::endl;
+		}
+	}
+
+	return modif_person_robot_distance;
+}
+
+
+
+//////////////////////////////
+void Cplan_local_nav_person_companion::printToMatlab()
+{
+
+   //	std::cout <<" IN printToMatlab() !!!"<< std::endl;
+
+	std::ofstream fileMatlab;
+	fileMatlab.open (results_file_.c_str(), std::ofstream::out | std::ofstream::app);
+    //fileMatlab << " clc,\n clear all,\n close all \n\n\n";
+	ideal_distance_person_robot_=robot_person_proximity_distance_;
+
+	Cperson_abstract* person_obj;
+	bool finded_person=find_person(id_person_companion_ , &person_obj);
+
+	//double time=person_obj->get_time();
+	double time=ros_time_to_sec_;
+	actual_time_=time;
+	SpointV_cov person=person_obj->get_current_pointV();
+
+
+
+	/*if(real_angle_person_robot_<100){ // todo: provisional, ja que al pasarme de 180 guardo mal el real angle sin querer, hago mal el cambio de grados.
+		real_angle_person_robot_=180;
+	}*/
+
+    // Algorithm Params
+	fileMatlab << " \n \n \n % New iteration! \n";
+	fileMatlab << "\n real_distance_person_robot("<<experiment_<<","<<iteration_<<")="<<real_distance_person_robot_<<";\n";
+	fileMatlab << " ideal_distance_person_robot("<<experiment_<<","<<iteration_<<")="<<ideal_distance_person_robot_<<";\n";
+	fileMatlab << " real_angle_person_robot("<<experiment_<<","<<iteration_<<")="<<real_angle_person_robot_<<";\n";
+	fileMatlab << " before_bad_saved_ideal_angle_person_robot("<<experiment_<<","<<iteration_<<")="<<ideal_angle_person_robot_<<";\n";
+	// To avoid jumps in ideal angle that are not true and good for the final results.
+	if(final_debug_journal_){
+		std::cout <<" (antes_first_ideal_angle) ·3333333 ideal_angle_person_robot_="<<ideal_angle_person_robot_<<" before_ideal_angle_person_robot_"<<before_ideal_angle_person_robot_ << std::endl;
+	}
+	if(first_ideal_angle_){
+			before_ideal_angle_person_robot_=90;
+			first_ideal_angle_=false;
+		}
+		if(final_debug_journal_){
+			std::cout <<" ·3333333 ideal_angle_person_robot_="<<ideal_angle_person_robot_<<" before_ideal_angle_person_robot_"<<before_ideal_angle_person_robot_ << std::endl;
+		}
+		if(sqrt((before_ideal_angle_person_robot_-ideal_angle_person_robot_)*(before_ideal_angle_person_robot_-ideal_angle_person_robot_))> 10){
+			if((before_ideal_angle_person_robot_-ideal_angle_person_robot_)<0){
+				ideal_angle_person_robot_=before_ideal_angle_person_robot_+10;
+			}else{
+				ideal_angle_person_robot_=before_ideal_angle_person_robot_-10;
+			}
+		}
+		if(final_debug_journal_){
+			std::cout <<" ·3333333 ideal_angle_person_robot_="<<ideal_angle_person_robot_<<" before_ideal_angle_person_robot_"<<before_ideal_angle_person_robot_ << std::endl;
+			std::cout <<" ·3333333 angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_ << std::endl;
+		}
+
+		before_ideal_angle_person_robot_=ideal_angle_person_robot_;
+		fileMatlab << " ideal_angle_person_robot("<<experiment_<<","<<iteration_<<")="<<ideal_angle_person_robot_<<";\n";
+
+
+
+	fileMatlab << "\n robot_pose_x("<<experiment_<<","<<iteration_<<")="<<robot_initial_pose_.x<<";\n";
+	fileMatlab << "robot_pose_y("<<experiment_<<","<<iteration_<<")="<<robot_initial_pose_.y<<";\n";
+	fileMatlab << "robot_pose_Vx("<<experiment_<<","<<iteration_<<")="<<initial_robot_spoint_.vx<<";\n";
+	fileMatlab << "robot_pose_Vy("<<experiment_<<","<<iteration_<<")="<<initial_robot_spoint_.vy<<";\n";
+	fileMatlab << "robot_pose_V("<<experiment_<<","<<iteration_<<")="<<robot_initial_pose_.v<<";\n";
+	fileMatlab << "robot_pose_W("<<experiment_<<","<<iteration_<<")="<<robot_initial_pose_.w<<";\n";
+	fileMatlab << "robot_pose_theta("<<experiment_<<","<<iteration_<<")="<<robot_initial_pose_.theta*180/3.14<<";\n";
+	fileMatlab << "robot_pose_time_stamp("<<experiment_<<","<<iteration_<<")="<<robot_initial_pose_.time_stamp<<";\n";
+
+	if(debug_gazebo_journal_){
+		std::cout <<" robot_pose_x="<<robot_initial_pose_.x<<"; robot_pose_y"<<robot_initial_pose_.y<<"; robot.theta"<<robot_initial_pose_.theta*180/3.14 << std::endl;
+		std::cout <<" robot_pose_vx="<<initial_robot_spoint_.vx<<"; robot_pose_vy"<<initial_robot_spoint_.vy << std::endl;
+
+	}
+
+
+	fileMatlab <<"\n";
+
+	fileMatlab << "\n last_pose_command_x("<<experiment_<<","<<iteration_<<")="<<last_pose_command_.x<<";\n";
+	fileMatlab << "last_pose_command_y("<<experiment_<<","<<iteration_<<")="<<last_pose_command_.y<<";\n";
+	fileMatlab << "last_pose_command_v("<<experiment_<<","<<iteration_<<")="<<last_pose_command_.v<<";\n";
+	fileMatlab << "last_pose_command_w("<<experiment_<<","<<iteration_<<")="<<last_pose_command_.w<<";\n";
+	fileMatlab << "last_pose_command_theta("<<experiment_<<","<<iteration_<<")="<<last_pose_command_.theta*180/3.14<<";\n";
+	fileMatlab << "last_pose_command_time_stamp("<<experiment_<<","<<iteration_<<")="<<last_pose_command_.time_stamp<<";\n";
+
+
+	//fileMatlab << last_pose_command_.x<<" "<<last_pose_command_.y<<" "<<last_pose_command_.time_stamp<<" "<<last_pose_command_.theta<<" "<<last_pose_command_.v<<" "<<last_pose_command_.w<<"\n";
+	if(debug_gazebo_journal_){
+	std::cout <<" last_pose_command_.x="<<last_pose_command_.x<<"; last_pose_command_.y="<<last_pose_command_.y<<"; last_pose_command_.time_stamp="<<last_pose_command_.time_stamp<<"; last_pose_command_.theta="<<last_pose_command_.theta<<"; last_pose_command_.v="<<last_pose_command_.v<<"; last_pose_command_.w="<<last_pose_command_.w<< "\n";
+	}
+
+	fileMatlab << "\n is_case_akp_true_("<<experiment_<<","<<iteration_<<")="<<is_case_akp_true_<<";\n";
+	fileMatlab << "\n enter_on_cero_("<<experiment_<<","<<iteration_<<")="<<enter_on_cero_<<";\n";
+	fileMatlab << "\n enter_on_cero2_("<<experiment_<<","<<iteration_<<")="<<enter_on_cero2_<<";\n";
+	fileMatlab << "\n result_("<<experiment_<<","<<iteration_<<")="<<result_<<";\n";
+	fileMatlab << "\n dist_to_goal_test_("<<experiment_<<","<<iteration_<<")="<<dist_to_goal_test_<<";\n";
+	fileMatlab << "\n v_to_goal_test_("<<experiment_<<","<<iteration_<<")="<<v_to_goal_test_<<";\n";
+	Sdestination person_goal;
+	if(companion_same_person_goal_){
+		person_goal=person_obj->get_best_dest();
+		//std::cout << " (companion_same_person_goal_) person_obj->get_best_dest().x ="<<person_obj->get_best_dest().x <<"; person_obj->get_best_dest().y="<<person_obj->get_best_dest().y<< std::endl;
+	}else{
+		person_goal=extern_robot_goal_;
+	}
+	//double theta = atan2(person_goal.y-companion_person_position_.y,person_goal.x-companion_person_position_.x);
+   	// ini calcular nuevo angulo theta con orientación dirección movimiento persona.
+    		//Cperson_abstract* person_obj;
+    		//bool finded_person=find_person(id_person_companion_ , &person_obj);
+
+    	    //std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+
+    	    if(debug_real_test_companion2_){
+    	    	std::cout <<" bool finded_person="<<finded_person<<" id_person_companion_"<<id_person_companion_ << std::endl;
+    	    }
+
+    	    if(debug_antes_subgoals_entre_AKP_goals_){
+    	    	std::cout << " (Case: far of the person position) finded_person="<<finded_person<< std::endl;
+    	    	std::cout << " person_obj->print(), person_pose_companion:"<< std::endl;
+    	    	person_obj->print();
+    	    	std::cout << " despues print person"<< std::endl;
+    	    }
+
+    	    //SpointV_cov person = person_obj->get_current_pointV();
+    	    if(debug_correct_angle_person_print_to_matlab_){
+    	    	std::cout <<" perso_print="<< std::endl;
+    	    	person.print();
+    	    }
+    	    //const std::vector<SpointV_cov> person_tracj=person_obj->get_planning_trajectory();
+    	    if(debug_correct_angle_person_print_to_matlab_){std::cout <<" person_tracj.size()="<<person_obj->get_past_trajectory()->size()<< std::endl;}
+
+    	    //Cperson_abstract* person_obj;
+    	    //bool finded_person=find_person(id_person_companion_ , &person_obj);
+    	    //SpointV_cov person=person_obj->get_current_pointV();
+
+    	    double theta=calc_person_companion_orientation()*180/3.14;
+    	    //double theta_pers=theta*3.14/180;
+
+    	   /* double x;
+    	    double y;
+    	    double pers_dx;
+    	    double pers_dy;
+    	    double theta_pers;
+    	    double theta;
+    	    if(person_obj->get_past_trajectory()->size()>num_steps_orientation_){
+    	    	  if(debug_correct_angle_person_print_to_matlab_){std::cout <<" perso_print_back_traj(size-num_steps_orientation_)="<< std::endl;
+    	    	person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).print();}
+    	    	x=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).x;
+    	    	y=person_obj->get_past_trajectory()->at(person_obj->get_past_trajectory()->size()-num_steps_orientation_).y;
+    	    }else{
+    	    	  if(debug_correct_angle_person_print_to_matlab_){std::cout <<" perso_print_back_traj(0)="<< std::endl;
+    	    	person_obj->get_past_trajectory()->at(0).print();}
+    	    	x=person_obj->get_past_trajectory()->at(0).x;
+    	    	y=person_obj->get_past_trajectory()->at(0).y;
+    	    }
+    	    pers_dx=person.x-x;
+    	    pers_dy=person.y-y;
+			x=person_obj->get_best_dest().x;
+			y=person_obj->get_best_dest().y;
+			pers_dx=person.x-x;//person_obj->get_current_pointV().vx;
+			pers_dy=person.y-y;//person_obj->get_current_pointV().vy;
+    	    if(debug_correct_angle_person_print_to_matlab_){std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;}
+    	    theta_pers=atan2(pers_dy , pers_dx);
+    	    theta=atan2(pers_dy , pers_dx)*180/3.14;
+*/
+
+
+    	    if(debug_correct_angle_person_print_to_matlab_){ std::cout <<"(person) theta="<<theta*180/3.14<< std::endl;
+    	    std::cout << " extern_robot_goal_.x-person.x="<<extern_robot_goal_.x-person.x<<"; extern_robot_goal_.y-person.y"<<extern_robot_goal_.y-person.y << std::endl;}
+    	    // fin calcular nuevo angulo theta con orientación dirección movimiento persona.
+	fileMatlab << "\n person_pose_x("<<experiment_<<","<<iteration_<<")="<<companion_person_position_.x<<";\n";
+	fileMatlab << "person_pose_y("<<experiment_<<","<<iteration_<<")="<<companion_person_position_.y<<";\n";
+	fileMatlab << "person_pose_Vx("<<experiment_<<","<<iteration_<<")="<<companion_person_position_.vx<<";\n";
+	fileMatlab << "person_pose_Vy("<<experiment_<<","<<iteration_<<")="<<companion_person_position_.vy<<";\n";
+	fileMatlab << "person_pose_V("<<experiment_<<","<<iteration_<<")="<<sqrt(companion_person_position_.vx*companion_person_position_.vx+companion_person_position_.vy*companion_person_position_.vy)<<";\n";
+	fileMatlab << "person_pose_theta("<<experiment_<<","<<iteration_<<")="<<theta<<";\n";
+	fileMatlab << "person_pose_time_stamp("<<experiment_<<","<<iteration_<<")="<<companion_person_position_.time_stamp<<";\n";
+
+	if(debug_gazebo_journal_){
+		std::cout <<" (companion) person_pose_x="<<companion_person_position_.x<<"; person_pose_y"<<companion_person_position_.y<<"; person.theta"<<theta << std::endl;
+		std::cout <<" (companion) person_pose_vx="<<companion_person_position_.vx<<"; person_pose_vy"<<companion_person_position_.vy << std::endl;
+
+	}
+
+
+	double inc_distance_act;
+	double step_inc_dist_act;
+	double inc_time_act;
+
+	if((before_initial_robot_spoint_.x==-10000)&&(before_initial_robot_spoint_.y==-10000)){
+		inc_distance_act=0;
+		step_inc_dist_act=0;
+		acum_time_=0;
+	}else{
+		step_inc_dist_act=sqrt((before_initial_robot_spoint_.x-initial_robot_spoint_.x)*(before_initial_robot_spoint_.x-initial_robot_spoint_.x)+(before_initial_robot_spoint_.y-initial_robot_spoint_.y)*(before_initial_robot_spoint_.y-initial_robot_spoint_.y));
+		inc_distance_act=inc_distance_ant_+step_inc_dist_act;
+		inc_distance_ant_=inc_distance_ant_+step_inc_dist_act;
+
+		inc_time_act=sqrt((actual_time_-time_ant_)*(actual_time_-time_ant_));
+		acum_time_=acum_time_+inc_time_act;
+	}
+
+
+	fileMatlab << "\n step_recorred_distance_of_the_robot("<<experiment_<<","<<iteration_<<")="<<step_inc_dist_act<<";\n";
+	fileMatlab << "\n recorred_distance_of_the_robot("<<experiment_<<","<<iteration_<<")="<<inc_distance_act<<";\n";
+	fileMatlab << " actual_time("<<experiment_<<","<<iteration_<<")="<<actual_time_<<";\n";
+	//fileMatlab << "\n time=("<<experiment_<<","<<iteration_<<")="<<real_distance_person_robot_<<"];\n";
+	fileMatlab << "\n acum_time("<<experiment_<<","<<iteration_<<")="<<acum_time_<<";\n";
+
+	// std::cout << " print to matlab (6) ideal_angle_person_robot_="<<ideal_angle_person_robot_<< std::endl;
+	 double percent_of_error_in_distance;
+	if(ideal_angle_person_robot_!=0){
+		percent_of_error_in_distance=(abs(real_angle_person_robot_-ideal_angle_person_robot_)/abs(ideal_angle_person_robot_))*100;
+	}else{
+		percent_of_error_in_distance=-1;
+	}
+	 //std::cout << " print to matlab (7)"<< std::endl;
+	fileMatlab << " percent_of_error_in_distance("<<experiment_<<","<<iteration_<<")="<<percent_of_error_in_distance<<";\n";
+
+/*
+	fileMatlab << " robot_distance_cost=("<<experiment_<<","<<iteration_<<")="<<robot_distance_cost_<<"];\n";
+	fileMatlab << " robot_orientation_cost=("<<experiment_<<","<<iteration_<<")="<<robot_orientation_cost_<<"];\n";
+	fileMatlab << " robot_control_cost=("<<experiment_<<","<<iteration_<<")="<<robot_control_cost_<<"];\n";
+	fileMatlab << " robot_other_person_cost=("<<experiment_<<","<<iteration_<<")="<<robot_other_person_cost_<<"];\n";
+	fileMatlab << " robot_obstacles_cost=("<<experiment_<<","<<iteration_<<")="<<robot_obstacles_cost_<<"];\n";
+	fileMatlab << " robot_companion_cost=("<<experiment_<<","<<iteration_<<")="<<robot_companion_cost_<<"];\n";
+	fileMatlab << " robot_total_cost=("<<experiment_<<","<<iteration_<<")="<<robot_total_cost_<<"];\n";
+	fileMatlab << " robot_ant_traj_cost=("<<experiment_<<","<<iteration_<<")="<<robot_ant_traj_cost_<<"];\n";
+	fileMatlab << " cost_parameters_0=("<<experiment_<<","<<iteration_<<")="<<cost_parameters_[0]<<"];\n";
+	fileMatlab << " cost_parameters_1=("<<experiment_<<","<<iteration_<<")="<<cost_parameters_[1]<<"];\n";
+	fileMatlab << " cost_parameters_2=("<<experiment_<<","<<iteration_<<")="<<cost_parameters_[2]<<"];\n";
+	fileMatlab << " cost_parameters_3=("<<experiment_<<","<<iteration_<<")="<<cost_parameters_[3]<<"];\n";
+	fileMatlab << " cost_parameters_5=("<<experiment_<<","<<iteration_<<")="<<cost_parameters_[5]<<"];\n";
+	fileMatlab << " cost_parameters_6=("<<experiment_<<","<<iteration_<<")="<<cost_parameters_[6]<<"];\n";
+*/
+	 //std::cout << " print to matlab (8)"<< std::endl;
+	person_distance_to_goal_=sqrt((person.x-extern_robot_goal_.x)*(person.x-extern_robot_goal_.x)+(person.y-extern_robot_goal_.y)*(person.y-extern_robot_goal_.y));
+	 //std::cout << " print to matlab (9)"<< std::endl;
+	robot_distance_to_goal_=sqrt((initial_robot_spoint_.x-extern_robot_goal_.x)*(initial_robot_spoint_.x-extern_robot_goal_.x)+(initial_robot_spoint_.y-extern_robot_goal_.y)*(initial_robot_spoint_.y-extern_robot_goal_.y));
+	 //std::cout << " print to matlab (10)"<< std::endl;
+	fileMatlab << " person_distance_to_goal("<<experiment_<<","<<iteration_<<")="<<person_distance_to_goal_<<";\n";
+	fileMatlab << " robot_distance_to_goal("<<experiment_<<","<<iteration_<<")="<<robot_distance_to_goal_<<";\n";
+	 //std::cout << " print to matlab (11)"<< std::endl;
+	double performance=0;
+
+	if((real_distance_person_robot_<2.5)&&(real_distance_person_robot_>1.0)){
+		if((real_angle_person_robot_<(ideal_angle_person_robot_+15))&&(real_angle_person_robot_>(ideal_angle_person_robot_-15))){
+			performance=1;
+		}else if((real_angle_person_robot_<(ideal_angle_person_robot_+25))&&(real_angle_person_robot_>(ideal_angle_person_robot_-25))){
+			performance=0.8;
+		}else{
+			performance=0.5;
+		}
+	}
+	fileMatlab << " performance("<<experiment_<<","<<iteration_<<")="<<performance<<";\n";
+
+
+/*
+	fileMatlab << " last_step_robot_other_person_cost_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_other_person_cost_<<"];\n";
+	fileMatlab << " last_step_robot_companion_cost_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_companion_cost_<<"];\n";
+	fileMatlab << " last_step_robot_obstacles_cost_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_obstacles_cost_<<"];\n";
+	fileMatlab << " last_step_robot_control_cost_mix_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_control_cost_mix_<<"];\n";
+	fileMatlab << " last_step_robot_control_cost_goal_traj_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_control_cost_goal_traj_<<"];\n";
+	fileMatlab << " last_step_robot_control_cost_goal_person_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_control_cost_goal_person_<<"];\n";
+	fileMatlab << " last_step_robot_orientation_cost_local_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_orientation_cost_local_<<"];\n";
+	fileMatlab << " last_step_robot_orientation_cost_global_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_orientation_cost_global_<<"];\n";
+	fileMatlab << " last_step_robot_distance_cost_=("<<experiment_<<","<<iteration_<<")="<<last_step_robot_distance_cost_<<"];\n";
+	fileMatlab << " other_people_due_to_robot_cost_=("<<experiment_<<","<<iteration_<<")="<<other_people_due_to_robot_cost_<<"];\n";
+	fileMatlab << " companion_person_due_to_robot_cost_=("<<experiment_<<","<<iteration_<<")="<<companion_person_due_to_robot_cost_<<"];\n";
+*/
+
+
+
+	fileMatlab << " computational_time("<<experiment_<<","<<iteration_<<")="<<save_computational_time_value_<<";\n";
+
+
+	fileMatlab << " robot_plan_companion2_start_ITER("<<experiment_<<","<<iteration_<<")="<<robot_plan_companion2_start_ITER<<";\n";
+	fileMatlab << " robot_plan_companion2_end_ITER("<<experiment_<<","<<iteration_<<")="<<robot_plan_companion2_end_ITER<<";\n";
+	//fileMatlab << " time_to_meet_person_geometrically_("<<experiment_<<","<<iteration_<<")="<<time_to_meet_person_geometrically_<<";\n";
+
+	// save leght global path and center of the group to evaluate the performance of the approaching task.
+
+	fileMatlab << " center_of_the_group_x("<<experiment_<<","<<iteration_<<")="<<center_of_the_group_.x<<";\n";
+	fileMatlab << " center_of_the_group_y("<<experiment_<<","<<iteration_<<")="<<center_of_the_group_.y<<";\n";
+	fileMatlab << " center_of_the_group_theta("<<experiment_<<","<<iteration_<<")="<<center_of_the_group_.theta<<";\n";
+	//std::cout <<" IN printToMatlab() save center_of_the_group_x="<<center_of_the_group_.x<< std::endl;
+	//std::cout <<" IN printToMatlab() save center_of_the_group_y="<<center_of_the_group_.y<< std::endl;
+	//std::cout <<" IN printToMatlab() save center_of_the_group_theta="<<center_of_the_group_.theta<< std::endl;
+	// To calculate distance between center_of_the_group and target_person:
+
+
+	fileMatlab << " value_distance_global_path_("<<experiment_<<","<<iteration_<<")="<<value_distance_global_path_<<";\n";
+	fileMatlab << " global_path_ini_orientation_("<<experiment_<<","<<iteration_<<")="<<global_path_ini_orientation_<<";\n";
+	fileMatlab << " global_path_final_orientation_("<<experiment_<<","<<iteration_<<")="<<global_path_final_orientation_<<";\n";
+
+
+	//std::cout <<" OUT printtomatlab!!! (ojo, saved now, the before iteration globath path leng) IN printToMatlab() save value_distance_global_path_="<<value_distance_global_path_<< std::endl;
+
+    fileMatlab.close();
+
+    /* Diferentes modos para abrir el fichero!
+      	ios::in 		Abrir para entrada (lectura)
+		ios::out 		Abrir para salida (escritura)
+		ios::binary 	Abre en modo binario
+		ios::ate 		Escoge el final del fichero como posición inicial (si no se dice lo contrario, la posición inicial al abrir el fichero sería el comienzo del fichero)
+		ios::app 		Abrir para añadir (append) al final, sólo utilizable si se ha abierto el fichero exclusivamente para escritura
+		ios::trunc 		Trunca el fichero si existía, borrando to_do su contenido anterior
+     */
+
+
+}
+
+void Cplan_local_nav_person_companion::calc_area_workspace_arround_person_companion()
+{
+
+	Cperson_abstract* person_obj;
+	find_person(id_person_companion_ , &person_obj);
+	SpointV_cov back_planning_traj=companion_person_position_;
+
+
+	SpointV_cov front_planning_traj=person_obj->pointV_propagation(horizon_time_);
+
+	std::vector <double> vector_x;
+	vector_x.push_back(companion_person_position_.x+3);//back_planning_traj_x1=companion_person_position_.x+3;
+	vector_x.push_back(companion_person_position_.x-3);//double back_planning_traj_x2=companion_person_position_.x-3; // 3 metros
+	vector_x.push_back(front_planning_traj.x+3);
+	vector_x.push_back(front_planning_traj.x-3);
+
+	std::vector <double> vector_y;
+	vector_y.push_back(companion_person_position_.y+3);//back_planning_traj_y1=companion_person_position_.y+3;
+	vector_y.push_back(companion_person_position_.y-3);//double back_planning_traj_y2=companion_person_position_.y-3; // 3 metros
+	vector_y.push_back(front_planning_traj.y+3);
+	vector_y.push_back(front_planning_traj.y-3);
+
+
+	workspace_arround_companion_person_min_x_=vector_x[0];
+	workspace_arround_companion_person_max_x_=vector_x[0];
+	for(unsigned int vec=0; vec<vector_x.size(); vec++){
+		if(vector_x[vec]<workspace_arround_companion_person_min_x_){
+			workspace_arround_companion_person_min_x_=vector_x[vec];
+		}
+		if(vector_x[vec]>workspace_arround_companion_person_max_x_){
+			workspace_arround_companion_person_max_x_=vector_x[vec];
+		}
+	}
+	workspace_arround_companion_person_min_y_=vector_y[0];
+	workspace_arround_companion_person_max_y_=vector_y[0];
+	for(unsigned int vec=0; vec<vector_y.size(); vec++){
+		if(vector_y[vec]<workspace_arround_companion_person_min_y_){
+			workspace_arround_companion_person_min_y_=vector_y[vec];
+		}
+		if(vector_y[vec]>workspace_arround_companion_person_max_y_){
+			workspace_arround_companion_person_max_y_=vector_y[vec];
+		}
+	}
+
+	if(debug_real_test_companion4_){
+	std::cout <<" back_planning_traj: "<< std::endl;
+	back_planning_traj.print();
+	std::cout <<" front_planning_traj: "<< std::endl;
+	front_planning_traj.print();
+	std::cout <<" workspace_arround_companion_person_min_x_="<<workspace_arround_companion_person_min_x_<< std::endl;
+	std::cout <<" workspace_arround_companion_person_max_x_="<<workspace_arround_companion_person_max_x_<< std::endl;
+	std::cout <<" workspace_arround_companion_person_min_y_="<<workspace_arround_companion_person_min_y_<< std::endl;
+	std::cout <<" workspace_arround_companion_person_max_y_="<<workspace_arround_companion_person_max_y_<< std::endl;
+	}
+	//SpointV_cov back_prediction_traj=person_obj->get_prediction_trajectory()->back();
+	//SpointV_cov front_prediction_traj=person_obj->get_prediction_trajectory()->front();
+	//std::cout <<" back_prediction_traj: "<< std::endl;
+	//back_prediction_traj.print();
+	//std::cout <<" front_prediction_traj: "<< std::endl;
+	//front_prediction_traj.print();
+
+
+}
+
+void Cplan_local_nav_person_companion::new_debug_file()
+{
+	std::ofstream fileMatlab2;
+	fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+	fileMatlab2 << "% ***** Starts Autogenerated DEBUG File - results AKP dynamic companion ELY ***** \n\n";
+	fileMatlab2.close();
+}
+
+/*
+void Cplan_local_nav_person_companion::new_Zanlungo_file()
+{
+	std::ofstream fileMatlab;
+		// const char *direc_file_name_;
+	    //direc_file_name_= results_file_.c_str();
+	    //home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/1_data_results
+	    //fileMatlab.open (results_file_.c_str(), std::ofstream::out | std::ofstream::app);
+		fileMatlab.open (data_file_Zanlungo_.c_str(), std::ofstream::out | std::ofstream::trunc);
+		fileMatlab << "% ***** Autogenerated File - data to see what is doing wrong ***** \n\n";
+		fileMatlab << "%  The file contains: Actual robot and person position, velocity, robot orientation and goal, time (for person and robot). Costs totals of the winner path in each time. \n\n";
+		fileMatlab << "\n";
+		fileMatlab << "dt=[]\n";
+		fileMatlab << "real_computation_time_dt=[]\n";
+		fileMatlab << "companion_person_x=[]\n";
+		fileMatlab << "companion_person_y=[]\n";
+		fileMatlab << "companion_person_vx=[]\n";
+		fileMatlab << "companion_person_vy=[]\n";
+		fileMatlab << "companion_person_theta=[]\n";
+		fileMatlab << "robot_x=[]\n";
+		fileMatlab << "robot_y=[]\n";
+		fileMatlab << "robot_vx=[]\n";
+		fileMatlab << "robot_vy=[]\n";
+		fileMatlab << "robot_theta=[]\n";
+		fileMatlab << "robot_final_goal_x=[]\n";
+		fileMatlab << "robot_final_goal_y=[]\n";
+		fileMatlab << "preferred_x=[]\n";
+		fileMatlab << "preferred_y=[]\n";
+		fileMatlab << "preferred_m=[]\n";
+		fileMatlab << "preferred_th=[]\n";
+
+		fileMatlab << "dist_robot_person=[]\n";
+		fileMatlab << "f_companion_x=[]\n";
+		fileMatlab << "f_companion_y=[]\n";
+		fileMatlab << "f_goal_x=[]\n";
+		fileMatlab << "f_goal_y=[]\n";
+		//fileMatlab << "alpha_=[]\n";
+		//fileMatlab << "beta_=[]\n";
+		//fileMatlab << "k=[]\n";
+		fileMatlab << "v_desired_x=[]\n";
+		fileMatlab << "v_desired_y=[]\n";
+		fileMatlab << "v_current_x=[]\n";
+		fileMatlab << "v_current_y=[]\n";
+
+		// todo: falta orientacion y goal que le paso al robot.
+
+}*/
+
+
+
+void Cplan_local_nav_person_companion::new_matlab_file()
+{
+//// //this->config_.map_path + "/" + this->config_.map_filename
+	//std::string data_file, data_file2;
+	//data_file="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion/data_results/results";
+	//data_file2=".txt";
+	//std::string final_file= data_file + "/" + data_file2;
+	std::ofstream fileMatlab;
+	// const char *direc_file_name_;
+    //direc_file_name_= results_file_.c_str();
+    //home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/1_data_results
+    //fileMatlab.open (results_file_.c_str(), std::ofstream::out | std::ofstream::app);
+	fileMatlab.open (results_file_.c_str(), std::ofstream::out | std::ofstream::trunc);
+    // FILE HEADER
+    fileMatlab << "% ***** Autogenerated File - results AKP dynamic companion ELY ***** \n\n";
+    fileMatlab << "%  The file contains: Actual robot and person distance, real angle, ideal angle at this time, time, time to arrive to goal (for person and robot). Costs totals of the winner path in each time. \n\n";
+    fileMatlab << "\n real_distance_person_robot=[];\n";
+    fileMatlab << " ideal_distance_person_robot=[];\n";
+    fileMatlab << " real_angle_person_robot=[];\n";
+    fileMatlab << " ideal_angle_person_robot=[];\n";
+    fileMatlab << " actual_time=[];\n";
+    fileMatlab << " robot_distance_cost=[];\n";
+    fileMatlab << " robot_orientation_cost=[];\n";
+    fileMatlab << " robot_control_cost=[];\n";
+    fileMatlab << " robot_other_person_cost=[];\n";
+    fileMatlab << " robot_obstacles_cost=[];\n";
+    fileMatlab << " robot_companion_cost=[];\n";
+    fileMatlab << " robot_total_cost=[]; \n";
+    fileMatlab << " robot_ant_traj_cost=[];\n";
+    fileMatlab << " cost_parameters_0=[];\n";
+    fileMatlab << " cost_parameters_1=[];\n";
+    fileMatlab << " cost_parameters_2=[];\n";
+    fileMatlab << " cost_parameters_3=[];\n";
+    fileMatlab << " cost_parameters_5=[];\n";
+    fileMatlab << " cost_parameters_6=[];\n";
+    fileMatlab << " person_distance_to_goal=[];\n";
+    fileMatlab << " robot_distance_to_goal=[];\n";
+    fileMatlab << " percent_of_error_in_distance=[];\n";
+    fileMatlab << " performance=[];\n";
+
+    fileMatlab << " last_step_robot_other_person_cost_=[];\n";
+    fileMatlab << " last_step_robot_companion_cost_=[];\n";
+    fileMatlab << " last_step_robot_obstacles_cost_=[];\n";
+    fileMatlab << " last_step_robot_control_cost_mix_=[];\n";
+    fileMatlab << " last_step_robot_control_cost_goal_traj_=[];\n";
+    fileMatlab << " last_step_robot_control_cost_goal_person_=[];\n";
+    fileMatlab << " last_step_robot_orientation_cost_local_=[];\n";
+    fileMatlab << " last_step_robot_orientation_cost_global_=[];\n";
+    fileMatlab << " last_step_robot_distance_cost_=[];\n";
+
+    fileMatlab << " other_people_due_to_robot_cost_=[];\n";
+    fileMatlab << " companion_person_due_to_robot_cost_=[];\n";
+
+    fileMatlab << " person_goal_x=[];\n";
+    fileMatlab << " person_goal_y=[];\n";
+    fileMatlab << " person_goal_vx=[];\n";
+    fileMatlab << " person_goal_vy=[];\n";
+    fileMatlab << " person_goal_theta1=[];\n";
+    fileMatlab << " person_goal_theta2=[];\n";
+    fileMatlab << " distance_robot_person_goal=[];\n";
+    fileMatlab << " distance_person_companion_person_goal=[];\n";
+    fileMatlab << " distance_centre_group_person_goal=[];\n";
+    fileMatlab << " theta_group_centro_robot_persona=[];\n";
+    fileMatlab << " person_goal_theta1=[];\n";
+    fileMatlab << " theta_group_comp_op=[];\n";
+    fileMatlab << " center_of_the_group_theta=[];\n";
+    fileMatlab << " person_c_robot_orientation_by_line=[];\n";
+    fileMatlab << " theta_group_comp_op2=[];\n";
+    fileMatlab << " angle_diference_person_goal_group=[];\n";
+    fileMatlab << " angle_diference_person_goal_group2=[];\n";
+    fileMatlab << " Action_=[];\n";
+    //fileMatlab << " actual_final_goal_to_meet_person_x=[];\n";
+    //fileMatlab << " actual_final_goal_to_meet_person_y=[];\n";
+    //fileMatlab << " before_actual_final_goal_to_meet_person_x=[];\n";
+    //fileMatlab << " before_actual_final_goal_to_meet_person_y=[];\n";
+    fileMatlab << " distance_between_consecutive_goals=[];\n";
+    fileMatlab << " computational_time=[];\n";
+    fileMatlab << " robot_plan_companion2_start_ITER=[];\n";
+    fileMatlab << " robot_plan_companion2_end_ITER=[];\n";
+    //fileMatlab << " time_to_meet_person_geometrically_=[];\n";
+    fileMatlab << " center_of_the_group_x=[];\n";
+    fileMatlab << " center_of_the_group_y=[];\n";
+    fileMatlab << " center_of_the_group_theta=[];\n";
+    /*fileMatlab << " d_center_group_and_targ_per_during_path=[];\n";
+    fileMatlab << " d_rob_and_targ_per_during_path=[];\n";
+    fileMatlab << " d_per_comp_and_targ_per_during_path=[];\n";
+    fileMatlab << " dif_ori_center_group_and_targ_per_during_path=[];\n";
+    fileMatlab << " dif_ori_rob_and_targ_per_during_path=[];\n";
+    fileMatlab << " dif_ori_per_compn_and_targ_per_during_path=[];\n";
+    */
+    fileMatlab << " value_distance_global_path_=[];\n";
+    fileMatlab << " global_path_ini_orientation_=[];\n";
+    fileMatlab << " global_path_final_orientation_=[];\n";
+    //fileMatlab << " act_ori_group_to_targ_per_=[];\n";
+
+
+    /*
+     *
+     * d_center_group_and_targ_per_during_path=[];
+ d_rob_and_targ_per_during_path=[];
+ d_per_comp_and_targ_per_during_path=[];
+ dif_ori_center_group_and_targ_per_during_path=[];
+ dif_ori_rob_and_targ_per_during_path=[];
+ dif_ori_per_compn_and_targ_per_during_path=[];
+ value_distance_global_path_=[];
+ global_path_ini_orientation_=[];
+ global_path_final_orientation_=[];
+ act_ori_group_to_targ_per_=[];
+     */
+
+    fileMatlab.close();
+
+}
+
+
+void Cplan_local_nav_person_companion::new_matlab_file_To_evaluate_costs()
+{
+//// //this->config_.map_path + "/" + this->config_.map_filename
+	//std::string data_file, data_file2;
+	//data_file="/home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion/data_results/results";
+	//data_file2=".txt";
+	//std::string final_file= data_file + "/" + data_file2;
+	std::ofstream fileMatlab;
+	// const char *direc_file_name_;
+    //direc_file_name_= evaluate_costs_file_.c_str();
+    //home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs
+    fileMatlab.open (evaluate_costs_file_.c_str(), std::ofstream::out | std::ofstream::app);
+    // FILE HEADER
+    fileMatlab << "% ***** Autogenerated File - evaluate costs AKP dynamic companion ELY ***** \n\n";
+    fileMatlab << "%  The file contains: the best path and nondominated paths positions, the id's of the nodes of the paths, the total costs and partially costs of each node,  means and std of the costs, the itraration \n\n";
+    fileMatlab << "\n time=0;\n";
+    fileMatlab << " iter=0;\n";
+    fileMatlab << " num_of_total_paths=0;\n";
+    fileMatlab << " mean=[];\n";
+    fileMatlab << " std=[];\n";
+    fileMatlab << " % nondominated paths: \n";
+    fileMatlab << " end_id_nondominated_paths=0;\n";
+    fileMatlab << " path_pose=[];\n";
+    fileMatlab << " id_node=[];\n";
+    fileMatlab << " costs=[];\n";
+    fileMatlab << " % best path: \n";
+    fileMatlab << " end_id_best_path=0;\n";
+    fileMatlab << " best_path_poses=[];\n";
+    fileMatlab << " best_path_id_nodes=[];\n";
+    fileMatlab << " best_paths_costs=[];\n";
+
+
+    fileMatlab.close();
+
+}
+
+
+
+
+
+void Cplan_local_nav_person_companion::new_matlab_file_To_evaluate_change_distance_and_angle()
+{
+	std::ofstream fileMatlab;
+	// const char *direc_file_name_;
+	//direc_file_name_= evaluate_costs_file_.c_str();
+	//home/ely7787/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/ely_people_prediction_companion_robot/2_results_evaluate_costs
+	fileMatlab.open (evaluate_change_distance_and_angle_companion_file_.c_str(), std::ofstream::out | std::ofstream::app);
+	// FILE HEADER
+	fileMatlab << "% ***** Autogenerated File - evaluate costs AKP dynamic companion ELY ***** \n\n";
+	fileMatlab << "%  The file contains: the best path and nondominated paths positions, the id's of the nodes of the paths, the total costs and partially costs of each node,  means and std of the costs, the itraration \n\n";
+	fileMatlab << " iter=[];\n";
+	fileMatlab << " distance_robot_person=[];\n";
+	fileMatlab << " angle_companion_robot_person=[];\n";
+}
+
+void Cplan_local_nav_person_companion::evaluate_change_distance_and_angle_companion_with_beta_change()
+{
+	std::ofstream fileMatlab;
+	fileMatlab.open (evaluate_change_distance_and_angle_companion_file_.c_str(), std::ofstream::out | std::ofstream::app);
+	double iter=iter_act_multiple_paths_and_best_path_.iter_act;
+
+    // Algorithm Params
+	fileMatlab << " \n \n \n % New iteration! \n";
+
+	if(debug_file_evaluate_costs_){
+		std::cout <<" \n \n \n % New iteration!  "<< std::endl;
+	}
+	//std::cout <<" robot_->get_platform_radii()="<<robot_->get_platform_radii()<< std::endl;
+
+	if(save_distance_between_person_and_robot_<(robot_person_proximity_distance_+2*robot_->get_platform_radii())){
+		iter_d_++;
+		fileMatlab << "\n  iter=[iter,"<<iter_d_<<"];\n";
+		fileMatlab << "\n  distance_robot_person=[distance_robot_person,"<<save_distance_between_person_and_robot_<<"];\n";
+		fileMatlab << "\n  angle_companion_robot_person=[angle_companion_robot_person,"<<save_angle_between_person_and_robot_<<"];\n";
+		fileMatlab << "\n  robot_goal_to_person_companion_x=[robot_goal_to_person_companion_x,"<<robot_goal_to_person_companion_.x<<"];\n";
+		fileMatlab << "\n  robot_goal_to_person_companion_y=[robot_goal_to_person_companion_y,"<<robot_goal_to_person_companion_.y<<"];\n";
+		fileMatlab << "\n  robot_path_goal_x=[robot_path_goal_x,"<<robot_path_goal_.x<<"];\n";
+		fileMatlab << "\n  robot_path_goal_y=[robot_path_goal_y,"<<robot_path_goal_.y<<"];\n";
+		fileMatlab << "\n  final_combined_goal_x=[final_combined_goal_x,"<<final_combined_goal_.x<<"];\n";
+		fileMatlab << "\n  final_combined_goal_y=[final_combined_goal_y,"<<final_combined_goal_.y<<"];\n";
+
+
+		fileMatlab << "\n  person_position_t_4_x=[person_position_t_4_x,"<<person_position_t_4_.x<<"];\n";
+		fileMatlab << "\n  person_position_t_4_y=[person_position_t_4_y,"<<person_position_t_4_.y<<"];\n";
+
+		Spoint goal_person_comp=Spoint(robot_goal_to_person_companion_.x,robot_goal_to_person_companion_.y,robot_goal_to_person_companion_.time_stamp);
+
+		double dist=person_position_t_4_.distance(goal_person_comp);
+		fileMatlab << "\n  distance_between_goal_person_comp_and_person_t4=[distance_between_goal_person_comp_and_person_t4,"<<dist<<"];\n";
+		double angle=calculate_actual_angle_person_robot(person_position_t_4_, goal_person_comp);
+		fileMatlab << "\n  angle_between_goal_person_comp_and_person_t4=[angle_between_goal_person_comp_and_person_t4,"<<angle<<"];\n";
+
+		Spoint goal_path=Spoint(robot_path_goal_.x,robot_path_goal_.y,robot_path_goal_.time_stamp);
+		dist=person_position_t_4_.distance(goal_path);
+		fileMatlab << "\n  distance_between_goal_path_and_person_t4=[distance_between_goal_path_and_person_t4,"<<dist<<"];\n";
+		angle=calculate_actual_angle_person_robot(person_position_t_4_, goal_path);
+		fileMatlab << "\n  angle_between_goal_path_and_person_t4=[angle_between_goal_path_and_person_t4,"<<angle<<"];\n";
+
+		Spoint final_combined_goal=Spoint(final_combined_goal_.x,final_combined_goal_.y,final_combined_goal_.time_stamp);
+		dist=person_position_t_4_.distance(final_combined_goal);
+		fileMatlab << "\n  distance_between_final_combined_goal_and_person_t4=[distance_between_final_combined_goal_and_person_t4,"<<dist<<"];\n";
+		angle=calculate_actual_angle_person_robot(person_position_t_4_, final_combined_goal);
+		fileMatlab << "\n  angle_between_final_combined_goal_and_person_t4=[angle_between_final_combined_goal_and_person_t4,"<<angle<<"];\n";
+
+
+		fileMatlab << "\n  next_angle_companion=[next_angle_companion,"<<next_companion_angle_save_<<"];\n";
+		fileMatlab << "\n  actual_angle_companion=[actual_angle_companion,"<<before_act_companion_angle_<<"];\n";
+
+
+		SpointV_cov robot_position=robot_->get_current_pointV();
+		fileMatlab << " \n%  obstacles: \n";
+		fileMatlab << "\n  obstacles_x=[];\n";
+		fileMatlab << "\n  obstacles_y=[];\n";
+		double d_ini=0;
+
+		for( auto iit: laser_obstacle_list_ )
+		{
+			//d_ini = iit.distance2( robot_position );
+		    d_ini = iit.distance( robot_position );
+
+		    //std::cout << " radii_2= "<< radii_2<< " d_ini="<<d_ini << std::endl;
+
+		    //if( d_ini < radii_2  )
+		    if( d_ini < 5  )
+		    {
+		    	//number_of_obstacles++;
+		    	if(debug_file_evaluate_costs_){
+		    		std::cout <<" obstacle["<<iter<<"]=> x="<<iit.x<<"; y="<<iit.y<< std::endl;
+		    	}
+		    	fileMatlab << "\n  obstacles_x=[obstacles_x,"<<iit.x<<"];\n";
+		    	fileMatlab << "\n  obstacles_y=[obstacles_y,"<<iit.y<<"];\n";
+		    }
+		    /*if ( d_ini < d_min )
+		    	d_min = d_ini;*/
+		}
+
+
+	}
+
+}
+
+
+
+void Cplan_local_nav_person_companion::evaluate_costs_printToMatlab(Crobot* actual_robot)
+{
+	std::ofstream fileMatlab;
+	fileMatlab.open (evaluate_costs_file_.c_str(), std::ofstream::out | std::ofstream::app);
+
+
+    //fileMatlab << " clc,\n clear all,\n close all \n\n\n";
+
+	/*if(real_angle_person_robot_<100){ // todo: provisional, ja que al pasarme de 180 guardo mal el real angle sin querer, hago mal el cambio de grados.
+		real_angle_person_robot_=180;
+	}*/
+	double iter=iter_act_multiple_paths_and_best_path_.iter_act;
+
+	SpointV_cov robot_position=actual_robot->get_current_pointV();
+    // Algorithm Params
+	fileMatlab << " \n \n \n % New iteration! \n";
+
+	if(debug_file_evaluate_costs_){
+		std::cout <<" \n \n \n % New iteration!  "<< std::endl;
+	}
+
+	fileMatlab << "\n  iter_act="<<iter<<";\n";
+
+	fileMatlab << " \n % Guardamos el local_goal_actual \n";
+	fileMatlab << "\n  local_goal_x="<<local_goal_.x<<";\n";
+	fileMatlab << "\n  local_goal_y="<<local_goal_.y<<";\n";
+
+
+	fileMatlab << " \n%  robot_point: \n";
+	fileMatlab << "\n  robot_position_x="<<robot_position.x<<";\n";
+	fileMatlab << "\n  robot_position_y="<<robot_position.y<<";\n";
+	fileMatlab << "\n  robot_position_vx="<<robot_position.vx<<";\n";
+	fileMatlab << "\n  robot_position_vy="<<robot_position.vy<<";\n";
+	fileMatlab << "\n  robot_position_v="<<robot_initial_pose_.v<<";\n";
+	fileMatlab << "\n  robot_position_w="<<robot_initial_pose_.w<<";\n";
+	fileMatlab << "\n  robot_position_theta="<<robot_initial_pose_.theta<<";\n";
+
+	fileMatlab << " \n%  person position: \n";
+	fileMatlab << "\n  person_position_x="<<companion_person_position_.x<<";\n";
+	fileMatlab << "\n  person_position_y="<<companion_person_position_.y<<";\n";
+	fileMatlab << "\n  person_position_vx="<<companion_person_position_.vx<<";\n";
+	fileMatlab << "\n  person_position_vy="<<companion_person_position_.vy<<";\n";
+	fileMatlab << "\n  person_position_theta="<<orientacion_persona_actual_<<";\n";
+	fileMatlab << "\n  person_position_x_ant_to_calc_theta="<<person_x_ant_<<";\n";
+	fileMatlab << "\n  person_position_y_ant_to_calc_theta="<<person_y_ant_<<";\n";
+
+	// TODO: ver si guardo el final cost the cada path en cada itracion.
+
+	fileMatlab << " \n%  obstacles: \n";
+	fileMatlab << "\n  obstacles_x=[];\n";
+	fileMatlab << "\n  obstacles_y=[];\n";
+	double d_ini=0;
+
+	    for( auto iit: laser_obstacle_list_ )
+	    {
+	    	//d_ini = iit.distance2( robot_position );
+	    	d_ini = iit.distance( robot_position );
+
+	    	//std::cout << " radii_2= "<< radii_2<< " d_ini="<<d_ini << std::endl;
+
+	    	//if( d_ini < radii_2  )
+	    	if( d_ini < 5  )
+	    	{
+	    		//number_of_obstacles++;
+	    		if(debug_file_evaluate_costs_){
+	    			std::cout <<" obstacle["<<iter<<"]=> x="<<iit.x<<"; y="<<iit.y<< std::endl;
+	    		}
+	    		fileMatlab << "\n  obstacles_x=[obstacles_x,"<<iit.x<<"];\n";
+	    		fileMatlab << "\n  obstacles_y=[obstacles_y,"<<iit.y<<"];\n";
+	    	}
+	    	/*if ( d_ini < d_min )
+	    		d_min = d_ini;*/
+	    }
+
+
+	std::cout <<" \n  "<< std::endl;
+	fileMatlab << "\n time=[];\n";
+	fileMatlab << "\n iter=[];\n";
+	fileMatlab << "\n num_of_total_paths=[];\n";
+
+	fileMatlab << "\n time=[time,"<<iter_act_multiple_paths_and_best_path_.time_act<<"];\n";
+
+	if(debug_file_evaluate_costs_){
+		std::cout <<" \n time="<<iter_act_multiple_paths_and_best_path_.time_act<< std::endl;
+	}
+	fileMatlab << " iter=[iter,"<<iter_act_multiple_paths_and_best_path_.iter_act<<"];\n";
+
+	if(debug_file_evaluate_costs_){
+		std::cout <<" iter="<<iter_act_multiple_paths_and_best_path_.iter_act<< std::endl;
+	}
+
+	fileMatlab << " num_of_total_paths=[num_of_total_paths,"<<iter_act_multiple_paths_and_best_path_.number_of_total_paths<<"];\n";
+
+	if(debug_file_evaluate_costs_){
+		std::cout << " num_of_total_paths="<<iter_act_multiple_paths_and_best_path_.number_of_total_paths<<std::endl;
+	}
+
+	fileMatlab << " mean=[];\n";
+	fileMatlab << " stds=[];\n";
+	fileMatlab << " \n % means of costs: mean_distance_[0]; mean_orientation_[1]; mean_robot_[2]; mean_int_forces_[3]; mean_obstacles_[4]; mean_companion_[5]; ant_traj[6]; \n";
+
+	if(debug_file_evaluate_costs_){
+		std::cout  << " \n % means of costs: mean_distance_[0]; mean_orientation_[1]; mean_robot_[2]; mean_int_forces_[3]; mean_obstacles_[4]; mean_companion_[5]; ant_traj[6]; \n"<<std::endl;
+	}
+
+	for(unsigned int i=0; i<iter_act_multiple_paths_and_best_path_.means.size(); i++){
+		fileMatlab << " mean=[mean,"<<iter_act_multiple_paths_and_best_path_.means[i]<<"];\n";
+
+		if(debug_file_evaluate_costs_){std::cout << " mean["<<iter<<"]="<<iter_act_multiple_paths_and_best_path_.means[i]<<std::endl;}
+
+	}
+
+	fileMatlab << " \n % stds of costs: \n";
+	if(debug_file_evaluate_costs_){std::cout << " \n % stds of costs: \n"<<std::endl;}
+	for(unsigned int i=0; i<iter_act_multiple_paths_and_best_path_.stds.size(); i++){
+		fileMatlab << " stds=[stds,"<<iter_act_multiple_paths_and_best_path_.stds[i]<<"];\n";
+		if(debug_file_evaluate_costs_){std::cout << " stds["<<iter<<"]="<<iter_act_multiple_paths_and_best_path_.stds[i]<<std::endl;}
+	}
+
+	fileMatlab << " \n \n % nondominated paths: \n";
+	if(debug_file_evaluate_costs_){std::cout << " \n % nondominated paths: \n iter_act_multiple_paths_and_best_path_.nondominated_paths.size()="<<iter_act_multiple_paths_and_best_path_.nondominated_paths.size()<<std::endl;}
+
+	std::vector<SsavePath_cost_and_values> act_nondominated_paths=iter_act_multiple_paths_and_best_path_.get_nondominated_paths();
+	if(debug_file_evaluate_costs_){std::cout << " \n % nondominated paths: \n act_nondominated_paths.size()="<<act_nondominated_paths.size()<<std::endl;}
+	fileMatlab << "end_id_nondominated_paths=[];\n";
+
+	for(unsigned int l=0; l<iter_act_multiple_paths_and_best_path_.nondominated_paths.size(); l++){
+		fileMatlab << "end_id_nondominated_paths=[end_id_nondominated_paths,"<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].end_id_path<<"];\n";
+		if(debug_file_evaluate_costs_){std::cout << "end_id_nondominated_paths["<<iter<<"][=l_"<<l<<"]="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].end_id_path<<std::endl;}
+
+		fileMatlab << "id_node_l_"<<l<<"=[];\n";
+		fileMatlab << "path_pose_l_"<<l<<"_x=[];\n";
+		fileMatlab << "path_pose_l_"<<l<<"_y=[];\n";
+		fileMatlab << "costs_l_"<<l<<"=[];\n";
+
+		for(unsigned int j=0; j<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].all_ids_path_positions.size(); j++){
+			fileMatlab << "id_node_l_"<<l<<"=[id_node_l_"<<l<<","<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].all_ids_path_positions[j]<<"];\n";
+			if(debug_file_evaluate_costs_){std::cout << "id_node["<<iter<<"]_[l="<<l<<"]="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].all_ids_path_positions[j]<<std::endl;}
+		//}
+
+		//for(unsigned int j=0; j<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].path_positions.size(); j++){
+			fileMatlab << "path_pose_l_"<<l<<"_x=[path_pose_l_"<<l<<"_x,"<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].path_positions[j].x<<"];\n";
+			fileMatlab << "path_pose_l_"<<l<<"_y=[path_pose_l_"<<l<<"_y,"<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].path_positions[j].y<<"];\n";
+			if(debug_file_evaluate_costs_){std::cout <<  "path_pose["<<iter<<"]_[l="<<l<<"]_x="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].path_positions[j].x<<std::endl;
+			std::cout <<  "path_pose["<<iter<<"]_[l="<<l<<"]_y="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].path_positions[j].y<<std::endl;}
+		//}
+
+			fileMatlab << "% costs: distance_cost[0]; orientation_cost[1]; contro_cost[2]; other_persons_cost[3]; obstacles_cost[4]; companion_cost[5] total_cost[6] ant_traj_cost[7] \n";
+			if(debug_file_evaluate_costs_){std::cout <<"% costs: distance_cost[0]; orientation_cost[1]; contro_cost[2]; other_persons_cost[3]; obstacles_cost[4]; companion_cost[5] total_cost[6] ant_traj_cost[7] \n"<<std::endl;}
+
+			//std::cout <<"% iter_act_multiple_paths_and_best_path_.nondominated_paths[l].all_ids_path_positions.size()="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].all_ids_path_positions.size()<<std::endl;
+			//std::cout <<"% iter_act_multiple_paths_and_best_path_.nondominated_paths[i].path_positions.size()="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].path_positions.size()<<std::endl;
+			//std::cout <<"% iter_act_multiple_paths_and_best_path_.nondominated_paths[i].total_costs_of_each_path_position.size()="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].total_costs_of_each_path_position.size()<<std::endl;
+			//std::cout <<"% k=iter_act_multiple_paths_and_best_path_.nondominated_paths[l].total_costs_of_each_path_position[j].size()="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].total_costs_of_each_path_position[j].size()<<std::endl;
+
+		//for(unsigned int j=0; j<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].total_costs_of_each_path_position.size(); j++){
+			fileMatlab << "costs_act=[];\n";
+			for(unsigned int k=0; k<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].total_costs_of_each_path_position[j].size(); k++){
+				//std::cout << "k="<<k<<std::endl;
+				fileMatlab << "costs_act=[costs_act,"<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].total_costs_of_each_path_position[j][k]<<"];\n";
+				if(debug_file_evaluate_costs_){std::cout << "costs["<<iter<<"]_[l="<<l<<"][j="<<j<<"][k="<<k<<"]="<<iter_act_multiple_paths_and_best_path_.nondominated_paths[l].total_costs_of_each_path_position[j][k]<<std::endl;}
+
+			}
+			fileMatlab << "costs_l_"<<l<<"=[costs_l_"<<l<<";costs_act];\n";
+
+			fileMatlab << "\n";
+			if(debug_file_evaluate_costs_){std::cout<<std::endl;}
+		}
+		fileMatlab << "\n \n";
+		if(debug_file_evaluate_costs_){std::cout<<std::endl<<std::endl;}
+	}
+	if(debug_file_evaluate_costs_){std::cout<<std::endl;}
+
+	fileMatlab << " \n % best path: \n";
+	fileMatlab << "end_id_best_path="<<iter_act_multiple_paths_and_best_path_.best_path.end_id_path<<";\n";
+	if(debug_file_evaluate_costs_){std::cout << "end_id_best_path["<<iter<<"]="<<iter_act_multiple_paths_and_best_path_.best_path.end_id_path<<std::endl;}
+
+	fileMatlab << "best_path_id_nodes=[];\n";
+	fileMatlab << "best_path_pose_x=[];\n";
+	fileMatlab << "best_path_pose_y=[];\n";
+
+	fileMatlab << "best_path_id_nodes=[];\n";
+	fileMatlab << "best_path_pose_x=[];\n";
+	fileMatlab << "best_path_pose_y=[];\n";
+	fileMatlab << "best_costs=[];\n";
+
+
+	for(unsigned int j=0; j<iter_act_multiple_paths_and_best_path_.best_path.all_ids_path_positions.size(); j++){
+		fileMatlab << "best_path_id_nodes=[best_path_id_nodes,"<<iter_act_multiple_paths_and_best_path_.best_path.all_ids_path_positions[j]<<"];\n";
+		if(debug_file_evaluate_costs_){std::cout << "best_path_id_nodes["<<iter<<"]_[j="<<j<<"]="<<iter_act_multiple_paths_and_best_path_.best_path.all_ids_path_positions[j]<<std::endl;}
+	//}
+
+	//for(unsigned int j=0; j<iter_act_multiple_paths_and_best_path_.best_path.path_positions.size(); j++){
+		fileMatlab << "best_path_pose_x=[best_path_pose_x,"<<iter_act_multiple_paths_and_best_path_.best_path.path_positions[j].x<<"];\n";
+		fileMatlab << "best_path_pose_y=[best_path_pose_y,"<<iter_act_multiple_paths_and_best_path_.best_path.path_positions[j].y<<"];\n";
+		if(debug_file_evaluate_costs_){std::cout << "best_path_pose["<<iter<<"]_[j="<<j<<"]_x="<<iter_act_multiple_paths_and_best_path_.best_path.path_positions[j].x<<std::endl;
+		std::cout << "best_path_pose["<<iter<<"]_[j="<<j<<"]_y="<<iter_act_multiple_paths_and_best_path_.best_path.path_positions[j].y<<std::endl;}
+
+	//}
+		//for(unsigned int j=0; j<iter_act_multiple_paths_and_best_path_.best_path.total_costs_of_each_path_position.size(); j++){
+		fileMatlab << "% costs: distance_cost[0]; orientation_cost[1]; contro_cost[2]; other_persons_cost[3]; obstacles_cost[4]; companion_cost[5] total_cost[6] ant_traj_cost[7] \n";
+		if(debug_file_evaluate_costs_){std::cout << "% costs: distance_cost[0]; orientation_cost[1]; contro_cost[2]; other_persons_cost[3]; obstacles_cost[4]; companion_cost[5] total_cost[6] ant_traj_cost[7] \n"<<std::endl;}
+
+		fileMatlab << "costs_act=[];\n";
+		for(unsigned int k=0; k<iter_act_multiple_paths_and_best_path_.best_path.total_costs_of_each_path_position[j].size(); k++){
+			fileMatlab << "costs_act=[costs_act,"<<iter_act_multiple_paths_and_best_path_.best_path.total_costs_of_each_path_position[j][k]<<"];\n";
+			if(debug_file_evaluate_costs_){std::cout << "best_costs["<<iter<<"]_[j="<<j<<"][k="<<k<<"]="<<iter_act_multiple_paths_and_best_path_.best_path.total_costs_of_each_path_position[j][k]<<std::endl;}
+		}
+		fileMatlab << "best_costs=[best_costs;costs_act];\n";
+
+	}
+    fileMatlab.close();
+
+    /* Diferentes modos para abrir el fichero!
+      	ios::in 		Abrir para entrada (lectura)
+		ios::out 		Abrir para salida (escritura)
+		ios::binary 	Abre en modo binario
+		ios::ate 		Escoge el final del fichero como posición inicial (si no se dice lo contrario, la posición inicial al abrir el fichero sería el comienzo del fichero)
+		ios::app 		Abrir para añadir (append) al final, sólo utilizable si se ha abierto el fichero exclusivamente para escritura
+		ios::trunc 		Trunca el fichero si existía, borrando to_do su contenido anterior
+     */
+}
+
+
+
+
+
+
+void Cplan_local_nav_person_companion::calculate_intersecction_line_circle(double Xc, double Yc, double radius, double X_ini, double Y_ini, double X_final, double Y_final, double &intersection1, double &intersection2 ){
+
+	double recta_slope=(X_final-X_ini)/(Y_final-Y_ini);
+
+	double a=recta_slope*recta_slope + 1;
+	double b=2*(-Yc+recta_slope*(X_ini-Y_ini*recta_slope-Xc));
+	double c=Yc*Yc - radius*radius + (X_ini-Xc-recta_slope*Y_ini)*(X_ini-Xc-recta_slope*Y_ini);
+
+
+
+	intersection1=(-b + sqrt(b*b - 4*a*c))/(2*a);
+	intersection2=(-b - sqrt(b*b - 4*a*c))/(2*a);
+
+}
+
+
+
+
+
+void Cplan_local_nav_person_companion::robot_trajectory_prediction_for_group_Zanlungo( double new_horizon_time, Sdestination goal_to_predict_pose, unsigned int id_person_comp)
+{
+
+	//std::cout <<  " IN robot_trajectory_prediction_for_group_Zanlungo " << std::endl;
+	unsigned int iteration_act=new_horizon_time/0.2;
+
+	/*for( auto iit : person_list_)
+	{
+		std::cout << " IN robot_group_trajectory_prediction (planning traj size people) iit->size"<<iit->get_planning_trajectory()->size() <<", id=" <<iit->get_id()<< std::endl;
+
+		std::cout <<  " IN robot_group_trajectory_prediction " << std::endl;
+		//if(iit->get_id()!=id_person_companion_){
+			//			 std::cout << " (robot_group_trajectory_prediction) (1) iit->get_prediction_trajectory( )->size()="<<iit->get_prediction_trajectory( )->size()<<"; iit->get_id()=" <<iit->get_id()<<"; iit->desired_vel="<<iit->get_desired_velocity()<<  std::endl;
+		//}
+	}*/
+
+	/*std::cout <<  " IN robot_group_trajectory_prediction " << std::endl;
+				for( auto iit : person_list_)
+				{
+					if(iit->get_id()!=id_person_companion_){
+					 std::cout << " (robot_group_trajectory_prediction) (1) iit->get_prediction_trajectory( )->size()="<<iit->get_prediction_trajectory( )->size()<<"; iit->get_id()=" <<iit->get_id()<<"; iit->desired_vel="<<iit->get_desired_velocity()<<  std::endl;
+					}
+				}*/
+
+	// TOD: de momento igual k en planning akp, se ponen el alpha_ gamma_ y delta:
+	//robot parameters sampling if required
+	//set the random alpha variable, if necessary
+	/*
+	 * actual_person_pposition_prop;
+	 * if( plan_mode_ == F_RRT_GC_alpha )
+	{
+
+		std::uniform_int_distribution<int> sample_behavior( 0 , 2 );
+		double epsilon(0.4);
+		switch( sample_behavior(generator_) )
+		{
+		case 0://robot unaware
+			alpha_ = 1.0+epsilon;gamma_ = 1.0-epsilon;delta_ = 1.0-epsilon;
+			//std::cout << "case 0 :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		case 1://robot aware
+			alpha_ = 1.0-epsilon;gamma_ = 1.0+epsilon;delta_ = 1.0+epsilon;
+			//std::cout << "case 1 :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		case 2://robot balanced
+		default:
+			alpha_ = 1.0;gamma_ = 1.0;delta_ = 1.0;
+			//std::cout << "case 2(default) :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		}
+
+		std::cout << alpha_ << " , " << gamma_ << " , " << delta_ << std::endl;
+	}*/
+
+	alpha_ = 1.0;gamma_ = 1.0;delta_ = 1.0;
+
+	// horizon_time_index_=5. salen 25 iter!!! 25*0.2segs=5segs => si va a 0.8m/s => 4m (ventana de 4m al rededor)
+
+	//std::cout << " Entro en Cprediction_behavior::scene_trajectory_prediction"<< std::endl;
+	//std::cout << " horizon_time_index_="<<horizon_time_index_<<"; person_list_.size()="<<person_list_.size()<<"; read_force_map_success_="<<read_force_map_success_<< std::endl;
+	//std::cout << " read_laser_obstacle_success_="<<read_laser_obstacle_success_<<"; robot_in_the_scene_="<<robot_in_the_scene_<<"; laser_obstacle_list_.empty()="<<laser_obstacle_list_.empty()<< std::endl;
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot;
+	//std::cout <<  " 2 robot_group_trajectory_prediction " << std::endl;
+	/*if(is_act_person_companion_){
+		//std::cout <<  "3 IN robot_group_trajectory_prediction " << std::endl;
+		person_companion_->clear_prediction_trajectory();
+		//std::cout <<  "4 IN robot_group_trajectory_prediction " << std::endl;
+	}else{*/
+		//std::cout <<  "5 IN robot_group_trajectory_prediction " << std::endl;
+		robot_->clear_prediction_trajectory();
+		robot_->clear_prediction_trajectory_onlyV();
+		//std::cout <<  " 6 IN robot_group_trajectory_prediction " << std::endl;
+	//}
+
+
+
+	std::cout <<  "7 IN robot_group_trajectory_prediction " << std::endl;
+
+	for( unsigned int t = 0;  t < iteration_act; ++t)
+	{
+
+		// TODO: calular fuerzas robot respecto a personas y obstaculos y goal.
+		//iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+		//iit->prediction_propagation(dt_, iit->get_force_person() , t);
+		Sforce total_force;
+		//std::cout<<" (1) (Cplan_local_nav robot prediction) t="<<t<< std::endl;
+		Sforce f_goal;
+		Sforce f_int;
+		Sforce f_obs;
+
+		/*if(is_act_person_companion_){
+			//std::cout<<" (2) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+			f_goal=person_companion_->force_goal(goal_to_predict_pose,get_sfm_params(person_companion_),&person_companion_->get_prediction_trajectory_with_target_person()->at(t));
+			//ok, al ser funcion interna del robot
+			//std::cout<<" (3) (Cplan_local_nav_person_companion robot prediction) person_companion_->get_prediction_trajectory_with_target_person().size()"<<person_companion_->get_prediction_trajectory_with_target_person()->size()<< std::endl;
+			//std::cout<<" (3) (Cplan_local_nav_person_companion robot prediction) f_goal.fx="<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<< std::endl;
+
+			f_int = force_persons_int_planning_virtual_companion_person_akp_person_prediction( person_companion_, t); // cambiada por la version para person companion
+
+			//map force, used for simulations
+			//std::cout<<" (4) (Cplan_local_nav_person_companion robot prediction) f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy<< std::endl;
+
+			if( read_force_map_success_ )
+				f_obs = get_force_map(person_companion_->get_prediction_trajectory_with_target_person()->at(t).x, person_companion_->get_prediction_trajectory_with_target_person()->at(t).y);
+			//std::cout<<" (5) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+			Spoint act_dest_robot(goal_to_predict_pose.x,goal_to_predict_pose.y,goal_to_predict_pose.time_stamp);
+
+			//std::cout<<" (6) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			double act_dist_goal_robot=person_companion_->get_current_pointV().distance(act_dest_robot);
+
+			//std::cout<<" (7) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			if(read_laser_obstacle_success_)
+				f_obs = force_objects_laser_int_planning_virtual_robot_propagation( person_companion_, t, act_dist_goal_robot, true ); //ok al usar el robot que le pasas desde fuera.
+
+			//std::cout<<" (8) (Cplan_local_nav_person_companion robot prediction) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+
+		}else{*/
+			//std::cout<<" else (2) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			f_goal=robot_->force_goal(goal_to_predict_pose,get_sfm_params(robot_),&(robot_->get_prediction_trajectory_with_target_person()->at(t)));//&robot_->get_prediction_trajectory_with_target_person()->at(t));
+			//std::cout<<" else (2) (Cplan_local_nav_person_companion robot prediction), f_goal.x="<<f_goal.fx<<", f_goal.fy="<<f_goal.fy<<", robot_->get_prediction_trajectory_with_target_person().size="<<robot_->get_prediction_trajectory_with_target_person()->size()<< std::endl;
+			//std::cout<<" else (3) (Cplan_local_nav_person_companion robot prediction), id_person_comp="<<id_person_comp<< std::endl;
+			f_int = force_persons_int_planning_virtual_robot_prediction( robot_, t, 64.0, Cperson_abstract::Akp_planning, id_person_comp);
+			// Cperson_abstract* center , unsigned int t, double min_dist2=64.0, Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning, unsigned int id_pers_comp_rob=0);
+			//std::cout<<" else (3) (Cplan_local_nav_person_companion robot prediction), f_int.x="<<f_int.fx<<", f_int.fy="<<f_int.fy<< std::endl;
+
+			//map force, used for simulations
+			if( read_force_map_success_ )
+				f_obs = get_force_map(robot_->get_prediction_trajectory_with_target_person()->at(t).x, robot_->get_prediction_trajectory_with_target_person()->at(t).y);
+
+			//std::cout<<" else (4) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			//obstacles due to laser scans. for real environments has priority over map forces
+			Spoint act_dest_robot(goal_to_predict_pose.x,goal_to_predict_pose.y,goal_to_predict_pose.time_stamp);
+
+			//std::cout<<" else (5) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			double act_dist_goal_robot=robot_->get_current_pointV().distance(act_dest_robot);
+
+			//std::cout<<" else (6) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+			if(read_laser_obstacle_success_)
+				f_obs = force_objects_laser_int_planning_virtual_robot_propagation( robot_, t, act_dist_goal_robot, true );
+
+			//std::cout<<" else (7) (Cplan_local_nav_person_companion robot prediction), f_obs.x="<<f_obs.fx<<", f_obs.y="<<f_obs.fy<< std::endl;
+		//}
+
+
+		//std::cout<<" (8) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+		// INICION Limitar fuerza obstaculos cuando hay muchos solapados
+		double fobos_Xmod=sqrt(f_obs.fx*f_obs.fx);
+		double fobos_Ymod=sqrt(f_obs.fy*f_obs.fy);
+		double signo_x;
+		double signo_y;
+
+		if (f_obs.fx > 0){
+			signo_x=1;
+		}else{
+			signo_x=-1;
+		}
+		if (f_obs.fy > 0){
+			signo_y=1;
+		}else{
+			signo_y=-1;
+		}
+		//std::cout<<" (9) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+		if((fobos_Xmod>f_obst_max_x_)||(fobos_Ymod>f_obst_max_y_)){
+			f_obs.fx=signo_x*f_obst_max_x_;
+			f_obs.fy=signo_y*f_obst_max_y_;
+		}
+		//std::cout << "(FINAL FORCE) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+		// FIN Limitar fuerza obstaculos cuando hay muchos solapados
+
+		// todo: mirar si se generan bien para este caso las alpha_ gamma_ y delta_
+		///std::cout<<" (10) alpha_="<<alpha_<<", gamma_="<<gamma_<<", delta_="<<delta_<< std::endl;
+		total_force=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_;  // +f_persongoal*(param)  TODO: para la propagacion usa la f(global!!!), esta hay k incluirle el goal persona en la Sedge_tree_pcomp que le entra.
+
+
+		//std::cout<<" (11) total_force.fx="<<total_force.fx<<"; total_force.fy="<<total_force.fy<<"; f_goal.fx="<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<<"; f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy<< std::endl;
+		/*if(is_act_person_companion_){
+			person_companion_->prediction_propagation(dt_, t, total_force,person_companion_->get_desired_velocity()); // ok, correcto, al ser funcion interna del robot
+		}else{*/
+			double max_person_companion_vel;
+
+			//for( auto iit : person_list_)
+			//{
+				//if(iit->get_id()==id_person_companion_){
+					//max_person_companion_vel=sqrt((iit->get_current_pointV().vx*iit->get_current_pointV().vx)+(iit->get_current_pointV().vy*iit->get_current_pointV().vy));
+					max_person_companion_vel=sqrt((actual_person_Companion_SpointV_.vx*actual_person_Companion_SpointV_.vx)+(actual_person_Companion_SpointV_.vy*actual_person_Companion_SpointV_.vy));
+
+					//std::cout<<" (9.1 actual) max_person_companion_vel="<<max_person_companion_vel<< std::endl;
+					max_person_companion_vel=max_desired_person_Companion_velocity_;//iit->get_desired_velocity();
+					//std::cout<<" (9.2 desired) max_person_companion_vel="<<max_person_companion_vel<< std::endl;
+				//}
+			//}
+			robot_->prediction_propagation(dt_, t, total_force,max_person_companion_vel);
+			//SpointV act_robot_prediction=robot_->get_prediction_trajectory_with_target_person()->back();
+			////////////////////////
+
+				//robot_->prediction_propagation2_only_vel(dt_, t, total_force,distance_person_t_x,distance_person_t_y,vel_person_x,vel_person_y,max_person_companion_vel);
+
+				//SpointV actual_group_point2_v2=robot_->get_propagated_pose_onlyV_trajectory_with_target_person()->at(t);
+				//double act_desired_vel_robot=max_person_companion_vel;//robot_->get_desired_velocity();
+				//SpointV act_robot_pose_with_v_calc=actual_group_point2_v2.propagate2_comp_only_vel(dt_, total_force,act_desired_vel_robot ,distance_person_t_x,distance_person_t_y,vel_person_x,vel_person_y);
+				//SpointV act_robot_pose_with_v_calc2=robot_->get_propagated_pose_onlyV_trajectory_with_target_person()->back();
+
+
+			//}
+			//////////////////////////
+
+		//}
+
+
+		//std::cout<<" (13) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+		//std::cout << " total_force.fx= "<<total_force.fx<< " total_force.fy="<< total_force.fy <<"; robot_predict.x="<<robot_->get_prediction_trajectory_with_target_person()->back().x<<"; robot_prediction.y="<<robot_->get_prediction_trajectory_with_target_person()->back().y<<  std::endl;
+
+	//	std::cout<<" t="<<t<< std::endl;
+	}
+
+	/*if(debug_target_person_goal_){
+		std::cout<<" Cplan_local_nav_person_companion robot prediction) scene_trajectory_prediction!  new_horizon_time="<<new_horizon_time<< std::endl;
+	}*/
+
+
+
+	//std::cout << "Salgo de robot_trajectory_prediction_for_group_Zanlungo; robot_->pred_traj_size="<<robot_->get_prediction_trajectory_with_target_person()->size()<<"; traj.size="<<robot_->get_prediction_trajectory()->size()<< std::endl;
+}
+
+
+
+void Cplan_local_nav_person_companion::robot_group_trajectory_prediction( double new_horizon_time, Sdestination goal_to_predict_pose)
+{
+	//std::cout <<  " IN robot_group_trajectory_prediction " << std::endl;
+
+	/*std::cout <<  " IN robot_group_trajectory_prediction " << std::endl;
+				for( auto iit : person_list_)
+				{
+					if(iit->get_id()!=id_person_companion_){
+					 std::cout << " (robot_group_trajectory_prediction) (1) iit->get_prediction_trajectory( )->size()="<<iit->get_prediction_trajectory( )->size()<<"; iit->get_id()=" <<iit->get_id()<<"; iit->desired_vel="<<iit->get_desired_velocity()<<  std::endl;
+					}
+				}*/
+
+	// TOD: de momento igual k en planning akp, se ponen el alpha_ gamma_ y delta:
+	//robot parameters sampling if required
+	//set the random alpha variable, if necessary
+	/*
+	 * actual_person_pposition_prop;
+	 * if( plan_mode_ == F_RRT_GC_alpha )
+	{
+
+		std::uniform_int_distribution<int> sample_behavior( 0 , 2 );
+		double epsilon(0.4);
+		switch( sample_behavior(generator_) )
+		{
+		case 0://robot unaware
+			alpha_ = 1.0+epsilon;gamma_ = 1.0-epsilon;delta_ = 1.0-epsilon;
+			//std::cout << "case 0 :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		case 1://robot aware
+			alpha_ = 1.0-epsilon;gamma_ = 1.0+epsilon;delta_ = 1.0+epsilon;
+			//std::cout << "case 1 :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		case 2://robot balanced
+		default:
+			alpha_ = 1.0;gamma_ = 1.0;delta_ = 1.0;
+			//std::cout << "case 2(default) :  alpha_="<<alpha_ <<"; gamma_="<<gamma_<<"; delta_"<<delta_<< std::endl;
+			break;
+		}
+
+		std::cout << alpha_ << " , " << gamma_ << " , " << delta_ << std::endl;
+	}*/
+
+	alpha_ = 1.0;gamma_ = 1.0;delta_ = 1.0;
+
+	// horizon_time_index_=5. salen 25 iter!!! 25*0.2segs=5segs => si va a 0.8m/s => 4m (ventana de 4m al rededor)
+
+	//std::cout << " Entro en Cprediction_behavior::scene_trajectory_prediction"<< std::endl;
+	//std::cout << " horizon_time_index_="<<horizon_time_index_<<"; person_list_.size()="<<person_list_.size()<<"; read_force_map_success_="<<read_force_map_success_<< std::endl;
+	//std::cout << " read_laser_obstacle_success_="<<read_laser_obstacle_success_<<"; robot_in_the_scene_="<<robot_in_the_scene_<<"; laser_obstacle_list_.empty()="<<laser_obstacle_list_.empty()<< std::endl;
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot;
+	//std::cout <<  " 2 robot_group_trajectory_prediction " << std::endl;
+	if(is_act_person_companion_){
+		//std::cout <<  "3 IN robot_group_trajectory_prediction " << std::endl;
+		person_companion_->clear_prediction_trajectory();
+		//std::cout <<  "4 IN robot_group_trajectory_prediction " << std::endl;
+	}else{
+		//std::cout <<  "5 IN robot_group_trajectory_prediction " << std::endl;
+		robot_->clear_prediction_trajectory();
+		robot_->clear_prediction_trajectory_onlyV();
+		//std::cout <<  " 6 IN robot_group_trajectory_prediction " << std::endl;
+	}
+
+
+
+	//std::cout <<  "7 IN robot_group_trajectory_prediction " << std::endl;
+
+	for( unsigned int t = 0;  t < new_horizon_time; ++t)
+	{
+
+		// TODO: calular fuerzas robot respecto a personas y obstaculos y goal.
+		//iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+		//iit->prediction_propagation(dt_, iit->get_force_person() , t);
+		Sforce total_force;
+		//std::cout<<" (1) (Cplan_local_nav_person_companion robot prediction) t="<<t<< std::endl;
+		Sforce f_goal;
+		Sforce f_int;
+		Sforce f_obs;
+
+		if(is_act_person_companion_){
+			//std::cout<<" (2) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+			f_goal=person_companion_->force_goal(goal_to_predict_pose,get_sfm_params(person_companion_),&person_companion_->get_prediction_trajectory_with_target_person()->at(t));
+			//ok, al ser funcion interna del robot
+			//std::cout<<" (3) (Cplan_local_nav_person_companion robot prediction) person_companion_->get_prediction_trajectory_with_target_person().size()"<<person_companion_->get_prediction_trajectory_with_target_person()->size()<< std::endl;
+			//std::cout<<" (3) (Cplan_local_nav_person_companion robot prediction) f_goal.fx="<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<< std::endl;
+
+			f_int = force_persons_int_planning_virtual_companion_person_akp_person_prediction( person_companion_, t); // cambiada por la version para person companion
+
+			//map force, used for simulations
+			//std::cout<<" (4) (Cplan_local_nav_person_companion robot prediction) f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy<< std::endl;
+
+			if( read_force_map_success_ )
+				f_obs = get_force_map(person_companion_->get_prediction_trajectory_with_target_person()->at(t).x, person_companion_->get_prediction_trajectory_with_target_person()->at(t).y);
+			//std::cout<<" (5) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+			Spoint act_dest_robot(goal_to_predict_pose.x,goal_to_predict_pose.y,goal_to_predict_pose.time_stamp);
+
+			//std::cout<<" (6) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			double act_dist_goal_robot=person_companion_->get_current_pointV().distance(act_dest_robot);
+
+			//std::cout<<" (7) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			if(read_laser_obstacle_success_)
+				f_obs = force_objects_laser_int_planning_virtual_robot_propagation( person_companion_, t, act_dist_goal_robot, true ); //ok al usar el robot que le pasas desde fuera.
+
+			//std::cout<<" (8) (Cplan_local_nav_person_companion robot prediction) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+
+		}else{
+			//std::cout<<" else (2) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			f_goal=robot_->force_goal(goal_to_predict_pose,get_sfm_params(robot_),&robot_->get_prediction_trajectory_with_target_person()->at(t));
+			//std::cout<<" else (2) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+			f_int = force_persons_int_planning_virtual_robot_prediction( robot_, t);
+			//std::cout<<" else (3) (Cplan_local_nav_person_companion robot prediction) ="<< std::endl;
+
+			//map force, used for simulations
+			if( read_force_map_success_ )
+				f_obs = get_force_map(robot_->get_prediction_trajectory_with_target_person()->at(t).x, robot_->get_prediction_trajectory_with_target_person()->at(t).y);
+
+			//std::cout<<" else (4) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			//obstacles due to laser scans. for real environments has priority over map forces
+			Spoint act_dest_robot(goal_to_predict_pose.x,goal_to_predict_pose.y,goal_to_predict_pose.time_stamp);
+
+			//std::cout<<" else (5) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+			double act_dist_goal_robot=robot_->get_current_pointV().distance(act_dest_robot);
+
+			//std::cout<<" else (6) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+			if(read_laser_obstacle_success_)
+				f_obs = force_objects_laser_int_planning_virtual_robot_propagation( robot_, t, act_dist_goal_robot, true );
+			//std::cout<<" else (7) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+		}
+
+
+		//std::cout<<" (8) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+		// INICION Limitar fuerza obstaculos cuando hay muchos solapados
+		double fobos_Xmod=sqrt(f_obs.fx*f_obs.fx);
+		double fobos_Ymod=sqrt(f_obs.fy*f_obs.fy);
+		double signo_x;
+		double signo_y;
+
+		if (f_obs.fx > 0){
+			signo_x=1;
+		}else{
+			signo_x=-1;
+		}
+		if (f_obs.fy > 0){
+			signo_y=1;
+		}else{
+			signo_y=-1;
+		}
+		//std::cout<<" (9) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+		if((fobos_Xmod>f_obst_max_x_)||(fobos_Ymod>f_obst_max_y_)){
+			f_obs.fx=signo_x*f_obst_max_x_;
+			f_obs.fy=signo_y*f_obst_max_y_;
+		}
+		//std::cout << "(FINAL FORCE) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+		// FIN Limitar fuerza obstaculos cuando hay muchos solapados
+
+		// todo: mirar si se generan bien para este caso las alpha_ gamma_ y delta_
+		//std::cout<<" (10) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+		total_force=f_goal*alpha_ + f_int*gamma_ + f_obs*delta_;  // +f_persongoal*(param)  TODO: para la propagacion usa la f(global!!!), esta hay k incluirle el goal persona en la Sedge_tree_pcomp que le entra.
+
+
+		//std::cout<<" (11) total_force.fx="<<total_force.fx<<"; total_force.fy="<<total_force.fy<<"; f_goal.fx="<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<<"; f_int.fx="<<f_int.fx<<"; f_int.fy="<<f_int.fy<< std::endl;
+		std::cout<<" (9.2 desired) is_act_person_companion_="<<is_act_person_companion_<< std::endl;
+		if(is_act_person_companion_){
+			person_companion_->prediction_propagation(dt_, t, total_force,person_companion_->get_desired_velocity()); // ok, correcto, al ser funcion interna del robot
+		}else{
+			double max_person_companion_vel;
+
+			//for( auto iit : person_list_)
+			//{
+				//if(iit->get_id()==id_person_companion_){
+					//max_person_companion_vel=sqrt((iit->get_current_pointV().vx*iit->get_current_pointV().vx)+(iit->get_current_pointV().vy*iit->get_current_pointV().vy));
+					max_person_companion_vel=sqrt((actual_person_Companion_SpointV_.vx*actual_person_Companion_SpointV_.vx)+(actual_person_Companion_SpointV_.vy*actual_person_Companion_SpointV_.vy));
+
+					//std::cout<<" (9.1 actual) max_person_companion_vel="<<max_person_companion_vel<< std::endl;
+					max_person_companion_vel=max_desired_person_Companion_velocity_;//iit->get_desired_velocity();
+					//std::cout<<" (9.2 desired) max_person_companion_vel="<<max_person_companion_vel<< std::endl;
+				//}
+			//}
+			robot_->prediction_propagation(dt_, t, total_force,max_person_companion_vel);
+			//SpointV act_robot_prediction=robot_->get_prediction_trajectory_with_target_person()->back();
+			////////////////////////
+
+				//robot_->prediction_propagation2_only_vel(dt_, t, total_force,distance_person_t_x,distance_person_t_y,vel_person_x,vel_person_y,max_person_companion_vel);
+
+				//SpointV actual_group_point2_v2=robot_->get_propagated_pose_onlyV_trajectory_with_target_person()->at(t);
+				//double act_desired_vel_robot=max_person_companion_vel;//robot_->get_desired_velocity();
+				//SpointV act_robot_pose_with_v_calc=actual_group_point2_v2.propagate2_comp_only_vel(dt_, total_force,act_desired_vel_robot ,distance_person_t_x,distance_person_t_y,vel_person_x,vel_person_y);
+				//SpointV act_robot_pose_with_v_calc2=robot_->get_propagated_pose_onlyV_trajectory_with_target_person()->back();
+
+
+			//}
+			//////////////////////////
+
+		}
+
+
+		//std::cout<<" (13) (Cplan_local_nav_person_companion robot prediction)"<< std::endl;
+
+		//std::cout << " total_force.fx= "<<total_force.fx<< " total_force.fy="<< total_force.fy <<"; robot_predict.x="<<robot_->get_prediction_trajectory_with_target_person()->back().x<<"; robot_prediction.y="<<robot_->get_prediction_trajectory_with_target_person()->back().y<<  std::endl;
+
+	//	std::cout<<" t="<<t<< std::endl;
+	}
+
+	/*if(debug_target_person_goal_){
+		std::cout<<" Cplan_local_nav_person_companion robot prediction) scene_trajectory_prediction!  new_horizon_time="<<new_horizon_time<< std::endl;
+	}*/
+
+
+
+	//std::cout << "Salgo de scene_trajectory_prediction"<< std::endl;
+}
+
+
+
+
+double Cplan_local_nav_person_companion::calc_person_companion_orientation(){ // return theta person companion in radians!
+
+	if(debug_gazebo_journal2_){
+		std::cout <<"!!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	}
+	/////////////
+	// ini calcular nuevo angulo theta con orientación dirección movimiento persona.
+    Cperson_abstract* person_obj=pointer_to_person_companion_;
+   // Cperson_abstract* person_obj2=second_group_companion_person_obj_;
+
+    Cperson_abstract* final_person_obj;
+    //std::cout <<"2 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+    //bool finded_person=find_person(id_person_companion_ , &person_obj);
+   // find_person(id_person_companion_ , &person_obj);
+    double person_vel;
+    Sdestination person_best_dest;//=person_obj->get_best_dest();
+	SpointV_cov person;
+
+	//Spoint robot_point=robot_->get_current_pointV();
+
+	/*if(Zanlungo_model_){
+
+		if((number_of_group_people_>1)&&(we_have_pointer_to_second_person_)){
+
+			double dist_to_pers1= person_obj->get_current_pointV().distance(robot_point);
+			//double dist_to_pers2= person_obj2->get_current_pointV().distance(robot_point);
+			//std::cout << "  dist_to_pers1="<<dist_to_pers1<<"; dist_to_pers2="<<dist_to_pers2<< std::endl;
+			//if(dist_to_pers1<dist_to_pers2){
+				person=person_obj->get_current_pointV();
+				person_best_dest=person_obj->get_best_dest();
+				person_vel=person_obj->get_current_pointV().v();
+				final_person_obj=person_obj;
+			//}else{
+			///	person=person_obj2->get_current_pointV();
+			//	person_best_dest=person_obj2->get_best_dest();
+			//	person_vel=person_obj2->get_current_pointV().v();
+			//	final_person_obj=person_obj2;
+			//}
+
+
+		}else{
+
+			person= person_obj->get_current_pointV();
+			person_best_dest=person_obj->get_best_dest();
+			person_vel=person_obj->get_current_pointV().v();
+			final_person_obj=person_obj;
+		}
+
+
+
+	}else{*/
+		// para side-by-side:
+		person= person_obj->get_current_pointV();
+		person_best_dest=person_obj->get_best_dest();
+		person_vel=person_obj->get_current_pointV().v();
+		final_person_obj=person_obj;
+	//}
+
+
+    //SpointV_cov person = person_obj->get_current_pointV();
+   // std::cout <<"3 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	double x;
+	double y;
+	double pers_dx;
+	double pers_dy;
+	//double theta_pers;
+	double theta=0;
+	//std::cout <<"4!!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+
+
+	if(debug_gazebo_journal2_){
+		std::cout <<"(best person destination) person_best_dest.x"<<person_best_dest.x<<"; person_best_dest.y="<<person_best_dest.y<< std::endl;
+		//std::cout <<"(center person robot) center_of_the_group_.x"<<center_of_the_group_.x<<"; center_of_the_group_.y="<<center_of_the_group_.y<< std::endl;
+	}
+
+bool use_before_theta=false;
+
+
+	if(person_vel<threshold_min_vel_person_to_obtain_destination_){ //actual_current_person_comp_point.v()<threshold_min_vel_person_to_obtain_destination_
+
+		if(debug_gazebo_journal2_){
+			std::cout <<"(in) threshold_min_vel_person_to_obtain_destination_="<<threshold_min_vel_person_to_obtain_destination_<<" person_vel="<<person_vel<< std::endl;
+		}
+		//pers_dx=sqrt(person_obj->get_current_pointV().vx*person_obj->get_current_pointV().vx);
+		//pers_dy=sqrt(person_obj->get_current_pointV().vy*person_obj->get_current_pointV().vy);
+		// ASUMO QUE LA ORIENTACION DEL ROBOT ES LA BUENA, CUANDO PERSON COMPANION VELOCITY==0!!! (	NO HAY FORMA MEJOR SIN SABER LA ORIENTACION REAL.)
+		//if(debug_correct_angle_person_init_robot2_){std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;}
+		//theta_pers=last_good_theta_person_;
+
+
+		theta=last_good_theta_person_;
+		//if(debug_gazebo_journal2_){
+		//	std::cout <<"person_obj->get_current_pointV().v()"<<final_person_obj->get_current_pointV().v()<<"; threshold_min_vel="<<threshold_min_vel_person_to_obtain_destination_<< std::endl;
+		//	std::cout <<"theta (robot_theta)"<<theta*180/3.14<< std::endl;
+		//}
+
+		use_before_theta=true;
+
+	}else{
+		if(debug_gazebo_journal2_){
+			std::cout <<"(in else) threshold_min_vel_person_to_obtain_destination_="<<threshold_min_vel_person_to_obtain_destination_<< std::endl;
+		}
+
+
+		//pers_dx=person.x-x;
+		//pers_dy=person.y-y;
+		if((final_person_obj->get_best_dest().x==person.x)&&(final_person_obj->get_best_dest().y==person.y)){
+			//x=final_person_obj->get_past_trajectory()->at(0).x;
+			//y=final_person_obj->get_past_trajectory()->at(0).y;
+			if(final_person_obj->get_past_trajectory()->size()>num_steps_orientation_){
+				if(debug_correct_angle_person_init_robot2_){std::cout <<" perso_print_back_traj(size-num_steps_orientation_)="<< std::endl;
+				final_person_obj->get_past_trajectory()->at(final_person_obj->get_past_trajectory()->size()-num_steps_orientation_).print();}
+				x=final_person_obj->get_past_trajectory()->at(final_person_obj->get_past_trajectory()->size()-num_steps_orientation_).x;
+				y=final_person_obj->get_past_trajectory()->at(final_person_obj->get_past_trajectory()->size()-num_steps_orientation_).y;
+			}else{
+				if(debug_correct_angle_person_init_robot2_){std::cout <<" perso_print_back_traj(0)="<< std::endl;
+				final_person_obj->get_past_trajectory()->at(0).print();}
+				x=final_person_obj->get_past_trajectory()->at(0).x;
+				y=final_person_obj->get_past_trajectory()->at(0).y;
+			}
+
+			//if(last_good_theta_person_!=-1000){
+			//	use_before_theta=true;
+			//}
+
+		}else{
+			x=final_person_obj->get_best_dest().x;
+			y=final_person_obj->get_best_dest().y;
+		}
+
+		//x=person_obj->get_prediction_trajectory()->back().x;
+		//y=person_obj->get_prediction_trajectory()->back().y;
+		//std::cout <<" final_person_obj->get_best_dest().x="<<final_person_obj->get_best_dest().x<<"; final_person_obj->get_best_dest().y="<<final_person_obj->get_best_dest().y<<"; person.x="<<person.x<<"; x="<<x<<"; person.y="<<person.y<< std::endl;
+
+		if((final_person_obj->get_best_dest().x==person.x)&&(final_person_obj->get_best_dest().y==person.y)){
+			//std::cout <<" num_steps_orientation_="<<num_steps_orientation_<<"; person.x="<<person.x<<"; person.y="<<person.y<<"; x="<<x<<"; y="<<y<< std::endl;
+			pers_dx=person.x-x;//person_obj->get_current_pointV().vx;
+			pers_dy=person.y-y;//person_obj->get_current_pointV().vy;
+		}else{
+			pers_dx=x-person.x;//person_obj->get_current_pointV().vx;
+			pers_dy=y-person.y;//person_obj->get_current_pointV().vy;
+		}
+
+
+		ori_pers_x_=pers_dx;
+		ori_pers_y_=pers_dy;
+
+
+		if(debug_gazebo_journal2_){
+			std::cout <<"pers_dx="<<pers_dx<<"; pers_dy="<<pers_dy<<"; x="<<x<<"; y="<<y<<"; person.x="<<person.x<<"; person.y="<<person.y<< std::endl;
+		}
+
+		if(debug_correct_angle_person_init_robot2_){std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;}
+		//theta_pers=atan2(pers_dy , pers_dx);
+		theta=atan2(pers_dy , pers_dx);
+		//theta=-1.57;
+		last_good_theta_person_=theta;
+		before_person_comp_goal_=final_person_obj->get_best_dest();
+
+
+		if(use_before_theta){
+			theta=last_good_theta_person_;
+		}
+
+			/*        	    double inc_angle=0;
+			        	    double inc_angle1=0;
+			        		double media_ponderada=0; //media ponderada que pesen más los angulos finales, para que vaya mejor en el giro.
+			        		double media_ponderada2=0; //media ponderada que pesen más los angulos finales, para que vaya mejor en el giro.
+			        	    if(person_obj->get_past_trajectory()->size()>0){
+								//std::cout <<" [INI] media_ponderada="<< std::endl;
+								for(unsigned int f=person_obj->get_past_trajectory()->size()-1; f>0;f--){
+									double x1=person_obj->get_past_trajectory()->at(f).x;
+									double y1=person_obj->get_past_trajectory()->at(f).y;
+									double x2=person_obj->get_past_trajectory()->at(f-1).x;
+									double y2=person_obj->get_past_trajectory()->at(f-1).y;
+
+									double d_X=(x1-x2);
+									double d_Y=(y1-y2);
+									inc_angle=inc_angle+atan2(d_Y , d_X)*f;
+									inc_angle1=inc_angle1+atan2(d_Y , d_X);
+								}
+								media_ponderada=inc_angle/person_obj->get_past_trajectory()->size();
+								media_ponderada2=inc_angle1/person_obj->get_past_trajectory()->size();
+								// std::cout <<" [FIN] media_ponderada="<< media_ponderada*(180/3.14)<< std::endl;
+								// std::cout <<" [FIN] media_ponderada2="<< media_ponderada2*(180/3.14)<< std::endl;
+			        	    }else{
+			        	    	 std::cout <<" caso no contemplado"<< std::endl;
+			        	    }
+
+
+
+			        	    theta=media_ponderada2;
+*/
+			        	  //  std::cout <<"; size="<<person_obj->get_past_trajectory()->size()<<"theta (calc_theta)"<<theta*180/3.14<< std::endl;
+
+
+
+
+
+
+		if(debug_gazebo_journal2_){
+			std::cout <<"person_obj->get_current_pointV().v()"<<person_obj->get_current_pointV().v()<<"; threshold_min_vel="<<threshold_min_vel_person_to_obtain_destination_<< std::endl;
+			std::cout <<"; size="<<person_obj->get_past_trajectory()->size()<<"theta (calc_theta)"<<theta*180/3.14<< std::endl;
+		}
+
+	}
+
+
+	if(theta<0){
+		theta=2*3.14+theta;
+	}
+	if(debug_gazebo_journal2_){
+		std::cout <<"[FINAL theta!!!] theta ="<<theta*180/3.14<< std::endl;
+	}
+	return theta;
+
+////////////////
+
+}
+
+
+
+
+
+double Cplan_local_nav_person_companion::calc_person_companion_orientation_from_outside( SpointV actual_p1_point, Sdestination person_dest, Spose in_robot){ // return theta person companion in radians!
+
+	//if(debug_gazebo_journal2_){
+		//std::cout <<"!!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	//}
+	/////////////
+	// ini calcular nuevo angulo theta con orientación dirección movimiento persona.
+
+    //Cperson_abstract* final_person_obj=person_obj;
+    //std::cout <<"2 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+    //bool finded_person=find_person(id_person_companion_ , &person_obj);
+   // find_person(id_person_companion_ , &person_obj);
+    double person_vel;
+    Sdestination person_best_dest;//=person_obj->get_best_dest();
+	SpointV_cov person;
+
+	//Spoint robot_point=Spoint(in_robot.x,in_robot.y,in_robot.time_stamp);//in_robot->get_current_pointV();
+	// std::cout <<"3 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	//double dist_to_pers1= actual_p1_point.distance(robot_point);
+
+	//std::cout << "  dist_to_pers1="<<dist_to_pers1<<"; dist_to_pers2="<<dist_to_pers2<< std::endl;
+	person=actual_p1_point;
+	// std::cout <<"4 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	person_best_dest=person_dest;
+	// std::cout <<"5 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	person_vel=actual_p1_point.v();
+	// std::cout <<"6 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	//final_person_obj=person_obj;
+
+    //SpointV_cov person = person_obj->get_current_pointV();
+   // std::cout <<"7 !!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+	double x;
+	double y;
+	double pers_dx;
+	double pers_dy;
+	//double theta_pers;
+	double theta=0;
+	//std::cout <<"8!!!!!!!!!!!!!!!INNNNNNNNNNNNNNN!!!!!!!!! calc_person_companion_orientation"<< std::endl;
+
+
+	if(debug_gazebo_journal2_){
+		std::cout <<"(best person destination) person_best_dest.x"<<person_best_dest.x<<"; person_best_dest.y="<<person_best_dest.y<< std::endl;
+		//std::cout <<"(center person robot) center_of_the_group_.x"<<center_of_the_group_.x<<"; center_of_the_group_.y="<<center_of_the_group_.y<< std::endl;
+	}
+
+
+
+
+	if(person_vel<threshold_min_vel_person_to_obtain_destination_){ //actual_current_person_comp_point.v()<threshold_min_vel_person_to_obtain_destination_
+
+		//if(debug_gazebo_journal2_){
+			std::cout <<"(in) threshold_min_vel_person_to_obtain_destination_="<<threshold_min_vel_person_to_obtain_destination_<< std::endl;
+		//}
+		//pers_dx=sqrt(person_obj->get_current_pointV().vx*person_obj->get_current_pointV().vx);
+		//pers_dy=sqrt(person_obj->get_current_pointV().vy*person_obj->get_current_pointV().vy);
+		// ASUMO QUE LA ORIENTACION DEL ROBOT ES LA BUENA, CUANDO PERSON COMPANION VELOCITY==0!!! (	NO HAY FORMA MEJOR SIN SABER LA ORIENTACION REAL.)
+		//if(debug_correct_angle_person_init_robot2_){std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;}
+		//theta_pers=last_good_theta_person_;
+		theta=last_good_theta_person_;
+		if(debug_gazebo_journal2_){
+			//std::cout <<"person_obj->get_current_pointV().v()"<<final_person_obj->get_current_pointV().v()<<"; threshold_min_vel="<<threshold_min_vel_person_to_obtain_destination_<< std::endl;
+			std::cout <<"theta (robot_theta)"<<theta*180/3.14<< std::endl;
+		}
+
+
+
+	}else{
+		//if(debug_gazebo_journal2_){
+			std::cout <<"(in else) threshold_min_vel_person_to_obtain_destination_="<<threshold_min_vel_person_to_obtain_destination_<< std::endl;
+		//}
+
+		/*if(final_person_obj->get_past_trajectory()->size()>num_steps_orientation_){
+			if(debug_correct_angle_person_init_robot2_){std::cout <<" perso_print_back_traj(size-num_steps_orientation_)="<< std::endl;
+			final_person_obj->get_past_trajectory()->at(final_person_obj->get_past_trajectory()->size()-num_steps_orientation_).print();}
+			x=final_person_obj->get_past_trajectory()->at(final_person_obj->get_past_trajectory()->size()-num_steps_orientation_).x;
+			y=final_person_obj->get_past_trajectory()->at(final_person_obj->get_past_trajectory()->size()-num_steps_orientation_).y;
+		}else{
+			if(debug_correct_angle_person_init_robot2_){std::cout <<" perso_print_back_traj(0)="<< std::endl;
+			final_person_obj->get_past_trajectory()->at(0).print();}
+			x=final_person_obj->get_past_trajectory()->at(0).x;
+			y=final_person_obj->get_past_trajectory()->at(0).y;
+		}*/
+		//pers_dx=person.x-x;
+		//pers_dy=person.y-y;
+		x=person_dest.x;
+		y=person_dest.y;
+		//x=person_obj->get_prediction_trajectory()->back().x;
+		//y=person_obj->get_prediction_trajectory()->back().y;
+		pers_dx=x-person.x;//person_obj->get_current_pointV().vx;
+		pers_dy=y-person.y;//person_obj->get_current_pointV().vy;
+
+		ori_pers_x_=pers_dx;
+		ori_pers_y_=pers_dy;
+
+
+		//if(debug_gazebo_journal2_){
+			std::cout <<"pers_dx="<<pers_dx<<"; pers_dy="<<pers_dy<<"; x="<<x<<"; y="<<y<<"; person.x="<<person.x<<"; person.y="<<person.y<< std::endl;
+		//}
+
+		if(debug_correct_angle_person_init_robot2_){std::cout <<" dx="<<pers_dx<<"; dy="<<pers_dy<< std::endl;}
+		//theta_pers=atan2(pers_dy , pers_dx);
+		theta=atan2(pers_dy , pers_dx);
+		//theta=-1.57;
+		last_good_theta_person_=theta;
+
+
+
+			/*        	    double inc_angle=0;
+			        	    double inc_angle1=0;
+			        		double media_ponderada=0; //media ponderada que pesen más los angulos finales, para que vaya mejor en el giro.
+			        		double media_ponderada2=0; //media ponderada que pesen más los angulos finales, para que vaya mejor en el giro.
+			        	    if(person_obj->get_past_trajectory()->size()>0){
+								//std::cout <<" [INI] media_ponderada="<< std::endl;
+								for(unsigned int f=person_obj->get_past_trajectory()->size()-1; f>0;f--){
+									double x1=person_obj->get_past_trajectory()->at(f).x;
+									double y1=person_obj->get_past_trajectory()->at(f).y;
+									double x2=person_obj->get_past_trajectory()->at(f-1).x;
+									double y2=person_obj->get_past_trajectory()->at(f-1).y;
+
+									double d_X=(x1-x2);
+									double d_Y=(y1-y2);
+									inc_angle=inc_angle+atan2(d_Y , d_X)*f;
+									inc_angle1=inc_angle1+atan2(d_Y , d_X);
+								}
+								media_ponderada=inc_angle/person_obj->get_past_trajectory()->size();
+								media_ponderada2=inc_angle1/person_obj->get_past_trajectory()->size();
+								// std::cout <<" [FIN] media_ponderada="<< media_ponderada*(180/3.14)<< std::endl;
+								// std::cout <<" [FIN] media_ponderada2="<< media_ponderada2*(180/3.14)<< std::endl;
+			        	    }else{
+			        	    	 std::cout <<" caso no contemplado"<< std::endl;
+			        	    }
+
+
+
+			        	    theta=media_ponderada2;
+*/
+			        	  //  std::cout <<"; size="<<person_obj->get_past_trajectory()->size()<<"theta (calc_theta)"<<theta*180/3.14<< std::endl;
+
+
+
+
+
+
+		if(debug_gazebo_journal2_){
+			//std::cout <<"person_obj->get_current_pointV().v()"<<person_obj->get_current_pointV().v()<<"; threshold_min_vel="<<threshold_min_vel_person_to_obtain_destination_<< std::endl;
+		//	std::cout <<"; size="<<person_obj->get_past_trajectory()->size()<<"theta (calc_theta)"<<theta*180/3.14<< std::endl;
+		}
+
+	}
+	std::cout <<"1 [FINAL theta!!!] theta ="<<theta*180/3.14<< std::endl;
+
+	if(theta<0){
+		theta=2*3.14+theta;
+	}
+	//if(debug_gazebo_journal2_){
+		std::cout <<"[FINAL theta!!!] theta ="<<theta*180/3.14<< std::endl;
+	//}
+	return theta;
+
+////////////////
+
+}
+
+
+Sdestination Cplan_local_nav_person_companion::calculate_companion_goal_stable_if_person_stop(double in_act_min_companion_angle){
+//////////
+	if(debug_gazebo_journal_){
+		std::cout << " IDEAL FINAL ACT in_act_min_companion_angle="<<in_act_min_companion_angle<< std::endl;
+	}
+
+///  std::cout <<" antes calculo theta 4"<< std::endl;
+
+  double theta=calc_person_companion_orientation();
+  //double theta_pers=theta;
+
+	double act_min_companion_angle=in_act_min_companion_angle;
+
+	//next_companion_angle_save_=act_min_companion_angle;
+
+	//std::cout << "diffangle(theta=100,angle=20)="<<diffangle(100*(3.14/180),20*(3.14/180))<< std::endl;
+	//std::cout << "diffangle(theta=15,angle=160)="<<diffangle(15*(3.14/180),160*(3.14/180))<< std::endl;
+	Cperson_abstract* person_obj1;
+	//bool finded_person=find_person(id_person_companion_ , &person_obj1);
+	find_person(id_person_companion_ , &person_obj1);
+	SpointV_cov person = person_obj1->get_current_pointV();
+	Sdestination person_companion_goal=person_obj1->get_best_dest();
+	Spoint robot=Spoint(initial_robot_spoint_.x,initial_robot_spoint_.y,initial_robot_spoint_.time_stamp);
+
+	SpointV_cov robot_center_traj_ideal_position=person;
+	double angle = atan2(robot.y-person.y,robot.x-person.x);
+
+	if(diffangle(theta,angle)<0){
+		//std::cout << " Entro en diff angle (NEGATIVO), case person goal POSITIVO"<< std::endl;
+		//std::cout << " theta="<<theta*(180/3.14)<<"; angle="<<angle*(180/3.14)<<"; act_min_companion_angle="<<act_min_companion_angle<< std::endl;
+		robot_center_traj_ideal_position.x+=((robot_person_proximity_distance_)/2)*cos(theta+(act_min_companion_angle*(3.14/180)));
+		robot_center_traj_ideal_position.y+=((robot_person_proximity_distance_)/2)*sin(theta+(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.x+=(robot_person_proximity_distance_)*cos(theta+(act_min_companion_angle*(3.14/180)));//1.5*cos(theta+(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.y+=(robot_person_proximity_distance_)*sin(theta+(act_min_companion_angle*(3.14/180)));//1.5*sin(theta+(act_min_companion_angle*(3.14/180)));
+	}else{
+		//std::cout << " Entro en diff angle (POSITIVO), case person goal NEGATIVO"<< std::endl;
+		//std::cout << " theta="<<theta*(180/3.14)<<"; angle="<<angle*(180/3.14)<<"; act_min_companion_angle="<<act_min_companion_angle<<std::endl;
+		robot_center_traj_ideal_position.x+=((robot_person_proximity_distance_)/2)*cos(theta-(act_min_companion_angle*(3.14/180)));
+		robot_center_traj_ideal_position.y+=((robot_person_proximity_distance_)/2)*sin(theta-(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.x+=(robot_person_proximity_distance_)*cos(theta-(act_min_companion_angle*(3.14/180)));//1.5*cos(theta-(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.y+=(robot_person_proximity_distance_)*sin(theta-(act_min_companion_angle*(3.14/180)));//1.5*sin(theta-(act_min_companion_angle*(3.14/180)));
+	}
+	//person_companion_goal_out_=person_companion_goal;
+
+	// INI calcular goal a 90 grados derecha e izquierda, para ver hacia que lado es mejor ir.
+	if(chose_better_side_to_acompani_person_){
+		Sdestination person_companion_goal_positive=Sdestination(0,person.x,person.y,1.0);
+		Sdestination person_companion_goal_negative=Sdestination(0,person.x,person.y,1.0);
+
+		person_companion_goal_positive.x+=(robot_person_proximity_distance_)*cos(theta+(90*(3.14/180)));
+		person_companion_goal_positive.y+=(robot_person_proximity_distance_)*sin(theta+(90*(3.14/180)));
+
+		person_companion_goal_negative.x+=(robot_person_proximity_distance_)*cos(theta-(90*(3.14/180)));
+		person_companion_goal_negative.y+=(robot_person_proximity_distance_)*sin(theta-(90*(3.14/180)));
+
+		// distancia a esa posicion respecto a la del robot actual mallor que cierto margen.
+		double distance_to_side_person_positive=initial_robot_spoint_.distance(Spoint(person_companion_goal_positive.x,person_companion_goal_positive.y,person_companion_goal_positive.time_stamp));
+		double distance_to_side_person_negative=initial_robot_spoint_.distance(Spoint(person_companion_goal_negative.x,person_companion_goal_negative.y,person_companion_goal_negative.time_stamp));
+
+		bool select_side_of_the_person_to_go=false;
+		if((distance_to_side_person_positive>threshold_dintace_select_person_side_to_go_)||(distance_to_side_person_negative>threshold_dintace_select_person_side_to_go_)){
+			select_side_of_the_person_to_go=true;
+			if(debug_select_person_side_to_go_with_more_free_space_){
+				std::cout << " distancia + o - a los 90 grados de la persona > 0.5 m. Miro a ver en que lado de la persona hay más espacio. "<< std::endl;
+				std::cout << " distance_to_side_person_positive= "<< distance_to_side_person_positive << std::endl;
+				std::cout << " distance_to_side_person_negative= "<< distance_to_side_person_negative << std::endl;
+				std::cout << " threshold_dintace_select_person_side_to_go_= "<< threshold_dintace_select_person_side_to_go_ << std::endl;
+
+			}
+		}
+
+		// falta calcular colisiones.
+		if(select_side_of_the_person_to_go){
+			Spoint Spoint_pose_command=Spoint(person_companion_goal_positive.x,person_companion_goal_positive.y);
+			double min_dist_colli_p=check_collision_companion_goal(Spoint_pose_command,0);
+
+			if(debug_select_person_side_to_go_with_more_free_space_){
+				std::cout << " min_dist_colli_p= "<< min_dist_colli_p << std::endl;
+			}
+
+			Spoint_pose_command=Spoint(person_companion_goal_negative.x,person_companion_goal_negative.y);
+			double min_dist_colli_n=check_collision_companion_goal(Spoint_pose_command,0); // ya te da la distancia minima
+
+			if(debug_select_person_side_to_go_with_more_free_space_){
+				std::cout << " min_dist_colli_n= "<< min_dist_colli_n << std::endl;
+				std::cout << " robot_person_companion_distance_= "<< robot_person_companion_distance_ << std::endl;
+			}
+
+			unsigned int case_act=0;
+			if((min_dist_colli_p<robot_person_companion_distance_)&&(min_dist_colli_n==robot_person_companion_distance_)){// hay distancia de colision solo en el caso positivo
+				case_act=1;
+				if(debug_select_person_side_to_go_with_more_free_space_){
+					std::cout << " [case_act=1] min_dist_colli_n= "<< min_dist_colli_n <<"; min_dist_colli_p"<<min_dist_colli_p << std::endl;
+				}
+			}else if((min_dist_colli_n<robot_person_companion_distance_)&&(min_dist_colli_p==robot_person_companion_distance_)){ // hay distancia de colision solo en el caso negativo
+				case_act=2;
+				if(debug_select_person_side_to_go_with_more_free_space_){
+					std::cout << " [case_act=2] min_dist_colli_n= "<< min_dist_colli_n <<"; min_dist_colli_p"<<min_dist_colli_p << std::endl;
+				}
+			}else if((min_dist_colli_p!=robot_person_companion_distance_)&&(min_dist_colli_n!=robot_person_companion_distance_)){ // hay distancia de colision en ambos casos
+				case_act=3;
+			}
+
+			bool reclaculate_goal=false;
+			if((min_dist_colli_n<robot_person_companion_distance_)||(min_dist_colli_p<robot_person_companion_distance_)){
+				reclaculate_goal=true;
+			}
+
+			Cperson_abstract* person_obj;
+			find_person(id_person_companion_ , &person_obj);
+			person = person_obj->get_current_pointV();
+
+			Sdestination person_companion_position;
+			person_companion_position = Sdestination(0, person.x ,person.y,1.0);
+
+			bool robot_goal_positive_bool; // if true is goal positive (+) if false es negative (-)
+
+			switch( case_act)
+			{
+				case 1: //case best the robot_goal_negativo_
+					person_companion_position=person_companion_goal_negative;//.x += (robot_person_proximity_distance_)*cos(theta + angle_companion_*3.14/180);
+					robot_goal_positive_bool=false;
+					if(debug_select_person_side_to_go_with_more_free_space_){
+						std::cout << " [case1](robot_goal_positivo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+					}
+					break;
+				case 2: //case best the robot_goal_positivo_
+					person_companion_position=person_companion_goal_positive;//.x += (robot_person_proximity_distance_)*cos(theta - (angle_companion_*3.14/180));
+					robot_goal_positive_bool=true;
+					if(debug_select_person_side_to_go_with_more_free_space_){
+						std::cout << " [case2](robot_goal_positivo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+					}
+					break;
+				case 3:
+					if(min_dist_colli_n>min_dist_colli_p){ //case best the robot_goal_negativo_
+						person_companion_position=person_companion_goal_negative;
+						robot_goal_positive_bool=false;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " [case_act=3] min_dist_colli_n= "<< min_dist_colli_n <<"; > min_dist_colli_p="<<min_dist_colli_p<< std::endl;
+							std::cout << " [case3](robot_goal_negativo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					}else{ //case best the robot_goal_positivo_
+						robot_goal_positive_bool=true;
+						person_companion_position=person_companion_goal_positive;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " [case_act=3] min_dist_colli_n= "<< min_dist_colli_n <<"; < min_dist_colli_p="<<min_dist_colli_p<< std::endl;
+							std::cout << " [case3](robot_goal_positivo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					}
+
+					break;
+				default:
+				case 0:
+					if(debug_select_person_side_to_go_with_more_free_space_){
+						std::cout << " [case_act=0 or default] min_dist_colli_p= "<< min_dist_colli_p<<"; min_dist_colli_n="<<min_dist_colli_n << std::endl;
+					}
+					// darle el goal al lado de la persona.
+					if( diffangle(theta, angle) < 0 )
+					{
+						//if(debug_select_person_side_to_go_with_more_free_space_){
+						//	std::cout << " (1) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						//	std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						//}
+						person_companion_position=person_companion_goal_positive;
+						robot_goal_positive_bool=true;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " (robot_goal_positivo_) (1) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					 }
+					 else  // es como si hiciera una circunferencia al rededor de la persona. (se intenta poner a un lado o a otro de la persona. segun esos angulos)
+					 {
+						//if(debug_select_person_side_to_go_with_more_free_space_){
+						// 	std::cout << " (2) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						//	std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						//}
+						person_companion_position=person_companion_goal_negative;
+						robot_goal_positive_bool=false;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " (robot_goal_negativo_) (2) (ROBOT GOAL)  person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					  }
+					break;
+				}
+			// cambiar person companion goal por el positivo o negativo respecto al actual act_min_companion_angle que sacamos!
+			if(reclaculate_goal){
+				person_companion_goal=Sdestination(0,person.x,person.y,1.0);
+				if(robot_goal_positive_bool){
+					person_companion_goal.x+=(robot_person_proximity_distance_)*cos(theta+(act_min_companion_angle*(3.14/180)));//1.5*cos(theta+(act_min_companion_angle*(3.14/180)));
+					person_companion_goal.y+=(robot_person_proximity_distance_)*sin(theta+(act_min_companion_angle*(3.14/180)));//1.5*sin(theta+(act_min_companion_angle*(3.14/180)));
+					//std::cout << " [CHANGE PERSON GOAL] Case person goal positive"<< std::endl;
+					//std::cout << " person_companion_goal.x="<<person_companion_goal.x<< std::endl;
+					//std::cout << " person_companion_goal.y="<<person_companion_goal.y<< std::endl;
+				}else{
+					person_companion_goal.x+=(robot_person_proximity_distance_)*cos(theta-(act_min_companion_angle*(3.14/180)));//1.5*cos(theta-(act_min_companion_angle*(3.14/180)));
+					person_companion_goal.y+=(robot_person_proximity_distance_)*sin(theta-(act_min_companion_angle*(3.14/180)));//1.5*sin(theta-(act_min_companion_angle*(3.14/180)));
+					//std::cout << " [CHANGE PERSON GOAL] Case person goal negative"<< std::endl;
+					//std::cout << " person_companion_goal.x="<<person_companion_goal.x<< std::endl;
+					//std::cout << " person_companion_goal.y="<<person_companion_goal.y<< std::endl;
+				}
+			}
+		}
+	}
+	// FIN calcular goal a 90 grados derecha e izquierda, para ver hacia que lado es mejor ir.
+
+
+	if(debug_file_robot_){
+		std::ofstream fileMatlab2;
+		fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+		fileMatlab2 << "% ANTES f_person_goal=robot_->force_goal_near\n";
+		fileMatlab2.close();
+	}
+
+	if(debug_gazebo_journal_){
+		std::cout << " IDEAL FINAL ACT person_companion_goal.x="<<person_companion_goal.x<<" person_companion_goal.y="<<person_companion_goal.y<< std::endl;
+
+	}
+
+	//robot_goal_to_person_companion_=person_companion_goal;
+
+
+	return person_companion_goal;
+
+
+
+
+
+///////////
+}
+
+
+
+
+void Cplan_local_nav_person_companion::fix_angles_to_use_person_prediction_for_the_companion_goal(){
+//////////////// start function fix angles for prediction (vuelta hacia delante)
+
+unsigned int act_index1=0;//BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1];
+unsigned int next_index1=1;//BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-2];
+double act_angle1=orientation_person_robot_angles_with_prediction_of_person_companion_[act_index1];
+double next_angle1=orientation_person_robot_angles_with_prediction_of_person_companion_[next_index1];
+double diff_angle1=act_angle1-next_angle1;
+if(diff_angle1>angle_increment_of_increment_distance_){
+	//caso_vuelta_al_reves=true;
+}
+
+// 2- vuelta del principio al final
+/*  caso_vuelta_al_reves!!!!   */
+//std::cout << " (befor first for) orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1"<<orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1<< std::endl;
+
+for(unsigned int g=0;g<(orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1);g++){
+
+
+
+	unsigned int act_index=0+g;
+	unsigned int next_index=1+g;
+	//std::cout << " act_index"<<act_index<<"; next_index="<<next_index<< std::endl;
+
+	double act_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[act_index];
+	double next_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[next_index];
+
+	if((act_index==0)){
+		act_angle=initial_angle_; // initial angle es el mismo para los dos casos.
+	}
+	/*if(next_angle==0){
+		next_angle=initial_angle_;
+	}*/
+
+	if(debug_angles_){
+		std::cout << " 2 (vuelta hacia delante de INI_angle_act_angle al qur necesitas para pasar.!) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+	}
+
+	if(g==0){
+		act_angle=initial_angle_;
+	}
+
+	//double diff_angle=act_angle-next_angle;
+	double diff_angle=next_angle-act_angle;
+
+	if(debug_angles_){
+		std::cout << "act_angle["<<act_index<<"]="<<act_angle<<"next_angle["<<next_index<<"]"<<next_angle<<"diff_angle=act_angle-next_angle="<<diff_angle<<" > angle_increment_of_increment_distance_="<< angle_increment_of_increment_distance_<<" and diff_angle>0"<< std::endl;
+	}
+
+	if(((diff_angle>(angle_increment_of_increment_distance_)))&&(diff_angle>0)){
+		//std::cout << "ENTRO EN IF !!!"<< std::endl;
+
+		//	std::cout << " (FOR) ANT (!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+		//	std::cout << "  act_angle="<<act_angle<<"; next_angle="<<next_angle<<";  diff_angle="<< diff_angle<< std::endl;
+
+		//	std::cout << "(!!!CASE!!! actual_angle > actual_parent_angle ) act_index="<<act_index<<"; next_index="<<next_index<< std::endl;
+		// CASE 2: actual_angle > actual_parent_angle (aquí no se puede hacer...) Hay que dar vuelta hacia delante.
+
+		if(actual_debug_){
+			std::cout << "if (CASE: salgo de obstaculo)"<< std::endl;
+		}
+
+		//double new_angle=act_angle-(2*angle_increment_of_increment_distance_);
+		double new_angle=act_angle+(angle_increment_of_increment_distance_);
+
+		//if(debug_gazebo_journal_){
+		//	std::cout << "new_angle ["<<next_index<<"]="<<new_angle<< std::endl;
+		//}
+
+		if(new_angle<angle_companion_){
+			orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]=angle_companion_;
+			//std::cout << "if(new_angle<angle_companion_) angle_companion_="<<angle_companion_<< std::endl;
+		}else{
+			orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]=new_angle;
+			//std::cout << "else if(new_angle<angle_companion_)new_angle="<<new_angle<< std::endl;
+		}
+		if(new_angle>180){
+			orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]=180;
+		}
+		if(actual_debug_){
+			std::cout << "(modif) orientation_person_robot_angles_with_prediction_of_person_companion_[next_index="<<next_index<<"]="<<orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]<< std::endl;
+		}
+
+	}else{
+
+		//std::cout << "ENTRO EN ELSE !!!"<< std::endl;
+
+		//	std::cout << " (FOR) (real) next_angle="<<orientation_person_robot_angles_[next_index]<< std::endl;
+
+	}
+
+	//sum_angles_increment=sum_angles_increment+orientation_person_robot_angles_[act_index];
+
+} // fin for vuelta hacia delante
+
+//sum_angles_increment=sum_angles_increment/BEST_path_parent_index_vector_.size();
+//std::cout << " [IMPORTANTE, ver si es diferente en pasillo y obstaculo!!!] sum_angles_increment="<<sum_angles_increment<< std::endl;
+//std::cout << " tercera pasada, ahora mismo no se para que!"<< std::endl;
+// es para mantenerte a 90 grados si decrece tu valor en orientacion!!! Te adelantas demasiado
+//std::cout << " (end first for) orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1"<< std::endl;
+
+// TODO: falta arreglar esta ultima parte!!!
+if(!orientation_person_robot_angles_with_prediction_of_person_companion_.empty()){
+	//std::cout << " in IF 1"<< std::endl;
+	bool we_have_path_collisions=false;
+	//std::cout << " in IF 2"<< std::endl;
+	for(unsigned int g=0;g<(orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1);g++){
+		//std::cout << " in IF3 ;min_distance_collision_vector_from_pred_[g]="<<min_distance_collision_vector_from_pred_[g]<<"; orientation_person_robot_angles_with_prediction_of_person_companion_[g]="<<orientation_person_robot_angles_with_prediction_of_person_companion_[g]<<"; angle_companion_+2*angle_increment_of_increment_distance_="<<angle_companion_+2*angle_increment_of_increment_distance_<<"; angle_increment_of_increment_distance_="<<angle_increment_of_increment_distance_<< std::endl;
+		/*if(debug_angles_){
+			std::cout << " BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]="<<BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]<< std::endl;
+			std::cout << " vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]="<<vector_of_companion_collisions_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]<< std::endl;
+			std::cout << " angle="<<orientation_person_robot_angles_[BEST_path_parent_index_vector_[BEST_path_parent_index_vector_.size()-1-g]]<< std::endl;
+			std::cout << " angle_companion_+2*angle_increment_of_increment_distance_="<<angle_companion_+2*angle_increment_of_increment_distance_<< std::endl;
+		}*/
+		//vector_of_companion_collisions_
+
+		if((min_distance_collision_vector_from_pred_[g]!=100)&&(orientation_person_robot_angles_with_prediction_of_person_companion_[g]>(angle_companion_+2*angle_increment_of_increment_distance_))){
+			//std::cout << " in IF 4"<< std::endl;
+			we_have_path_collisions=true;
+		}
+		//std::cout << " in IF 5"<< std::endl;
+	}
+	//std::cout << " in IF 6"<< std::endl;
+	//if(debug_angles_){
+		//std::cout << " !BEST_path_parent_index_vector_.empty()="<<!BEST_path_parent_index_vector_.empty()<< std::endl;
+		std::cout << " !we_have_path_collisions="<<!we_have_path_collisions<<"; angle_companion_="<<angle_companion_<< std::endl;
+	//}
+
+	double ini_act_angle_out=initial_angle_;
+
+	//if(debug_angles_){
+		std::cout << " ini_act_angle_out="<< ini_act_angle_out<< std::endl;
+	//}
+
+	if((!we_have_path_collisions)&&(ini_act_angle_out>angle_companion_)){
+		for(unsigned int g=0;g<(orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1);g++){
+			unsigned int act_index;//=best_plan_vertex_index_[best_plan_vertex_index_.size()-g];
+
+			unsigned int next_index=g+1;
+			double act_angle;//=orientation_person_robot_angles_[act_index];
+			if(g==0){
+				act_angle=ini_act_angle_out;
+				act_index=0;
+				orientation_person_robot_angles_with_prediction_of_person_companion_[act_index]=ini_act_angle_out;
+			}else{
+				act_angle=orientation_person_robot_angles_with_prediction_of_person_companion_[act_index];
+			}
+
+			double next_angle=act_angle-angle_increment_of_increment_distance_;
+			if(next_angle<angle_companion_){
+				//next_angle=orientation_person_robot_angles_[act_index]-angle_increment_of_increment_distance_;
+				orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]=angle_companion_;
+			}else{
+				orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]=next_angle;
+			}
+
+			if(debug_angles_){
+				std::cout << " act_index="<< act_index<<"; next_index="<<next_index<<"; act_angle="<<act_angle<<"; next_angle="<<next_angle<< std::endl;
+				std::cout << "orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]="<< orientation_person_robot_angles_with_prediction_of_person_companion_[next_index]<< std::endl;
+			}
+
+			act_index=next_index;
+		}
+	}
+}
+
+//std::cout << " (end second for) orientation_person_robot_angles_with_prediction_of_person_companion_.size()-1"<< std::endl;
+/*if(debug_comanion_good_){
+	if(!BEST_path_parent_index_vector_.empty()){
+		for(unsigned int f=0;f<BEST_path_parent_index_vector_.size();f++){
+			std::cout << "(BEST path index) f="<<f<<"; index=" <<BEST_path_parent_index_vector_[f]<< std::endl;
+		}
+	}
+
+	std::cout << "FIN only_angle_in_final_tree_calculate_companion_path_angle_and_cost"<< std::endl;
+}*/
+
+
+
+
+/////////////// end: function fix angles for prediction (vuelta hacia delante)
+
+}
+
+
+
+Sdestination Cplan_local_nav_person_companion::calc_companion_goal_position(){
+
+	//std::cout << " INI!!! calc_companion_goal_position 1 "<< std::endl;
+	//SpointV_cov robot_center_traj_ideal_position=person;
+	SpointV_cov robot=initial_robot_spoint_;
+	SpointV_cov person=initial_person_companion_point_;
+	//std::cout << " 2 INI!!! calc_companion_goal_position 1 "<< std::endl;
+
+	Sdestination person_companion_goal;
+	person_companion_goal=Sdestination(0,person.x,person.y,1.0);
+	//std::cout << " 3 INI!!! calc_companion_goal_position 1 "<< std::endl;
+
+	double angle = atan2(robot.y-person.y,robot.x-person.x); //REAL angle between robot and person.
+	if(angle<0){
+		angle=2*3.14+angle; // obtain a positive angle inside 2*Pi
+	}
+	//std::cout << " 4 INI!!! calc_companion_goal_position 1 "<< std::endl;
+
+	double theta=calc_person_companion_orientation();
+	//std::cout << " 5 INI!!! calc_companion_goal_position 1 "<< std::endl;
+    double act_min_companion_angle;
+	//std::cout << "IN AKP act_min_companion_angle replan_last_step1"<< std::endl;
+
+    if(calc_goal_companion_with_group_path_){
+    	act_min_companion_angle=next_companion_angle_save_; // uso el angulo anterior de companion.
+    }else{
+    	act_min_companion_angle=next_companion_angle_save_;
+    }
+
+   // std::cout << "IN AKP act_min_companion_angle replan_last_step2 ; act_min_companion_angle="<<act_min_companion_angle<<"index="<<index<< std::endl;
+
+	//next_companion_angle_save_=act_min_companion_angle;
+	if(debug_real_test_companion3_){
+		std::cout << "calc_companion_goal_position 1 act_min_companion_angle="<<act_min_companion_angle<< std::endl;
+	}
+
+	//std::cout << "diffangle(theta=100,angle=20)="<<diffangle(100*(3.14/180),20*(3.14/180))<< std::endl;
+	//std::cout << "diffangle(theta=15,angle=160)="<<diffangle(15*(3.14/180),160*(3.14/180))<< std::endl;
+
+	//std::cout << " 777777777777 act_min_companion_angle="<<act_min_companion_angle<<"; theta (orientation_peron_companion)="<<theta*180/3.14<<"; angle(between robot and person)="<<angle*180/3.14<< std::endl;
+	double person_robot_distance_real=robot.distance(person);
+
+	if(((robot_person_proximity_distance_-0.5)<person_robot_distance_real)&&(person_robot_distance_real<(robot_person_proximity_distance_+0.5))){
+		person_robot_distance_real=person_robot_distance_real;
+	}else{
+		person_robot_distance_real=robot_person_proximity_distance_;
+	}
+
+	//std::cout << "calc_companion_goal_position 2"<< std::endl;
+
+	if(diffangle(theta,angle)<0){
+		//std::cout << " Entro en diff angle (NEGATIVO), case person goal POSITIVO"<< std::endl;
+		//std::cout << " theta="<<theta*(180/3.14)<<"; angle="<<angle*(180/3.14)<<"; act_min_companion_angle="<<act_min_companion_angle<< std::endl;
+		//robot_center_traj_ideal_position.x+=((robot_person_proximity_distance_)/2)*cos(theta+(act_min_companion_angle*(3.14/180)));
+		//robot_center_traj_ideal_position.y+=((robot_person_proximity_distance_)/2)*sin(theta+(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.x+=(person_robot_distance_real)*cos(theta+(act_min_companion_angle*(3.14/180)));//1.5*cos(theta+(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.y+=(person_robot_distance_real)*sin(theta+(act_min_companion_angle*(3.14/180)));//1.5*sin(theta+(act_min_companion_angle*(3.14/180)));
+	}else{
+		//std::cout << " Entro en diff angle (POSITIVO), case person goal NEGATIVO"<< std::endl;
+		//std::cout << " theta="<<theta*(180/3.14)<<"; angle="<<angle*(180/3.14)<<"; act_min_companion_angle="<<act_min_companion_angle<<std::endl;
+		//robot_center_traj_ideal_position.x+=((robot_person_proximity_distance_)/2)*cos(theta-(act_min_companion_angle*(3.14/180)));
+		//robot_center_traj_ideal_position.y+=((robot_person_proximity_distance_)/2)*sin(theta-(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.x+=(person_robot_distance_real)*cos(theta-(act_min_companion_angle*(3.14/180)));//1.5*cos(theta-(act_min_companion_angle*(3.14/180)));
+		person_companion_goal.y+=(person_robot_distance_real)*sin(theta-(act_min_companion_angle*(3.14/180)));//1.5*sin(theta-(act_min_companion_angle*(3.14/180)));
+	}
+	//person_companion_goal_out_=person_companion_goal;
+	//std::cout << "calc_companion_goal_position 3"<< std::endl;
+	// INI calcular goal a 90 grados derecha e izquierda, para ver hacia que lado es mejor ir.
+	if(chose_better_side_to_acompani_person_){
+		Sdestination person_companion_goal_positive=Sdestination(0,person.x,person.y,1.0);
+		Sdestination person_companion_goal_negative=Sdestination(0,person.x,person.y,1.0);
+
+		person_companion_goal_positive.x+=(person_robot_distance_real)*cos(theta+(90*(3.14/180)));
+		person_companion_goal_positive.y+=(person_robot_distance_real)*sin(theta+(90*(3.14/180)));
+
+		person_companion_goal_negative.x+=(person_robot_distance_real)*cos(theta-(90*(3.14/180)));
+		person_companion_goal_negative.y+=(person_robot_distance_real)*sin(theta-(90*(3.14/180)));
+
+		// distancia a esa posicion respecto a la del robot actual mallor que cierto margen.
+		double distance_to_side_person_positive=initial_robot_spoint_.distance(Spoint(person_companion_goal_positive.x,person_companion_goal_positive.y,person_companion_goal_positive.time_stamp));
+		double distance_to_side_person_negative=initial_robot_spoint_.distance(Spoint(person_companion_goal_negative.x,person_companion_goal_negative.y,person_companion_goal_negative.time_stamp));
+
+		bool select_side_of_the_person_to_go=false;
+		if((distance_to_side_person_positive>threshold_dintace_select_person_side_to_go_)||(distance_to_side_person_negative>threshold_dintace_select_person_side_to_go_)){
+			select_side_of_the_person_to_go=true;
+			if(debug_select_person_side_to_go_with_more_free_space_){
+				std::cout << " distancia + o - a los 90 grados de la persona > 0.5 m. Miro a ver en que lado de la persona hay más espacio. "<< std::endl;
+				std::cout << " distance_to_side_person_positive= "<< distance_to_side_person_positive << std::endl;
+				std::cout << " distance_to_side_person_negative= "<< distance_to_side_person_negative << std::endl;
+				std::cout << " threshold_dintace_select_person_side_to_go_= "<< threshold_dintace_select_person_side_to_go_ << std::endl;
+
+			}
+		}
+		//std::cout << "calc_companion_goal_position 3"<< std::endl;
+		// falta calcular colisiones.
+		if(select_side_of_the_person_to_go){
+			Spoint Spoint_pose_command=Spoint(person_companion_goal_positive.x,person_companion_goal_positive.y);
+			double min_dist_colli_p=check_collision_companion_goal(Spoint_pose_command,0);
+
+			if(debug_select_person_side_to_go_with_more_free_space_){
+				std::cout << " min_dist_colli_p= "<< min_dist_colli_p << std::endl;
+			}
+
+			Spoint_pose_command=Spoint(person_companion_goal_negative.x,person_companion_goal_negative.y);
+			double min_dist_colli_n=check_collision_companion_goal(Spoint_pose_command,0); // ya te da la distancia minima
+
+			if(debug_select_person_side_to_go_with_more_free_space_){
+				std::cout << " min_dist_colli_n= "<< min_dist_colli_n << std::endl;
+				std::cout << " robot_person_companion_distance_= "<< robot_person_companion_distance_ << std::endl;
+			}
+			//std::cout << "calc_companion_goal_position 4"<< std::endl;
+			unsigned int case_act=0;
+			if((min_dist_colli_p<robot_person_companion_distance_)&&(min_dist_colli_n==robot_person_companion_distance_)){// hay distancia de colision solo en el caso positivo
+				case_act=1;
+				if(debug_select_person_side_to_go_with_more_free_space_){
+					std::cout << " [case_act=1] min_dist_colli_n= "<< min_dist_colli_n <<"; min_dist_colli_p"<<min_dist_colli_p << std::endl;
+				}
+			}else if((min_dist_colli_n<robot_person_companion_distance_)&&(min_dist_colli_p==robot_person_companion_distance_)){ // hay distancia de colision solo en el caso negativo
+				case_act=2;
+				if(debug_select_person_side_to_go_with_more_free_space_){
+					std::cout << " [case_act=2] min_dist_colli_n= "<< min_dist_colli_n <<"; min_dist_colli_p"<<min_dist_colli_p << std::endl;
+				}
+			}else if((min_dist_colli_p!=robot_person_companion_distance_)&&(min_dist_colli_n!=robot_person_companion_distance_)){ // hay distancia de colision en ambos casos
+				case_act=3;
+			}
+			//std::cout << "calc_companion_goal_position 5"<< std::endl;
+			bool reclaculate_goal=false;
+			if((min_dist_colli_n<robot_person_companion_distance_)||(min_dist_colli_p<robot_person_companion_distance_)){
+				reclaculate_goal=true;
+			}
+
+			Cperson_abstract* person_obj;
+			find_person(id_person_companion_ , &person_obj);
+			person = person_obj->get_current_pointV();
+
+			Sdestination person_companion_position;
+			person_companion_position = Sdestination(0, person.x ,person.y,1.0);
+
+			bool robot_goal_positive_bool; // if true is goal positive (+) if false es negative (-)
+			//std::cout << "calc_companion_goal_position 6"<< std::endl;
+			switch( case_act)
+			{
+				case 1: //case best the robot_goal_negativo_
+					//std::cout << "calc_companion_goal_position (case 1)"<< std::endl;
+					person_companion_position=person_companion_goal_negative;//.x += (robot_person_proximity_distance_)*cos(theta + angle_companion_*3.14/180);
+					robot_goal_positive_bool=false;
+					if(debug_select_person_side_to_go_with_more_free_space_){
+						std::cout << " [case1](robot_goal_positivo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+					}
+					break;
+				case 2: //case best the robot_goal_positivo_
+					//std::cout << "calc_companion_goal_position (case 2)"<< std::endl;
+					person_companion_position=person_companion_goal_positive;//.x += (robot_person_proximity_distance_)*cos(theta - (angle_companion_*3.14/180));
+					robot_goal_positive_bool=true;
+					if(debug_select_person_side_to_go_with_more_free_space_){
+						std::cout << " [case2](robot_goal_positivo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+					}
+					break;
+				case 3:
+					//std::cout << "calc_companion_goal_position (case 3)"<< std::endl;
+					if(min_dist_colli_n>min_dist_colli_p){ //case best the robot_goal_negativo_
+						person_companion_position=person_companion_goal_negative;
+						robot_goal_positive_bool=false;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " [case_act=3] min_dist_colli_n= "<< min_dist_colli_n <<"; > min_dist_colli_p="<<min_dist_colli_p<< std::endl;
+							std::cout << " [case3](robot_goal_negativo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					}else{ //case best the robot_goal_positivo_
+						robot_goal_positive_bool=true;
+						person_companion_position=person_companion_goal_positive;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " [case_act=3] min_dist_colli_n= "<< min_dist_colli_n <<"; < min_dist_colli_p="<<min_dist_colli_p<< std::endl;
+							std::cout << " [case3](robot_goal_positivo_) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					}
+
+					break;
+				default:
+				case 0:
+					//std::cout << "calc_companion_goal_position (case 0)"<< std::endl;
+					if(debug_select_person_side_to_go_with_more_free_space_){
+						std::cout << " [case_act=0 or default] min_dist_colli_p= "<< min_dist_colli_p<<"; min_dist_colli_n="<<min_dist_colli_n << std::endl;
+					}
+					// darle el goal al lado de la persona.
+					if( diffangle(theta, angle) < 0 )
+					{
+						//if(debug_select_person_side_to_go_with_more_free_space_){
+						//	std::cout << " (1) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						//	std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						//}
+						person_companion_position=person_companion_goal_positive;
+						robot_goal_positive_bool=true;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " (robot_goal_positivo_) (1) (ROBOT GOAL) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					 }
+					 else  // es como si hiciera una circunferencia al rededor de la persona. (se intenta poner a un lado o a otro de la persona. segun esos angulos)
+					 {
+						//if(debug_select_person_side_to_go_with_more_free_space_){
+						// 	std::cout << " (2) person_companion_position.x=" <<person_companion_position.x<< std::endl;
+						//	std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						//}
+						person_companion_position=person_companion_goal_negative;
+						robot_goal_positive_bool=false;
+						if(debug_select_person_side_to_go_with_more_free_space_){
+							std::cout << " (robot_goal_negativo_) (2) (ROBOT GOAL)  person_companion_position.x=" <<person_companion_position.x<< std::endl;
+							std::cout << " person_companion_position.y=" <<person_companion_position.y<< std::endl;
+						}
+					  }
+					break;
+				}
+			//std::cout << "calc_companion_goal_position 7"<< std::endl;
+			// cambiar person companion goal por el positivo o negativo respecto al actual act_min_companion_angle que sacamos!
+			if(reclaculate_goal){
+				person_companion_goal=Sdestination(0,person.x,person.y,1.0);
+				if(robot_goal_positive_bool){
+					person_companion_goal.x+=(person_robot_distance_real)*cos(theta+(act_min_companion_angle*(3.14/180)));//1.5*cos(theta+(act_min_companion_angle*(3.14/180)));
+					person_companion_goal.y+=(person_robot_distance_real)*sin(theta+(act_min_companion_angle*(3.14/180)));//1.5*sin(theta+(act_min_companion_angle*(3.14/180)));
+					//std::cout << " [CHANGE PERSON GOAL] Case person goal positive"<< std::endl;
+					//std::cout << " person_companion_goal.x="<<person_companion_goal.x<< std::endl;
+					//std::cout << " person_companion_goal.y="<<person_companion_goal.y<< std::endl;
+				}else{
+					person_companion_goal.x+=(person_robot_distance_real)*cos(theta-(act_min_companion_angle*(3.14/180)));//1.5*cos(theta-(act_min_companion_angle*(3.14/180)));
+					person_companion_goal.y+=(person_robot_distance_real)*sin(theta-(act_min_companion_angle*(3.14/180)));//1.5*sin(theta-(act_min_companion_angle*(3.14/180)));
+					//std::cout << " [CHANGE PERSON GOAL] Case person goal negative"<< std::endl;
+					//std::cout << " person_companion_goal.x="<<person_companion_goal.x<< std::endl;
+					//std::cout << " person_companion_goal.y="<<person_companion_goal.y<< std::endl;
+				}
+			}
+		}
+	}
+	// FIN calcular goal a 90 grados derecha e izquierda, para ver hacia que lado es mejor ir. //
+	//std::cout << "calc_companion_goal_position 10"<< std::endl;
+
+	if(debug_file_robot_){
+		std::ofstream fileMatlab2;
+		fileMatlab2.open (debug_file_.c_str(), std::ofstream::out | std::ofstream::app);
+		fileMatlab2 << "% ANTES f_person_goal=robot_->force_goal_near\n";
+		fileMatlab2.close();
+	}
+
+	//robot_goal_to_person_companion_=person_companion_goal;
+
+	return person_companion_goal;
+
+}
+/*
+void Cplan_local_nav_person_companion::find_entity_order_in_the_group(){
+
+	//std::cout << " IN!  find_entity_order_in_the_group  "<< std::endl;
+
+	State2D *Others=new State2D[number_of_group_people_];
+
+
+	Sdestination actual_group_goal=robot_->get_best_dest();//random_goal;;//robot_->get_best_dest();//random_goal;
+
+	//std::cout << " Zanlungo actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<std::endl;
+
+
+	SpointV_cov pose_of_the_robot=robot_->get_current_pointV();
+
+	double robot_actual_time_stamp=robot_->get_current_pointV().time_stamp;
+
+	//std::cout << " Zanlungo 1; pose_of_the_robot.x="<<pose_of_the_robot.x<<"; pose_of_the_robot.y="<<pose_of_the_robot.y<<std::endl;
+	//std::cout << " robot_actual_time_stamp="<<robot_actual_time_stamp<<std::endl;
+
+	Vector2D robot_pose(pose_of_the_robot.vx,pose_of_the_robot.vy,atan(pose_of_the_robot.vy/pose_of_the_robot.vx)); // theta en rads, chec if is ok.
+
+	State2D Self_for_order;
+
+	Self_for_order.Init(pose_of_the_robot.x,pose_of_the_robot.y,pose_of_the_robot.vx,pose_of_the_robot.vy,robot_pose.th);
+
+
+
+	SpointV_cov actual_first_person_companion_point=pointer_to_person_companion_->get_current_pointV();
+
+	State2D first_companion_person(actual_first_person_companion_point.x,actual_first_person_companion_point.y,actual_first_person_companion_point.vx,actual_first_person_companion_point.vy);
+	Vector2D first_companion_person2D(actual_first_person_companion_point.vx,actual_first_person_companion_point.vy,atan(actual_first_person_companion_point.vy/actual_first_person_companion_point.vx));
+
+	Others[0]=first_companion_person;
+
+//std::cout << " robot_->get_planning_trajectory( ).size()="<<robot_->get_planning_trajectory( )->size()<<std::endl;
+
+
+	//std::cout <<"(FIRST) id_person="<<pointer_to_person_companion_->get_id()<< " first_companion_person.r.x="<<first_companion_person.r.x<<"; first_companion_person.r.y="<<first_companion_person.r.y<<std::endl;
+	//std::cout <<"(FIRST) actual_first_person_companion_point.x="<<actual_first_person_companion_point.x<< " actual_first_person_companion_point.y="<<actual_first_person_companion_point.y<<"; actual_first_person_companion_point.vy="<<"; actual_first_person_companion_point.vx="<<actual_first_person_companion_point.vx<<actual_first_person_companion_point.vy<<std::endl;
+
+
+	SpointV_cov actual_second_person_companion_point=SpointV_cov();
+
+	if((we_have_pointer_to_second_person_)&&(number_of_group_people_>1)){
+
+		actual_second_person_companion_point=second_group_companion_person_obj_->get_current_pointV();
+		State2D second_companion_person(actual_second_person_companion_point.x,actual_second_person_companion_point.y,actual_second_person_companion_point.vx,actual_second_person_companion_point.vy);
+		Vector2D second_companion_person2D(actual_second_person_companion_point.vx,actual_second_person_companion_point.vy,atan(actual_second_person_companion_point.vy/actual_second_person_companion_point.vx));
+		Others[1]=second_companion_person;
+		//std::cout <<"(Second) id_person="<<second_group_companion_person_obj_->get_id()<< " second_companion_person.r.x="<<second_companion_person.r.x<<"; second_companion_person.r.y="<<second_companion_person.r.y<<std::endl;
+		//std::cout <<"(Second) actual_second_person_companion_point.x="<<actual_second_person_companion_point.x<< " actual_second_person_companion_point.y="<<actual_second_person_companion_point.y<<"; actual_second_person_companion_point.vx="<<actual_second_person_companion_point.vx<<"; actual_second_person_companion_point.vy="<<actual_second_person_companion_point.vy<<std::endl;
+
+	}
+
+///
+
+	double theta=calc_person_companion_orientation();
+
+	if(theta<0){
+		theta=3.14+theta;
+	}
+
+
+	// Option 3: Calc preferred => using the mean of the position of the robot + the two person and the final goal. (works ok for two people + robot)
+
+	double central_group_x;
+	double central_group_y;
+
+	if(number_of_group_people_<2){
+
+		//std::cout << " solo 1_persona "<<std::endl;
+		central_group_x=(pose_of_the_robot.x + actual_first_person_companion_point.x)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+		central_group_y=(pose_of_the_robot.y + actual_first_person_companion_point.y)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+	}else{
+
+		//std::cout << " 2 _personas "<<std::endl;
+		if(we_have_pointer_to_second_person_){
+			central_group_x=(pose_of_the_robot.x + actual_first_person_companion_point.x+actual_second_person_companion_point.x)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+			central_group_y=(pose_of_the_robot.y + actual_first_person_companion_point.y+actual_second_person_companion_point.y)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+			//std::cout << " central_group_x= "<<central_group_x<<"; central_group_y="<<central_group_y<<std::endl;
+		}
+
+	}
+	//std::cout << " (find_entity_order_in_the_group) out calc center_group; number_of_group_people_= "<<number_of_group_people_<<"we_have_pointer_to_second_person_="<<we_have_pointer_to_second_person_<<std::endl;
+	// Option1: Calc preferred => using the robot position and the position of the Goal tu calculate the orientation.
+	double x_orient_goal;
+	double y_orient_goal;
+	double orient_goal;
+
+	if(number_of_group_people_<2){
+		//std::cout << "IMPORTANTE!!! actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<"; pose_of_the_robot.x="<<pose_of_the_robot.x<<"; pose_of_the_robot.y="<<pose_of_the_robot.y<<std::endl;
+
+		x_orient_goal=actual_group_goal.x-pose_of_the_robot.x;
+		y_orient_goal=actual_group_goal.y-pose_of_the_robot.y;
+		orient_goal=atan(y_orient_goal/x_orient_goal);
+		//std::cout << " x_orient_goal="<<x_orient_goal<<"; y_orient_goal="<<y_orient_goal<<"; orient_goal="<<orient_goal<<std::endl;
+
+	}else{
+
+		if((we_have_pointer_to_second_person_)&&(actual_person_Companion_pointer_->get_current_pointV().v()<0.2)){ // the person is walking, the goal is the final goal.
+			double x,y;
+
+			if(actual_person_Companion_pointer_->get_past_trajectory()->size()>num_steps_orientation_){
+						if(debug_correct_angle_person_init_robot2_){std::cout <<" perso_print_back_traj(size-num_steps_orientation_)="<< std::endl;
+						actual_person_Companion_pointer_->get_past_trajectory()->at(actual_person_Companion_pointer_->get_past_trajectory()->size()-num_steps_orientation_).print();}
+						x=actual_person_Companion_pointer_->get_past_trajectory()->at(actual_person_Companion_pointer_->get_past_trajectory()->size()-num_steps_orientation_).x;
+						y=actual_person_Companion_pointer_->get_past_trajectory()->at(actual_person_Companion_pointer_->get_past_trajectory()->size()-num_steps_orientation_).y;
+						std::cout <<"; size="<<actual_person_Companion_pointer_->get_past_trajectory()->size()<<"; numsteps="<<num_steps_orientation_<<" if => perso_print_back_traj(size-num).x="<<x<<"; y="<<y<< std::endl;
+					}else{
+
+						if(debug_correct_angle_person_init_robot2_){std::cout <<" perso_print_back_traj(0)="<< std::endl;
+						actual_person_Companion_pointer_->get_past_trajectory()->at(0).print();}
+						x=actual_person_Companion_pointer_->get_past_trajectory()->at(0).x;
+						y=actual_person_Companion_pointer_->get_past_trajectory()->at(0).y;
+						std::cout <<" else => perso_print_back_traj(0).x="<<x<<"; y="<<y<< std::endl;
+					}
+
+		//	std::cout << " (V_pers < 0.2) IMPORTANTE!!! actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<"; actual_first_person_companion_point.x="<<actual_first_person_companion_point.x<<"; actual_first_person_companion_point.y="<<actual_first_person_companion_point.y<<std::endl;
+		///	std::cout << " (V_pers < 0.2) IMPORTANTE!!! actual_person_Companion_pointer_->get_past_trajectory()->at(0).x="<<actual_person_Companion_pointer_->get_past_trajectory()->at(0).x<<"; actual_person_Companion_pointer_->get_past_trajectory()->at(0).y="<<actual_person_Companion_pointer_->get_past_trajectory()->at(0).y<<"; actual_first_person_companion_point.x="<<actual_first_person_companion_point.x<<"; actual_first_person_companion_point.y="<<actual_first_person_companion_point.y<<std::endl;
+
+
+
+
+			x_orient_goal= before_person_comp_goal_.x - actual_first_person_companion_point.x;//central_group_x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+			y_orient_goal= before_person_comp_goal_.y - actual_first_person_companion_point.y ;//central_group_y;//actual_first_person_companion_point.vy;//(actual_group_goal.y-central_group_y);
+			orient_goal=atan(y_orient_goal/x_orient_goal);
+
+			//x_orient_goal=actual_group_goal.x- actual_first_person_companion_point.x;//central_group_x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+			//y_orient_goal=actual_group_goal.y- actual_first_person_companion_point.y;//central_group_y;//actual_first_person_companion_point.vy;//(actual_group_goal.y-central_group_y);
+			//orient_goal=atan(y_orient_goal/x_orient_goal);
+
+		}else{ // the person stops, the goal of the robot is stop. the good point to calculate the orientation is the pose of the center of the group and the final goal.
+			//std::cout << " (hay V_pers) IMPORTANTE!!! actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<"; central_group_x="<<central_group_x<<"; central_group_y="<<central_group_y<<std::endl;
+
+			x_orient_goal=actual_group_goal.x-central_group_x;
+			y_orient_goal=actual_group_goal.y-central_group_y;
+			orient_goal=atan(y_orient_goal/x_orient_goal);
+		}
+				//std::cout << " x_orient_goal="<<x_orient_goal<<"; y_orient_goal="<<y_orient_goal<<"; orient_goal="<<orient_goal<<std::endl;
+
+	}
+
+	// Option 2:  Calc preferred => using the mean of the orientations of both people, from they velocities.
+
+
+	//std::cout << " (solo 1 persona) x_orient_goal="<<actual_group_goal.x-pose_of_the_robot.x<<"; y_orient_goal="<<actual_group_goal.y-pose_of_the_robot.y<<"; orient_goal="<<atan((actual_group_goal.y-pose_of_the_robot.y)/(actual_group_goal.x-pose_of_the_robot.x))<<std::endl;
+	//std::cout << " (2 personas) x_orient_goal="<<actual_group_goal.x-central_group_x<<"; y_orient_goal="<<actual_group_goal.y-central_group_y<<"; orient_goal="<<atan((actual_group_goal.y-central_group_y)/(actual_group_goal.x-central_group_x))<<std::endl;
+
+
+	Vector2D preferred(x_orient_goal,y_orient_goal,orient_goal); // is the orientation until the goal of the group.
+
+	if(debug_zanlungo_){
+		std::cout << " Zanlungo model dist.R-P="<<pose_of_the_robot.distance(actual_first_person_companion_point)<<"; preferred.x="<<preferred.x<<"; preferred.y="<<preferred.y<<"; preferred.th="<<preferred.th<<std::endl;
+	}
+	preferred_paths_Zanlungo_.push_back(preferred);
+	// calculate the central point in the group.
+	if(debug_zanlungo_){
+		std::cout << "IMPORTANTE!!! Zanlungo; preferred.x="<<preferred.x<<"; preferred.x.y="<<preferred.y<<"; preferred.th="<<preferred.th<<std::endl;
+	}
+
+	Companion_Zanlungo_Model_.Order_goal(Self_for_order,number_of_group_people_,Others,preferred,order_people_in_group_global_variable_); // order contendrá el orden de los componentes del grupo.
+
+	// std::cout << " OUTH!  find_entity_order_in_the_group  "<< std::endl;
+
+}*/
+
+
+/////////////////////////////
+/*void Cplan_local_nav_person_companion::find_entity_order_in_the_group_for_person_companion(){
+
+	//std::cout << " IN!  find_entity_order_in_the_group  "<< std::endl;
+
+	State2D *Others=new State2D[number_of_group_people_];
+
+	// el robot, que ahora es person_companion_
+
+	Sdestination actual_group_goal=person_companion_->get_best_dest();//random_goal;;//robot_->get_best_dest();//random_goal;
+
+	//std::cout << " Zanlungo actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<std::endl;
+
+
+	SpointV_cov pose_of_the_robot=person_companion_->get_current_pointV();
+
+	double robot_actual_time_stamp=person_companion_->get_current_pointV().time_stamp;
+
+	//std::cout << " Zanlungo 1; pose_of_the_robot.x="<<pose_of_the_robot.x<<"; pose_of_the_robot.y="<<pose_of_the_robot.y<<std::endl;
+	//std::cout << " robot_actual_time_stamp="<<robot_actual_time_stamp<<std::endl;
+
+	Vector2D robot_pose(pose_of_the_robot.vx,pose_of_the_robot.vy,atan(pose_of_the_robot.vy/pose_of_the_robot.vx)); // theta en rads, chec if is ok.
+
+	State2D Self_for_order;
+
+	Self_for_order.Init(pose_of_the_robot.x,pose_of_the_robot.y,pose_of_the_robot.vx,pose_of_the_robot.vy,robot_pose.th);
+
+
+
+	// first person companion: ahora el robot_
+
+	SpointV_cov actual_first_person_companion_point=robot_->get_current_pointV();
+
+	State2D first_companion_person(actual_first_person_companion_point.x,actual_first_person_companion_point.y,actual_first_person_companion_point.vx,actual_first_person_companion_point.vy);
+	Vector2D first_companion_person2D(actual_first_person_companion_point.vx,actual_first_person_companion_point.vy,atan(actual_first_person_companion_point.vy/actual_first_person_companion_point.vx));
+
+	Others[0]=first_companion_person;
+// no uso la trajectoria del robot.
+//std::cout << " robot_->get_planning_trajectory( ).size()="<<person_companion_->get_planning_trajectory( )->size()<<std::endl;
+
+
+	//std::cout <<"(FIRST) id_person="<<robot_->get_id()<< " first_companion_person.r.x="<<first_companion_person.r.x<<"; first_companion_person.r.y="<<first_companion_person.r.y<<std::endl;
+	//std::cout <<"(FIRST) actual_first_person_companion_point.x="<<actual_first_person_companion_point.x<< " actual_first_person_companion_point.y="<<actual_first_person_companion_point.y<<"; actual_first_person_companion_point.vx="<<actual_first_person_companion_point.vx<<"; actual_first_person_companion_point.vy="<<actual_first_person_companion_point.vy<<std::endl;
+
+
+	// second person companion point, ahora la segunda persona que acompaña. creo que este no cambia o es muy similar: second_group_companion_person_obj_
+
+	SpointV_cov actual_second_person_companion_point=SpointV_cov();
+
+	if((we_have_pointer_to_second_person_)&&(number_of_group_people_>1)){
+
+		actual_second_person_companion_point=second_group_companion_person_obj_->get_current_pointV();
+		State2D second_companion_person(actual_second_person_companion_point.x,actual_second_person_companion_point.y,actual_second_person_companion_point.vx,actual_second_person_companion_point.vy);
+		Vector2D second_companion_person2D(actual_second_person_companion_point.vx,actual_second_person_companion_point.vy,atan(actual_second_person_companion_point.vy/actual_second_person_companion_point.vx));
+		Others[1]=second_companion_person;
+		std::cout <<"(Second) id_person="<<second_group_companion_person_obj_->get_id()<< " second_companion_person.r.x="<<second_companion_person.r.x<<"; second_companion_person.r.y="<<second_companion_person.r.y<<std::endl;
+		std::cout <<"(Second) actual_second_person_companion_point.x="<<actual_second_person_companion_point.x<< " actual_second_person_companion_point.y="<<actual_second_person_companion_point.y<<"; actual_second_person_companion_point.vx="<<actual_second_person_companion_point.vx<<"; actual_second_person_companion_point.vy="<<actual_second_person_companion_point.vy<<std::endl;
+
+	}
+
+///
+	// TODO: parece que no uso theta.
+	//double theta=calc_person_companion_orientation(); // TODO: ver si cambia, que creo que si que cambiara, ya que la persona es otra.
+
+	//if(theta<0){
+	//	theta=3.14+theta;
+	//}
+
+
+	// Option 3: Calc preferred => using the mean of the position of the robot + the two person and the final goal. (works ok for two people + robot)
+
+	double central_group_x;
+	double central_group_y;
+
+	if(number_of_group_people_<2){
+		//std::cout << " solo 1_persona "<<std::endl;
+		central_group_x=(pose_of_the_robot.x + actual_first_person_companion_point.x)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+		central_group_y=(pose_of_the_robot.y + actual_first_person_companion_point.y)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+	}else{
+
+		//std::cout << " 2 _personas "<<std::endl;
+		//if(we_have_pointer_to_second_person_){
+		central_group_x=( actual_first_person_companion_point.x+actual_second_person_companion_point.x)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+		central_group_y=( actual_first_person_companion_point.y+actual_second_person_companion_point.y)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+
+
+			//central_group_x=(pose_of_the_robot.x + actual_first_person_companion_point.x+actual_second_person_companion_point.x)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+			//central_group_y=(pose_of_the_robot.y + actual_first_person_companion_point.y+actual_second_person_companion_point.y)/(number_of_group_people_+1);//+actual_second_person_companion_point.x)/(number_of_group_people_+1);
+		//	std::cout << " central_group_x= "<<central_group_x<<"; central_group_y="<<central_group_y<<std::endl;
+		//}
+
+	}
+	//std::cout << " (find_entity_order_in_the_group_for_person_companion) out calc center_group "<<std::endl;
+	// Option1: Calc preferred => using the robot position and the position of the Goal tu calculate the orientation.
+	double x_orient_goal;
+	double y_orient_goal;
+	double orient_goal;
+
+	if(number_of_group_people_<2){
+	//	std::cout << "IMPORTANTE!!! actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<"; pose_of_the_robot.x="<<pose_of_the_robot.x<<"; pose_of_the_robot.y="<<pose_of_the_robot.y<<std::endl;
+
+		x_orient_goal=actual_group_goal.x-pose_of_the_robot.x;
+		y_orient_goal=actual_group_goal.y-pose_of_the_robot.y;
+		orient_goal=atan(y_orient_goal/x_orient_goal);
+	//	std::cout << " x_orient_goal="<<x_orient_goal<<"; y_orient_goal="<<y_orient_goal<<"; orient_goal="<<orient_goal<<std::endl;
+
+	}else{
+		//std::cout << " Else -> if(number_of_group_people_<2)  [find_entity_order_in_the_group_for_person_companion()]"<<std::endl;
+
+		//if(we_have_pointer_to_second_person_){
+		//
+		//}
+
+		if((!we_have_pointer_to_second_person_)&&(actual_person_Companion_pointer_->get_current_pointV().v()<0.1)){ // the person is walking, the goal is the final goal.
+			std::cout << "IMPORTANTE!!! actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<"; actual_first_person_companion_point.x="<<actual_first_person_companion_point.x<<"; actual_first_person_companion_point.y="<<actual_first_person_companion_point.y<<std::endl;
+
+			x_orient_goal=actual_group_goal.x- actual_first_person_companion_point.x;//central_group_x;//actual_first_person_companion_point.vx;//(actual_group_goal.x-central_group_x);
+			y_orient_goal=actual_group_goal.y- actual_first_person_companion_point.y;//central_group_y;//actual_first_person_companion_point.vy;//(actual_group_goal.y-central_group_y);
+			orient_goal=atan(y_orient_goal/x_orient_goal);
+
+		}else{ // the person stops, the goal of the robot is stop. the good point to calculate the orientation is the pose of the center of the group and the final goal.
+		//	std::cout << "IMPORTANTE!!! actual_group_goal.x="<<actual_group_goal.x<<"; actual_group_goal.y="<<actual_group_goal.y<<"; central_group_x="<<central_group_x<<"; central_group_y="<<central_group_y<<std::endl;
+
+			x_orient_goal=actual_group_goal.x-central_group_x;
+			y_orient_goal=actual_group_goal.y-central_group_y;
+			orient_goal=atan(y_orient_goal/x_orient_goal);
+		}
+				//std::cout << " x_orient_goal="<<x_orient_goal<<"; y_orient_goal="<<y_orient_goal<<"; orient_goal="<<orient_goal<<std::endl;
+
+	}
+
+	// Option 2:  Calc preferred => using the mean of the orientations of both people, from they velocities.
+
+
+	//std::cout << " (solo 1 persona) x_orient_goal="<<actual_group_goal.x-pose_of_the_robot.x<<"; y_orient_goal="<<actual_group_goal.y-pose_of_the_robot.y<<"; orient_goal="<<atan((actual_group_goal.y-pose_of_the_robot.y)/(actual_group_goal.x-pose_of_the_robot.x))<<std::endl;
+	//std::cout << " (2 personas) x_orient_goal="<<actual_group_goal.x-central_group_x<<"; y_orient_goal="<<actual_group_goal.y-central_group_y<<"; orient_goal="<<atan((actual_group_goal.y-central_group_y)/(actual_group_goal.x-central_group_x))<<std::endl;
+
+
+	Vector2D preferred(x_orient_goal,y_orient_goal,orient_goal); // is the orientation until the goal of the group.
+
+	if(debug_zanlungo_){
+		std::cout << " Zanlungo model dist.R-P="<<pose_of_the_robot.distance(actual_first_person_companion_point)<<"; preferred.x="<<preferred.x<<"; preferred.y="<<preferred.y<<"; preferred.th="<<preferred.th<<std::endl;
+	}
+	preferred_paths_Zanlungo_.push_back(preferred);
+	// calculate the central point in the group.
+	//if(debug_zanlungo_){
+	//	std::cout << "IMPORTANTE!!! Zanlungo; preferred.x="<<preferred.x<<"; preferred.x.y="<<preferred.y<<"; preferred.th="<<preferred.th<<std::endl;
+	//}
+
+	//Companion_Zanlungo_Model_.Order_goal(Self_for_order,number_of_group_people_,Others,preferred,order_people_in_group_global_variable_); // order contendrá el orden de los componentes del grupo.
+
+	// std::cout << " OUTH!  find_entity_order_in_the_group  "<< std::endl;
+
+}*/
+
+
+
+///////////////////
+
+// Function to find mean.
+double Cplan_local_nav_person_companion::mean(std::vector<double> arr, int n)
+{
+    double sum = 0;
+    for(int i = 0; i < n; i++)
+        sum = sum + arr.at(i);
+    return sum / n;
+}
+
+// Function to find covariance.
+double Cplan_local_nav_person_companion::covariance(std::vector<double> arr1, std::vector<double> arr2, int n)
+{
+    double sum = 0;
+    for(int i = 0; i < n; i++)
+        sum = sum + (arr1.at(i) - mean(arr1, n)) *
+                    (arr2.at(i) - mean(arr2, n));
+    return sum / (n - 1);
+}
+
+double Cplan_local_nav_person_companion::variance(std::vector<double> a, int n)
+{
+    // Compute mean (average of elements)
+    double sum = 0;
+    for (int i = 0; i < n; i++)
+        sum += a.at(i);
+    double mean =  sum /
+                  (double)n;
+
+    // Compute sum squared
+    // differences with mean.
+    double sqDiff = 0;
+    for (int i = 0; i < n; i++)
+        sqDiff += (a.at(i) - mean) *
+                  (a.at(i) - mean);
+    return sqDiff / n;
+}

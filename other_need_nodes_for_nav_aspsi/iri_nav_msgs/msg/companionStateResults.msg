@@ -1,0 +1,14 @@
+Header header
+uint32 numCompanionPeople
+uint32[] idsCompanionPeople
+float32 maximumRobotVelocity
+destination[] destinations
+bool estoyEvitandoObstaculosEstaticos
+uint32 numAvoidedObstacles
+bool MaybeNarrowPassage
+bool estoyEvitandoObstaculosDynamicos
+uint32 numAvoidedPeople
+bool estateNoPathObstacleClose
+bool robotLateral
+
+

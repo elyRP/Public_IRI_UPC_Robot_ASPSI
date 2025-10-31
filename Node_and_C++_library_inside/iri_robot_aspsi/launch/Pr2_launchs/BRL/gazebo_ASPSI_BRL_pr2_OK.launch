@@ -1,0 +1,69 @@
+<!-- -->
+<launch>
+
+
+    <!-- Ini Navigation Companion Nodes -->
+   <!--launch-prefix="xterm -e ddd -args"  -->
+
+   <group ns="pr2"> 
+  <rosparam command="delete" ns="/pr2/move_base" />
+
+   <node pkg ="move_base"
+          type="move_base"
+          name="move_base"      
+          output="screen">
+       <remap from="/pr2/cmd_vel"
+              to="/pr2/cmd_vel_unsafe" />
+      <remap from="/pr2/cost_map"
+             to="/pr2/move_base/global_costmap/costmap" />
+      <remap from="/pr2/odom"
+              to="/base_odometry/odom" />
+      <remap from="/pr2/front_scan"
+              to="/base_scan" />
+      <remap from="/pr2/tracks"
+               to="/mht_2/tracks" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2/move_base_params.yaml"      command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2/local_costmap_params.yaml"  command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2/global_costmap_params.yaml" command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/pr2/akp_local_planner_params.yaml" command="load" />
+      <rosparam file="$(find iri_pr2_rosnav)/params/amcl_companion_test_ely2021_mapFME.yaml" command="load" />
+ <!--<rosparam file="$(find iri_dabo_rosnav)/params/global_planner/global_planner_params.yaml" command="load" />
+ <rosparam file="$(find iri_dabo_rosnav)/params/mux.yaml" command="load" />-->
+      <param name="AkpLocalPlanner/destination_map_path" value="$(find iri_robot_aspsi)/maps/master_big_destinations_Gazebo_sim.txt" />
+	<param name="AkpLocalPlanner/results_filename_Zanlungo" value="name_file.txt" /> 
+      <param name="AkpLocalPlanner/robot" value="pr2"/>
+      <param name="AkpLocalPlanner/person_goal_id"  value="200"/> 
+      <param name="AkpLocalPlanner/speed_k"  value="1"/> 
+      <param name="AkpLocalPlanner/person_radi_amp"  value="0.2"/> 
+      <param name="AkpLocalPlanner/change_treshold_distance_between_steps"  value="0.3"/> 
+	<!-- for SIM-->
+ 	<param name="AkpLocalPlanner/change_sim"  value="False"/> 
+ 	<param name="AkpLocalPlanner/change_sim_target_per"  value="False"/> 
+        <param name="AkpLocalPlanner/frame_robot_footprint"  value="base_footprint"/> 
+    </node>
+ </group>
+
+  <arg name="config_file"   default="$(find iri_safe_cmd)/param/sample.yaml" />
+<!--  <arg name="node_name"     default="iri_safe_cmd" />-->
+<!--  <arg name="output"        default="screen" />-->
+  <arg name="launch_prefix" default="" />
+<node pkg ="iri_safe_cmd"
+        type="iri_safe_cmd"
+        name="iri_safe_cmd"
+        ns="pr2"
+        output="screen"
+        launch-prefix="$(arg launch_prefix)">
+    <rosparam file="$(find iri_safe_cmd)/param/sample.yaml" command="load" />
+    <param name="base_frame" value="base_link" />
+    <remap from="~cmd_vel_safe" to="/base_controller/command"/>
+    <remap from="~cmd_vel"      to="/pr2/cmd_vel_unsafe"/>
+    <remap from="/pr2/iri_safe_cmd/rear_scan"   to="/base_scan"/>
+    <remap from="/pr2/iri_safe_cmd/front_scan"  to="/base_scan"/>
+    <remap from="~joy"          to="/pr2/joy"/>
+  </node>
+
+  <node name="dr" pkg ="rqt_reconfigure" type="rqt_reconfigure" />
+
+</launch>

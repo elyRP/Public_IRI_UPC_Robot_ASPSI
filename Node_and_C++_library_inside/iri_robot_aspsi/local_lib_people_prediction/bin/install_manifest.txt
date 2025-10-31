@@ -1,0 +1,17 @@
+/usr/local/lib/iridrivers/libpeople_prediction.so
+/usr/local/include/iridrivers/people_prediction/iri_geometry.h
+/usr/local/include/iridrivers/people_prediction/scene_abstract.h
+/usr/local/include/iridrivers/people_prediction/prediction_bhmip.h
+/usr/local/include/iridrivers/people_prediction/prediction_behavior.h
+/usr/local/include/iridrivers/people_prediction/scene_sim.h
+/usr/local/include/iridrivers/people_prediction/random/rand_gmm.h
+/usr/local/include/iridrivers/people_prediction/scene_elements/person_abstract.h
+/usr/local/include/iridrivers/people_prediction/scene_elements/person_bhmip.h
+/usr/local/include/iridrivers/people_prediction/scene_elements/person_behavior.h
+/usr/local/include/iridrivers/people_prediction/scene_elements/robot.h
+/usr/local/include/iridrivers/people_prediction/scene_elements/person_virtual.h
+/usr/local/include/iridrivers/people_prediction/nav/force_reactive_robot_companion.h
+/usr/local/include/iridrivers/people_prediction/nav/plan_local_nav.h
+/usr/local/include/iridrivers/people_prediction/nav/plan_local_nav_person_companion.h
+/usr/local/include/iridrivers/people_prediction/learning_parameters/learnninglinearregression.h
+/usr/share/cmake-3.16/Modules/Findpeople_prediction.cmake

@@ -1,0 +1,3808 @@
+/*
+ * akp_local_planner_alg_node.cpp
+ *
+ *  Created on: Dec 22, 2013. Last Modified on 2020
+ *      Author: Initial code of the AKP Gonzalo Ferrer.
+ *      Author: Addition of ASPSI for people accompaniment code of Ely Repiso.
+ */
+
+
+#include "akp_local_planner_alg_node.h"
+
+
+#include <pluginlib/class_list_macros.h>
+#include <Eigen/Core>
+#include <Eigen/Eigenvalues>
+//#include <wiimote/State.h>
+
+
+//register this planner as BaseLocalPlanner plugin
+PLUGINLIB_DECLARE_CLASS(iri_akp_local_planner, 
+                        AkpLocalPlanner, 
+                        AkpLocalPlanner, 
+                        nav_core::BaseLocalPlanner)
+AkpLocalPlanner::AkpLocalPlanner(void) :
+  fscan_received(false), 
+  rscan_received(false), 
+  planner_(5.0,500, Cplan_local_nav::F_RRT_GC_alpha),  // horitzont time=5.0, max_iter=500; d_horitzon= 5*V_robot(0.75)
+  costmap_ros_(NULL), 
+  tf_(NULL), 
+  initialized_(false), 
+  setup_(false), 
+  vis_mode_(1),
+  frozen_mode_(false), 
+  move_base(true),
+  text_markers_old_size_(0),
+  slicing_path_diff_orientation_(20.0),
+  move_base_client_("move_base", true), // add to send goal
+  robot_ini_pose_x_(1.0),
+  robot_ini_pose_y_(-15.0),
+  robot_ini_pose_theta_(1.57),
+  debug_antes_subgoals_entre_AKP_goals_(false),
+  get_scout_results_doGoal_(false),
+  external_goal_(true),
+  debug_real_test_companion_(false),
+  iter(0),
+  fuera_bolitas_goals_companion_markers_(false), // a false, no veo los dos goals diferentes de companion y follow the path!
+  check_execution_times_(false),
+  iterator_facke_(1),
+  flag_play_change_id_(false),
+ // change_ps3_config_(false),
+  in_set_planner_dt_(0.2),
+	//use_default_PS3_button_(true),
+	radi_other_people_detection_(10),
+	dist_betw_rob_and_comp_people_to_slow_velocity_(2.0),
+	speed_k_(1),
+	stop_robot_manually_(true),
+	step_decreace_velocity_stop_robot_(0.05),
+	limit_velocity_stop_robot_(0.1),
+	planner_companion_status_(0), // case NOT do any action! Anny speech.
+	no_status_(false),
+	meters_to_return_(4.0),
+	debug_sideBySide2019_(false),
+	first_iter_for_update_scene_(true),
+	output_screen_messages_(false),
+simulation_(false)
+{
+
+ROS_INFO("CREATE ALG NODE");
+
+  pthread_mutex_init(&this->planner_mutex_,NULL);
+  pthread_mutex_init(&this->fscan_mutex_,NULL);
+  pthread_mutex_init(&this->rscan_mutex_,NULL);
+  pthread_mutex_init(&this->tracks_mutex_,NULL);
+  pthread_mutex_init(&this->odom_mutex_,NULL);
+  pthread_mutex_init(&this->params_values_mutex_,NULL);
+
+  //init class attributes if necessary
+  this->isMoveBaseActive=false;
+  // [init publishers]
+  
+  // [init subscribers]
+  
+  // [init services]
+  
+  // [init clients]
+  
+  // [init action servers]
+  
+  // [init action clients]
+  init();
+  id_person_companion_=1;
+
+  // change initial position
+  static tf::TransformBroadcaster br;
+  tf::Transform transform;
+  transform.setOrigin( tf::Vector3(robot_ini_pose_x_, robot_ini_pose_y_, 0.0) );
+  ROS_INFO("IN tibi! AkpLocalPlanner");
+	tf::Quaternion quat;
+	quat.setEuler(0, 0, robot_ini_pose_theta_);
+	transform.setRotation( quat);
+  //transform.setRotation( tf::Quaternion(0, 0, robot_ini_pose_theta_) ); // msg->theta= buscar y guardar por arriba orientación robot.
+	//transform.setRotation(tf2::Quaternion(0, 0, robot_ini_pose_theta_));
+
+ // br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "/map", "/tibi/base_footprint"));//br.sendTransform(tf::StampedTransfor
+br.sendTransform(tf::StampedTransform(transform, ros::Time::now(),  this->frame_map_, this->frame_robot_footprint_));
+
+
+ // init PS3 and Wii variables:
+  this->human_is_alive_=false;
+  this->vt_max            = 0.5;
+  this->vr_max            = 0.5;
+  this->trans_speed_scale = 0.1;
+  this->rot_speed_scale   = 0.1;
+  this->cancel_goal       = false;
+
+
+
+}
+
+void AkpLocalPlanner::planner_mutex_enter(void){
+  pthread_mutex_lock(&this->planner_mutex_);
+}
+void AkpLocalPlanner::planner_mutex_exit(void){
+  pthread_mutex_unlock(&this->planner_mutex_);
+}
+void AkpLocalPlanner::fscan_mutex_enter(void){
+  pthread_mutex_lock(&this->fscan_mutex_);
+}
+void AkpLocalPlanner::fscan_mutex_exit(void){
+  pthread_mutex_unlock(&this->fscan_mutex_);
+}
+void AkpLocalPlanner::rscan_mutex_enter(void){
+  pthread_mutex_lock(&this->rscan_mutex_);
+}
+void AkpLocalPlanner::rscan_mutex_exit(void){
+  pthread_mutex_unlock(&this->rscan_mutex_);
+}
+void AkpLocalPlanner::odom_mutex_enter(void){
+  pthread_mutex_lock(&this->odom_mutex_);
+}
+void AkpLocalPlanner::odom_mutex_exit(void){
+  pthread_mutex_unlock(&this->odom_mutex_);
+}
+void AkpLocalPlanner::tracks_mutex_enter(void){
+  pthread_mutex_lock(&this->tracks_mutex_);
+}
+void AkpLocalPlanner::tracks_mutex_exit(void){
+  pthread_mutex_unlock(&this->tracks_mutex_);
+}
+void AkpLocalPlanner::params_values_mutex_enter(void){
+  pthread_mutex_lock(&this->params_values_mutex_);
+}
+void AkpLocalPlanner::params_values_mutex_exit(void){
+  pthread_mutex_unlock(&this->params_values_mutex_);
+}
+
+
+// mutex for Wii and PS3 comandaments.
+
+/*void AkpLocalPlanner::joy_mutex_enter(void) 
+{ 
+  pthread_mutex_lock(&this->joy_mutex_); 
+} 
+
+void AkpLocalPlanner::joy_mutex_exit(void) 
+{ 
+  pthread_mutex_unlock(&this->joy_mutex_); 
+}*/
+
+
+AkpLocalPlanner::~AkpLocalPlanner(void)
+{
+  // [free dynamic memory]
+  //make sure to clean things up
+  delete dsrv_;
+  pthread_mutex_destroy(&this->planner_mutex_);
+  pthread_mutex_destroy(&this->fscan_mutex_);
+  pthread_mutex_destroy(&this->rscan_mutex_);
+  pthread_mutex_destroy(&this->tracks_mutex_);
+  pthread_mutex_destroy(&this->odom_mutex_);
+  pthread_mutex_destroy(&this->params_values_mutex_);
+
+}
+
+void AkpLocalPlanner::init()
+{
+	//if(output_screen_messages_){
+	ROS_INFO("  NODE iri_robot_ASPSI init() ");
+  ROS_INFO("IN tibi! AkpLocalPlanner init()");
+	//}
+
+  // publishers
+  this->cmd_vel_publisher_ = this->public_node_handle_.advertise<geometry_msgs::Twist>("cmd_vel", 10);
+  this->markers_publisher_ = this->public_node_handle_.advertise<visualization_msgs::MarkerArray>("planner_markers", 100);
+  this->markers_publisher_m2_ = this->public_node_handle_.advertise<visualization_msgs::MarkerArray>("planner_markers_m2", 100);
+  this->markers_publisher_comp_markers_ = this->public_node_handle_.advertise<visualization_msgs::MarkerArray>("planner_markers_comp_markers", 100);
+
+  this->markers_publisher_people_prediction_time_ = this->public_node_handle_.advertise<visualization_msgs::MarkerArray>("planner_markers_people_predictions", 100);
+
+  this->cost_params_publisher_ = this->public_node_handle_.advertise<std_msgs::Float64MultiArray>("cost_values", 10);
+
+  this->tibi_pose_for_sim_ = this->public_node_handle_.advertise<geometry_msgs::PoseWithCovarianceStamped>("tibi_pose_for_sim", 10); // publisher to restart robot pose in simulation
+  
+  //this->companionState_publisher_ = this->public_node_handle_.advertise<iri_nav_msgs::companionStateResults>("companionState", 100);
+
+    //publisher teleop, para cambiar mis parametros internos.
+
+
+  // subscrivers
+  this->fscan_subscriber_   = this->public_node_handle_.subscribe<sensor_msgs::LaserScan>("front_scan" , 1, boost::bind(&AkpLocalPlanner::fscan_callback, this, _1));
+  this->rscan_subscriber_   = this->public_node_handle_.subscribe<sensor_msgs::LaserScan>("rear_scan" , 1,  boost::bind(&AkpLocalPlanner::rscan_callback, this, _1));
+  this->odom_subscriber_   = this->public_node_handle_.subscribe<nav_msgs::Odometry>("odom"  , 1, boost::bind(&AkpLocalPlanner::odom_callback, this, _1));
+  this->tracks_subscriber_ = this->public_node_handle_.subscribe<iri_perception_msgs::detectionArray>("tracks", 1, boost::bind(&AkpLocalPlanner::tracks_callback, this, _1));
+
+  this->params_values_subscriber_ = this->public_node_handle_.subscribe<std_msgs::Float64MultiArray>("params", 1, boost::bind(&AkpLocalPlanner::params_values_callback, this, _1));
+
+  this->goal_publisher_ = this->public_node_handle_.advertise<geometry_msgs::PoseStamped>("/tibi/move_base_simple/goal", 10);
+
+
+  // [init clients]
+  init_simulations_client_ = this->public_node_handle_.serviceClient<iri_perception_msgs::InitialiceSim>("init_simulations");
+
+
+  get_plan_client_ = this->public_node_handle_.serviceClient<nav_msgs::GetPlan>("/tibi/move_base/NavfnROS/make_plan");
+
+
+
+  // [init subscribers] for Wii and PS3 comandaments
+  //this->joy_subscriber_    = this->public_node_handle_.subscribe("/tibi/sensors/joy", 1, &AkpLocalPlanner::joy_callback, this);
+  //pthread_mutex_init(&this->joy_mutex_,NULL);
+
+  // publisher of companion status to talk tibi the status.
+  this->tibi_akp_status_publisher_ = this->public_node_handle_.advertise<std_msgs::UInt64>("tibi_akp_status", 100);
+
+  Float64_msg_.data.resize(8,0.0);
+ ROS_INFO("OUT tibi! AkpLocalPlanner init()");
+}
+
+void AkpLocalPlanner::initialize(std::string name, tf::TransformListener* tf, costmap_2d::Costmap2DROS* costmap_ros)
+{
+	ROS_INFO("IN tibi! AkpLocalPlanner initialize()");
+//ROS_INFO("initialize     we_have_p2_in_obs_=%d; now_we_do_not_have_p2_=%d (NO DEBERIA ENTRAR AQUI)",we_have_p2_in_obs_,now_we_do_not_have_p2_);
+
+  if(!initialized_)
+  {
+    this->tf_          = tf;
+    this->costmap_ros_ = costmap_ros;
+    ros::NodeHandle private_nh("~/" + name);
+    //private publishers
+    g_plan_pub_ = private_nh.advertise<nav_msgs::Path>("global_plan", 1);
+    l_plan_pub_ = private_nh.advertise<nav_msgs::Path>("local_plan", 1);
+    
+    //Initialize force planner parameters
+    private_nh.getParam("xy_goal_tolerance", this->xy_goal_tolerance);
+		//this->planner_.set_xy_2_goal_tolerance(this->xy_goal_tolerance);
+		double act_dist_to_stop;
+		private_nh.getParam("distance_to_stop",act_dist_to_stop);
+		this->planner_.set_distance_to_stop( act_dist_to_stop );
+		private_nh.getParam("v_goal_tolerance",this->v_goal_tolerance);
+		this->planner_.set_v_goal_tolerance( this->v_goal_tolerance );
+
+    private_nh.getParam("robot", this->robot_);  // tipo de robot, no pose inicial.
+    double horizon_time, v_max, w_max, av_max,av_max_neg , av_break, aw_max, platform_radii, av_Vrobotzero,lim_Vrobotzero;
+    double cost_distance,cost_orientation,cost_w_robot,cost_w_people,cost_time, cost_obs, cost_old_path, cost_l_minima;//, cost_companion; (NO TODO)
+    int mode, nvertex;
+    this->planner_.set_dt(in_set_planner_dt_);//TODO depends upon the move_base frame_rate
+    
+    //robot frames
+  //  this->fixed_frame = "/map";
+  // this->robot_frame  = "/tibi/base_link";
+
+ this->fixed_frame = "/map";//"/map";
+    //this->robot_frame  = "/" + this->robot_ + "/base_link";
+     // this->robot_frame  = "/tibi/base_footprint";
+   this->robot_frame  = this->frame_robot_footprint_;
+
+    private_nh.getParam("move_base", this->move_base);
+
+    this->move_base=true;
+    //ROS_INFO("AkpLocalPlanner::initialize: this->move_base=",this->move_base);
+    
+    if(debug_antes_subgoals_entre_AKP_goals_){
+      std::cout << " AkpLocalPlanner::initialize this->move_base ="<< this->move_base  << std::endl;
+    }
+    private_nh.getParam("plan_mode", mode);
+    this->plan_mode_ = (Cplan_local_nav::plan_mode)mode;
+    this->planner_.set_planning_mode(this->plan_mode_);
+    private_nh.getParam("distance_mode", mode);
+    this->planner_.set_distance_mode((Cplan_local_nav::distance_mode)mode );
+    private_nh.getParam("global_mode", mode);
+    this->planner_.set_global_mode((Cplan_local_nav::global_mode)mode );
+    
+    private_nh.getParam("vis_mode", mode);
+    this->vis_mode_ = mode;
+    private_nh.getParam("number_vertex", nvertex);
+    this->planner_.set_number_of_vertex(nvertex);
+
+    private_nh.getParam("horizon_time", horizon_time);
+    this->planner_.set_horizon_time(horizon_time);
+
+    private_nh.getParam("cost_distance",  cost_distance );
+    private_nh.getParam("cost_orientation", cost_orientation);
+    private_nh.getParam("cost_w_robot",  cost_w_robot);
+    private_nh.getParam("cost_w_people",  cost_w_people);
+    private_nh.getParam("cost_time",  cost_time);
+    private_nh.getParam("cost_obs",  cost_obs);
+    private_nh.getParam("cost_old_path",  cost_old_path);
+    private_nh.getParam("cost_l_minima",  cost_l_minima);
+
+    this->planner_.set_plan_cost_parameters(cost_distance,
+                              cost_orientation,
+                              cost_w_robot,
+                              cost_w_people,
+                              cost_time,
+                              cost_obs,
+                              cost_old_path,
+                              cost_l_minima); 
+
+    private_nh.getParam("v_max",  v_max);
+    private_nh.getParam("w_max",  w_max);
+    private_nh.getParam("av_max", av_max);
+    private_nh.getParam("av_max_neg", av_max_neg);
+    private_nh.getParam("av_Vrobotzero",av_Vrobotzero);
+    private_nh.getParam("lim_Vrobotzero",lim_Vrobotzero);
+    private_nh.getParam("av_min", av_break);
+    private_nh.getParam("aw_max", aw_max);
+    private_nh.getParam("platform_radii", platform_radii);
+    this->planner_.set_robot_params(v_max, w_max, av_max, av_break, aw_max, platform_radii,av_max_neg,av_Vrobotzero,lim_Vrobotzero);
+
+    //config ESFM paramters
+    std::vector<double> params(5,0.0);
+    private_nh.getParam("esfm_k", params[0]);
+    private_nh.getParam("esfm_to_person_lambda",params[1] );
+    private_nh.getParam("esfm_to_person_A",params[2] );
+    private_nh.getParam("esfm_to_person_B", params[3]);
+    private_nh.getParam("esfm_d", params[4]);
+    ROS_INFO("!!!!!!archivo persona normal!!!!!!!!!!!!!!");
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_k=%f", params[0]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_d=%f", params[4]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_person_lambda=%f", params[1]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_person_A=%f", params[2]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_person_B=%f", params[3]);
+
+    this->planner_.set_sfm_to_person( params );
+    private_nh.getParam("esfm_to_robot_lambda",params[1] );
+    private_nh.getParam("esfm_to_robot_A", params[2]);
+    private_nh.getParam("esfm_to_robot_B", params[3]);
+   ROS_INFO("!!!!!!archivo robot normal!!!!!!!!!!!!!!");
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_robot_k=%f", params[0]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_robot_d=%f", params[4]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_robot_lambda=%f", params[1]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_robot_A=%f", params[2]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_robot_B=%f", params[3]);
+
+    planner_.set_sfm_to_robot( params );
+    private_nh.getParam("esfm_to_obstacle_lambda",params[1] );
+    private_nh.getParam("esfm_to_obstacle_A", params[2]);
+    private_nh.getParam("esfm_to_obstacle_B", params[3]);
+   	ROS_INFO("!!!!!!archivo obst normal!!!!!!!!!!!!!!");
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_obstacle_k=%f", params[0]);
+  	ROS_INFO("AkpLocalPlanner::initialize: esfm_to_obstacle_d=%f", params[4]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_obstacle_lambda=%f", params[1]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_obstacle_A=%f", params[2]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_obstacle_B=%f", params[3]);
+    this->planner_.set_sfm_to_obstacle( params );
+    
+    double min_v_to_predict;
+    int ppl_col, pr_force_mode;
+    private_nh.getParam("min_v_to_predict", min_v_to_predict);
+    this->planner_.set_min_v_to_predict( min_v_to_predict );//Cscene_bhmip
+    private_nh.getParam("ppl_collision_mode", ppl_col);
+    this->planner_.set_ppl_collision_mode( ppl_col );
+    private_nh.getParam("pr_force_mode", pr_force_mode);
+    this->planner_.set_pr_force_mode( pr_force_mode );
+    int mod;
+    private_nh.getParam("goal_providing_mode", mod);
+    goal_providing_mode_ = (AkpLocalPlanner::Goal_providing_mode)mod;
+    private_nh.getParam("slicing_diff_orientation", slicing_path_diff_orientation_);
+   
+    private_nh.getParam("esfm_to_person_companion_lambda",params[1] );
+    private_nh.getParam("esfm_to_person_companion_A", params[2]);
+    private_nh.getParam("esfm_to_person_companion_B", params[3]);
+    private_nh.getParam("esfm_companion_d", params[4]);
+  ROS_INFO("!!!!!!archivo persona companion!!!!!!!!!!!!!!");
+ 		ROS_INFO("(robot) AkpLocalPlanner::initialize: esfm_k_companion=%f", params[0]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_companion_d=%f", params[4]);
+    ROS_INFO("(robot) AkpLocalPlanner::initialize: esfm_to_person_companion_lambda=%f", params[1]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_person_companion_A=%f", params[2]);
+    ROS_INFO("AkpLocalPlanner::initialize: esfm_to_person_companion_B=%f", params[3]);
+
+    this->planner_.set_sfm_to_person_companion( params );
+
+
+    private_nh.getParam("force_map_path", this->force_map_path_);
+    private_nh.getParam("destination_map_path", this->destination_map_path_);
+
+    ROS_INFO("AkpLocalPlanner::initialize: Destinations map %s", destination_map_path_.c_str());
+   
+    if(!planner_.read_destination_map(destination_map_path_.c_str()))
+      ROS_ERROR("AkpLocalPlanner::initialize: Could not read map destinations file!!!");
+    else
+      ROS_INFO("AkpLocalPlanner::initialize: Read destinations map file SUCCESS!!!");
+
+    ROS_INFO("AkpLocalPlanner::initialize: Force map %s", force_map_path_.c_str());
+    if(!planner_.read_force_map(force_map_path_.c_str()))
+      ROS_ERROR("AkpLocalPlanner::initialize: Could not read map force file!!!");
+    else
+      ROS_INFO("AkpLocalPlanner::initialize: Read map force file SUCCESS!!!");
+    
+    init_force_planner_and_markers();
+
+    dsrv_ = new dynamic_reconfigure::Server<iri_robot_aspsi::AkpLocalPlannerConfig>(private_nh);
+    dynamic_reconfigure::Server<iri_robot_aspsi::AkpLocalPlannerConfig>::CallbackType cb = boost::bind(&AkpLocalPlanner::reconfigureCallback, this, _1, _2);
+    dsrv_->setCallback(cb);
+    initialized_ = true;
+
+    // Do initialization goal!
+    this->actual_goal.x=this->robot_pose_.x;
+    this->actual_goal.y=this->robot_pose_.y;
+ 
+    ROS_INFO("AkpLocalPlanner::initialize: Fin initialize()");
+
+
+  }
+  else
+    ROS_WARN("AkpLocalPlanner::initialize: This planner has already been initialized, you can't call it twice, doing nothing");
+
+
+	geometry_msgs::PoseStamped target_goal_simple;
+	target_goal_simple.pose.position.x = 0;
+	target_goal_simple.pose.position.y = 0;
+	target_goal_simple.pose.position.z = 0;
+	target_goal_simple.pose.orientation.w = 1;
+	target_goal_simple.header.frame_id = "map";
+
+
+}
+
+bool AkpLocalPlanner::computeVelocityCommands(geometry_msgs::Twist& cmd_vel)
+{ 
+	//if(output_screen_messages_){
+	//ROS_INFO(" NODE iri_robot_ASPSI  this->planner_.get_number_of_vertex(  )=%d; horizon_time=%f; ",this->planner_.get_number_of_vertex(  ),this->planner_.get_horizon_time());
+	//} //conf_dist_betw_rob_and_comp_people_to_slow_velocity
+//ROS_INFO("simulation_=%d; ",simulation_);
+	
+		
+
+
+	planner_companion_status_=0;
+	if(see_std_out_mesages_ros_){
+		ROS_INFO("initial computeVelocityCommands; stop_robot=%d",stop_robot_manually_);
+	}
+
+
+	double ini_TIME_comand_vel=ros::Time::now().toSec();
+
+	Spose actual_odom_robot_pose;
+
+
+	//Get Robot position: transform empty/zero pose from base_link to map
+ 
+	std::string target_frame = this->fixed_frame;
+	std::string source_frame = this->robot_frame;
+	ros::Time target_time    = ros::Time::now();
+
+	double time_start=ros::Time::now().toSec();
+
+	double time_end=ros::Time::now().toSec();
+
+	double diff=before_tim-this->robot_pose_.time_stamp;
+
+	before_tim=this->robot_pose_.time_stamp;
+
+	tf::StampedTransform transform;
+	geometry_msgs::TransformStamped msg;
+
+	try{
+		ros::Time now = ros::Time(0);
+    
+		tf_->waitForTransform(target_frame, source_frame, now, ros::Duration(1.0));
+
+		tf_->lookupTransform(target_frame, source_frame,  ros::Time(0), transform);
+	}
+	catch(...){
+		ROS_ERROR("Error obtaining robot pose");
+		//return ret;
+	}
+
+	tf::transformStampedTFToMsg(transform, msg);
+
+	double rob_x = msg.transform.translation.x;
+	double rob_y = msg.transform.translation.y;
+	double rob_yaw = tf::getYaw(msg.transform.rotation);
+
+
+	// INICIO PARTE ANTERIOR MIA
+
+    this->planner_mutex_enter();
+    double START_time_secs =ros::Time::now().toSec();
+    clock_t robot_node_start, robot_node_end; // clocks, pueden ser utiles... pero cambiando nombres, al menos en los scouts.
+	robot_node_start = clock();
+
+	double t = ros::Time::now().toSec();
+    Spose best_next_pose;
+
+    bool robot_plan_succed=false;
+
+   // function_joy_teleop_mainNodeThread(); // wii and PS3 comandaments
+
+    if(check_execution_times_){
+      std::cout <<std::endl<<std::endl;
+      ROS_INFO("ENTRO EN AkpLocalPlanner::computeVelocityCommands!!!");
+    }
+
+    ros::Time now    = ros::Time::now();
+    // (2) funcion, local planer. Da las velocidades del robot para seguir el plan.
+
+    if(debug_antes_subgoals_entre_AKP_goals_){
+      ROS_INFO("AkpLocalPlanner::computeVelocityCommands");
+    }
+    if(!initialized_)
+    {
+      ROS_ERROR("AkpLocalPlanner::computeVelocityCommands: This planner has not been initialized, please call initialize() before using this planner");
+      return false;
+    }
+
+    double START_time_secs_read_scan =ros::Time::now().toSec();
+    //update front and rear obstacles
+    this->laser_points.clear();
+
+    this->fscan_mutex_enter();
+    if(this->fscan_received)
+    {
+
+      this->laser_points = this->scan2points(this->fscan);
+      this->fscan_received=false;
+    }
+    this->fscan_mutex_exit();
+
+    this->rscan_mutex_enter();
+    if(this->rscan_received)
+    {
+
+      std::vector< Spoint > rear_points;
+      rear_points = this->scan2points(this->rscan);
+      this->laser_points.insert(this->laser_points.end(), rear_points.begin(), rear_points.end());
+      this->rscan_received=false;
+    }
+    this->rscan_mutex_exit();
+	double END_time_secs_read_scan;
+	if(check_execution_times_){ 
+	END_time_secs_read_scan =ros::Time::now().toSec();
+	std::cout<< "IIIIIIIIIIIIII ros_time_node read_laser_points=" <<END_time_secs_read_scan-START_time_secs_read_scan<< std::endl;
+	  }
+
+    double START_time_secs_read_laser_scan =ros::Time::now().toSec();
+    this->planner_.read_laser_scan( this->laser_points );
+	double END_time_secs_read_laser_scan;
+	if(check_execution_times_){ 
+	END_time_secs_read_laser_scan =ros::Time::now().toSec();
+	std::cout<< "IIIIIIIIIIIIII ros_time_node read_laser_scan function=" <<END_time_secs_read_laser_scan-START_time_secs_read_laser_scan<< std::endl;
+	  }
+
+
+	//update robot position
+	double START_time_secs_updateRobot =ros::Time::now().toSec();
+    this->odom_mutex_enter();
+  
+    //ROS_INFO( " before update_robot, robot.x=%f, y=%f; time=%f; robot.w=%f, robot.v=%f ",this->robot_pose_.x,this->robot_pose_.y,this->robot_pose_.time_stamp,this->robot_pose_.w,this->robot_pose_.v);
+
+	// Function that updates the robot status.
+    this->planner_.update_robot(this->robot_pose_);
+
+    this->odom_mutex_exit();
+
+	double END_time_secs_updateRobot;
+	if(check_execution_times_){ 
+		END_time_secs_updateRobot =ros::Time::now().toSec();
+		std::cout<< "IIIIIIIIIIIIII ros_time_node updateRobot=" <<END_time_secs_updateRobot-START_time_secs_updateRobot<< std::endl;
+	 }
+	    
+
+	/// INI ONLY first iteration. Update scene with obs() directly, to generate fake person if needed.
+	if(first_iter_for_update_scene_){  // function that updates the scene.
+  		this->planner_.update_scene(this->obs,this->we_have_companion_person_);
+		first_iter_for_update_scene_=false;
+	}
+	/// End ONLY first iteration. Update scene with obs() directly, to generate fake person if needed.
+
+    this->we_have_companion_person_=false;
+    //update people observations
+    this->tracks_mutex_enter();
+
+	bool we_have_p1_in_obs=false;
+    obs2.clear();
+	SdetectionObservation actual_person_comp1_pose;
+	// INI NEW FACKE CHANGE AND DESAPEAR ID:
+
+	bool now_we_have_first_person_in_obs=false;
+	// FIN NEW FACKE CHANGE AND DESAPEAR ID:
+
+	 to_stop_we_have_p1_=false;
+	 to_stop_we_have_p2_=false;
+
+
+	num_people_for_state_=0;
+    for(unsigned int u=0;u<this->obs.size();u++){
+
+    	/*if(obs[u].id==id_person_companion_){  // SOLO VER ID's person companions. Es pasa test.   		 
+    			  ROS_INFO( "TRACKS EN AKP (solo companions) => obs.id=%d; this->obs[%d].vx=%f; .vy=%f;   x=%f; .y=%f; ",this->obs[u].id,u,this->obs[u].vx,this->obs[u].vy, this->obs[u].x,this->obs[u].y);
+    	}*/
+    	SpointV actual_obs( this->obs[u].x , this->obs[u].y, this->obs[u].time_stamp, this->obs[u].vx, this->obs[u].vy );
+
+    	// INI NEW FACKE CHANGE AND DESAPEAR ID:
+    	if(obs[u].id==id_person_companion_){
+    		now_we_have_first_person_in_obs=true; //Saber si tenemos persona 1 o no.
+    	}
+    	// FIN NEW FACKE CHANGE AND DESAPEAR ID:
+
+    	if(obs[u].id==id_person_companion_){// CASE First person comoanion
+    		num_people_for_state_=1; // We have person 1.
+
+    		this->obs2.push_back(this->obs[u]);
+    		person_companion_position_=SpointV(this->obs[u].x,this->obs[u].y,this->obs[u].time_stamp,this->obs[u].vx,this->obs[u].vy);
+    		 		
+    		if(obs[u].id==id_person_companion_){
+    			to_stop_we_have_p1_=true;
+    			we_have_p1_in_obs=true;
+    			actual_person_comp1_pose=this->obs[u];
+    		}
+
+    	}else if(this->robot_pose_.distance(actual_obs)<radi_other_people_detection_){ // coger a las demas personas, que esten a distancia menor que 10 m del robot.
+    		  this->obs2.push_back(this->obs[u]);
+
+    		  if(see_std_out_mesages_ros_){
+    			  ROS_INFO( "TRACKS EN AKP (Other people) => obs.id=%d; this->obs[%d].vx=%f; .vy=%f;   x=%f; .y=%f; ",this->obs[u].id,u,this->obs[u].vx,this->obs[u].vy, this->obs[u].x,this->obs[u].y);
+    		  }
+    	}
+	}
+
+    std::list<Cperson_abstract *> people_in_list=this->planner_.get_person_list();
+
+    Cperson_abstract* person_obj_p1_now=NULL;
+
+	for( auto iit: people_in_list )
+	{
+		if(iit->get_id()==id_person_companion_){
+			person_obj_p1_now=iit;
+		}
+	}
+
+	bool generate_artificial_person2=false;
+
+
+
+	before_people_time_=actual_person_comp1_pose.time_stamp;		
+
+	double START_time_secs_updateScene =ros::Time::now().toSec();
+	//	ROS_INFO(" Antes de update_scene; this->obs2.size()=%d",this->obs2.size());
+
+	this->planner_.update_scene(this->obs2,this->we_have_companion_person_);
+	double END_time_secs_updateScene;
+
+	if(check_execution_times_){ 
+	END_time_secs_updateScene =ros::Time::now().toSec();
+	std::cout<< "IIIIIIIIIIIIII ros_time_node updateScene=" <<END_time_secs_updateScene-START_time_secs_updateScene<< std::endl;
+	}
+
+    this->tracks_mutex_exit();
+   
+    if(debug_real_test_companion_){
+	ROS_INFO( "AkpLocalPlanner::computeVelocityCommands: this->we_have_companion_person_= %s ", this->we_have_companion_person_ ? "true" : "false");
+
+    }
+    //planner iteration
+ 
+    double START_time_secs10;
+    double START_time_secs_server_sim =ros::Time::now().toSec();
+
+    if(this->we_have_companion_person_){
+
+    	Action_ROS_=this->planner_.get_state_Action();
+		Actual_case_ROS_=this->planner_.get_actual_case();
+		if(simulation_){
+ 		/* INI server to use the same state in people simulation and robot */
+      		// first know what state is now!!!
+               // + generar el mensaje a enviar al server.
+              Spoint person_companion_point1=this->planner_.get_SIM_initial_person_companion_pose1();
+              Spoint person_companion_point2=this->planner_.get_SIM_initial_person_companion_pose2();
+              Spoint person_goal_point=this->planner_.get_SIM_initial_person_goal_pose_actual();
+
+                if(Actual_case_ROS_==Cplan_local_nav::case0){
+                  init_simulations_srv_.request.init.act_case=0;
+                }else if(Actual_case_ROS_==Cplan_local_nav::case1){
+                  init_simulations_srv_.request.init.act_case=1;
+                }else if(Actual_case_ROS_==Cplan_local_nav::case2){
+                  init_simulations_srv_.request.init.act_case=2;
+                }
+            
+              init_simulations_srv_.request.init.state=0;
+              init_simulations_srv_.request.init.initial_position.clear();
+              init_simulations_srv_.request.init.initial_position.resize(3);
+              init_simulations_srv_.request.init.orientation.clear();
+              init_simulations_srv_.request.init.orientation.resize(3);
+              init_simulations_srv_.request.init.initial_position[0].x=person_companion_point1.x;  // person companion position
+              init_simulations_srv_.request.init.initial_position[0].y=person_companion_point1.y; 
+
+              if(see_std_out_mesages_ros_){
+            	  ROS_INFO("AkpLocalPlanner::computeVelocityCommands: (3) init_simulations_client_.call; person_companion_point1.x=%f; person_companion_point1.y=%f",person_companion_point1.x,person_companion_point1.y);
+              }
+              init_simulations_srv_.request.init.initial_position[0].z=0.0;
+              init_simulations_srv_.request.init.orientation[0]=0.0;
+              init_simulations_srv_.request.init.initial_position[1].x=person_companion_point2.x;  // person companion position
+              init_simulations_srv_.request.init.initial_position[1].y=person_companion_point2.y;
+              init_simulations_srv_.request.init.initial_position[1].z=0.0;
+
+              init_simulations_srv_.request.init.orientation[1]=0.0;
+
+              init_simulations_srv_.request.init.initial_position[2].x=person_goal_point.x;  // person goal position
+              init_simulations_srv_.request.init.initial_position[2].y=person_goal_point.y; 
+              init_simulations_srv_.request.init.initial_position[2].z=0.0;
+              init_simulations_srv_.request.init.orientation[2]=3.14;
+
+   
+            if(Action_ROS_==Cplan_local_nav::START){ // solicita al server del People_simulation que resetee a las personas.
+              // solicitar que reinicie el server.
+             
+				//////////////// TO restart robot pose!!! SIM
+				 Spoint goal_to_return=this->planner_.get_actual_goal_to_return_initial_position();
+				 geometry_msgs::PoseWithCovarianceStamped pose_change_robot;
+				pose_change_robot.pose.pose.position.x=goal_to_return.x;
+				pose_change_robot.pose.pose.position.y=goal_to_return.y;
+				pose_change_robot.header.frame_id = "map";
+				pose_change_robot.pose.pose.position.z=0;
+				pose_change_robot.pose.covariance[0]=0.25;
+				pose_change_robot.pose.covariance[7]=0.25;
+				pose_change_robot.pose.covariance[35]=0.068;
+				//=[0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.068];
+				pose_change_robot.pose.pose.orientation.z=0.01;
+				pose_change_robot.pose.pose.orientation.w=0.999641971333;
+
+	
+				//std::cout<< "IIIII33333777777IIIIIIIII entro en restart_robot_pose; tibi_restart_pose_.x="<<tibi_restart_pose_.pose.pose.position.x<<"; y="<<tibi_restart_pose_.pose.pose.position.y << std::endl;
+				tibi_restart_pose_=pose_change_robot;
+
+				this->tibi_pose_for_sim_.publish(tibi_restart_pose_);
+		
+				bool call_ok=init_simulations_client_.call(init_simulations_srv_);
+
+				if(see_std_out_mesages_ros_){
+					if(call_ok){
+						//ROS_INFO("AkpLocalPlanner::computeVelocityCommands: out init_simulations_client_.call; TRUE");
+					}else{
+						//ROS_INFO("AkpLocalPlanner::computeVelocityCommands: out init_simulations_client_.call; FALSE");
+					}
+				}
+				// envio ahora dos call simulation al ser dos robots, ya qu uno parece que no entra en reiniciar
+				 bool call_ok2=init_simulations_client_.call(init_simulations_srv_);
+				if(see_std_out_mesages_ros_){
+					  if(call_ok2){
+						//ROS_INFO("AkpLocalPlanner::computeVelocityCommands: out init_simulations_client_.call; TRUE");
+					  }else{
+						//ROS_INFO("AkpLocalPlanner::computeVelocityCommands: out init_simulations_client_.call; FALSE");
+					  }
+				}
+				// restart_pose_robot_goal.
+
+            }else{
+                init_simulations_srv_.request.init.state=1; // case ITER
+                bool call_ok=init_simulations_client_.call(init_simulations_srv_);
+            }
+		}
+		double END_time_secs_server_sim ;
+		if(check_execution_times_){
+		END_time_secs_server_sim =ros::Time::now().toSec();
+		//std::cout<< "IIIIIIIIIIIIII ros_time_node server simulation=" <<END_time_secs_server_sim-START_time_secs_server_sim<< std::endl;
+		}
+		/* Fin server to use the same state in people simulation and robot */
+
+		double ros_time_to_sec=ros::Time::now().toSec()/(60*60);
+
+		this->planner_.set_ros_time_to_sec(ros_time_to_sec);
+
+		double START_time_secs2 =ros::Time::now().toSec();
+
+
+		if(output_screen_messages_){
+			//ROS_INFO( "1 (IMPORTANTE after person plan y con person v, reduction) dt_real=%f;", ros_time_to_sec_general_before_iter_-ros_time_to_sec);
+		}
+	
+
+		// Function that computes the local-planner, the Robot's Adaptive Side-by-Side Accompaniment of One Person (ASPSI)
+		robot_plan_succed =  this->planner_.robot_plan_companion3(best_next_pose,reactive_);
+		ros_time_to_sec_general_before_iter_=ros::Time::now().toSec();
+
+		/* LIMIT velocity if very near of people_companion's!!!!!   */
+		if(this->robot_pose_.distance(person_companion_position_)<dist_betw_rob_and_comp_people_to_slow_velocity_ ){
+			// distance entre robot y personas que acompaña, menor que 2 metros. dist_betw_rob_and_comp_people_to_slow_velocity_=4
+			double v_lim_actual, v_people;
+
+			v_people=person_companion_position_.v();
+			v_lim_actual=v_people+0.2; // v_p + 0.2 m/s
+
+			if((best_next_pose.v>v_lim_actual)&&(v_people>0.2)){
+				best_next_pose.v=v_lim_actual;
+			}
+		}
+
+
+      
+
+		double END_time_secs3;
+
+		if(check_execution_times_){
+		END_time_secs3 =ros::Time::now().toSec();
+		//std::cout<< "IIIIIIIIIIIIII after plan3 ros_time_node=" <<END_time_secs3-START_time_secs<< std::endl;
+		//std::cout<< "IIIIIIIIIIIIII only plan3 ros_time_node=" <<END_time_secs3-START_time_secs2<< std::endl;
+		}
+	
+      	this->move_base=true;
+      
+    }else{
+      robot_plan_succed=true;
+      this->move_base=false;
+      best_next_pose=this->robot_pose_;
+      best_next_pose.v=0.0;
+      best_next_pose.w=0.0;
+
+    }
+
+    best_next_pose_companion_markers_=best_next_pose; // for companion! (luego para cambiar el goal del robot, tendrá que ser aquí, donde cambie su posicion con el angulo entre robot y persona)
+   
+    //Heuristic to average velocities and detect local minima problems
+    if(this->move_base)
+      velocities_.push_back( robot_pose_.v );
+    //pop front old velocities; in setPlan, a reset of the vector is done: 5 samples ~ 1seg
+    if( velocities_.size() > 5 )
+      velocities_.pop_front();
+
+    // calculate average
+    double avg_v(0.0);
+    for( unsigned int i = 0; i < velocities_.size(); ++i )
+      avg_v += velocities_[i];
+
+
+    START_time_secs10 =ros::Time::now().toSec();
+
+		if(output_screen_messages_){
+ 		ROS_INFO( "2 after robot_plan_companion3; this->move_base=%d  this->robot_pose_.v=%f;  this->robot_pose_.w=%f",this->move_base ,this->robot_pose_.v, this->robot_pose_.w);
+		}
+
+    if(this->move_base)
+    {
+      cmd_vel.linear.x  = best_next_pose.v;
+      cmd_vel.angular.z = best_next_pose.w;
+    }
+    else
+    {
+      cmd_vel.linear.x  = 0.0;
+      cmd_vel.angular.z = 0.0;
+    }
+
+
+    publishPlan(this->global_plan_, g_plan_pub_);
+    publishPlan(this->local_plan_, l_plan_pub_);
+
+    //fill planning markers
+    if( vis_mode_ > 0 && !frozen_mode_  )
+    {
+      MarkerArray_msg_.markers.clear();
+      MarkerArray_msg_comp_markers_.markers.clear();
+      MarkerArray_msg_m2_.markers.clear();
+      MarkerArray_msg_people_prediction_time_.markers.clear();
+      Sdestination goal_out_person=planner_.get_person_companion_goal_out();
+      best_next_pose_robot_companion_markers_.pose.position.x = best_next_pose_companion_markers_.x;
+      best_next_pose_robot_companion_markers_.pose.position.y = best_next_pose_companion_markers_.y;
+      best_next_pose_robot_companion_markers_.pose.position.x = goal_out_person.x;
+      best_next_pose_robot_companion_markers_.pose.position.y = goal_out_person.y;
+      best_next_pose_robot_companion_markers_.id = 30;
+     // MarkerArray_msg_.markers.push_back( best_next_pose_robot_companion_markers_ ); //esfera que marca el siguiente goal del robot, hacia donde va!
+   
+      if(output_screen_messages_){
+        MarkerArray_msg_comp_markers_.markers.push_back( best_next_pose_robot_companion_markers_ );
+      }
+	double END_time_secs5;
+	if(check_execution_times_){
+		END_time_secs5 =ros::Time::now().toSec();
+		//std::cout<<" code after all plan3 ros_time_node=" <<END_time_secs5-START_time_secs10<< std::endl;
+	}
+
+
+
+	double START_time_secs_path =ros::Time::now().toSec();
+	///// INI GET size of the path /////
+	double global_plan_lenght=0;
+	for( unsigned int i=1; i < global_plan_.size(); ++i )
+	{
+		//differential in 2d
+		double dy = global_plan_[i].pose.position.y - global_plan_[i-1].pose.position.y;
+		double dx = global_plan_[i].pose.position.x - global_plan_[i-1].pose.position.x;
+
+		global_plan_lenght=global_plan_lenght + sqrt(dy*dy+dx*dx);
+	}
+
+	unsigned int i=1;
+	double global_path_ini_orientation=atan2( global_plan_[i].pose.position.y - global_plan_[i-1].pose.position.y, global_plan_[i].pose.position.x - global_plan_[i-1].pose.position.x );
+	i=global_plan_.size(); // i=global_plan_.size(); o i=global_plan_.size()-1; => comprobar.
+	double global_path_final_orientation=atan2( global_plan_[i].pose.position.y - global_plan_[i-1].pose.position.y, global_plan_[i].pose.position.x - global_plan_[i-1].pose.position.x );
+	this->planner_.set_value_distance_global_path(global_plan_lenght);
+	this->planner_.set_global_path_ini_orientation(global_path_ini_orientation);
+	this->planner_.set_global_path_final_orientation(global_path_final_orientation);
+
+	///// FIN GET size of the path /////
+	double END_time_secs_path;
+	if(check_execution_times_){
+		END_time_secs_path =ros::Time::now().toSec();
+		//std::cout<< "IIIIIIIIIIIIII time get path distance=" <<END_time_secs_path-START_time_secs_path<< std::endl;
+	}
+
+	START_time_secs_fill_markers =ros::Time::now().toSec();
+    fill_best_path_2d();
+    fill_scene_markers();
+    if( vis_mode_ > 1 )//normal mode 2d features
+    {
+        fill_forces_markers();
+        fill_laser_obstacles();
+    }
+    if ( vis_mode_ > 2 )//super mode 3d features
+    {
+        fill_planning_markers_2d(); 
+    	fill_laser_obstacles();    
+    }
+    if ( vis_mode_ > 3 )//super mode, plooting potentials and so on
+    {
+    	fill_people_prediction_markers_path_points(); // to see the target person predicted path
+        fill_people_prediction_markers_3d();
+    }
+	if(vis_mode_ > 4){
+	  fill_planning_markers_3d(); // mirar...
+	}
+	//ROS_INFO("markers (18)");
+      //fill_robot_companion_markers(); //  Quitado para quitar coste computacional. de momento inhabilitado, pq ya se ve desde robot y persona simulada directamente.
+     // fill_people_prediction_markers_2d_companion(); Quitado para quitar coste computacional
+    } 
+
+    fill_test_markers(); // made by ely
+
+	double END_time_secs_fill_markers;
+	if(check_execution_times_){
+		END_time_secs_fill_markers =ros::Time::now().toSec();
+	//	std::cout<< "IIIIIIIIIIIIII time fill markers=" <<END_time_secs_fill_markers-START_time_secs_fill_markers<< std::endl;
+	}
+	double START_time_secs_publish_markers =ros::Time::now().toSec();
+    this->markers_publisher_.publish(this->MarkerArray_msg_);
+    this->markers_publisher_comp_markers_.publish(this->MarkerArray_msg_comp_markers_);
+    this->markers_publisher_m2_.publish(this->MarkerArray_msg_m2_);
+    this->markers_publisher_people_prediction_time_.publish(this->MarkerArray_msg_people_prediction_time_);
+	double END_time_secs_publish_markers;
+	if(check_execution_times_){
+	END_time_secs_publish_markers =ros::Time::now().toSec();
+	//std::cout<< "IIIIIIIIIIIIII time publish markers=" <<END_time_secs_publish_markers-START_time_secs_publish_markers<< std::endl;
+	}
+
+	double START_time_secs_publish_planerInfo =ros::Time::now().toSec();
+    std::vector<double> costs;
+    this->planner_.get_navigation_cost_values( costs);  // publica cost values del best path
+    Float64_msg_.data = costs;
+    this->planner_.get_navigation_mean_cost_values( costs); // publica las medias de esta iteración
+    Float64_msg_.data.insert( Float64_msg_.data.end(), costs.begin(), costs.end() );
+    this->planner_.get_navigation_std_cost_values( costs); // publica las std de esta iteración
+    Float64_msg_.data.insert( Float64_msg_.data.end(), costs.begin(), costs.end() );
+    this->cost_params_publisher_.publish(this->Float64_msg_);
+	double END_time_secs_publish_planerInfo;
+	if(check_execution_times_){
+		END_time_secs_publish_planerInfo =ros::Time::now().toSec();
+	//	std::cout<< "IIIIIIIIIIIIII time publish node topics=" <<END_time_secs_publish_planerInfo-START_time_secs_publish_planerInfo<< std::endl;
+	}
+
+
+	double START_do_goal_time_secs =ros::Time::now().toSec();
+	this->doGoal(); // lanza el goal, pero antes comprueba que ese goal sea accesible al robot
+  	
+	double END_do_goal_time_secs;
+	if(check_execution_times_){
+		END_do_goal_time_secs =ros::Time::now().toSec();
+		//std::cout<< "IIIIIIIIIIIIII ros_time_do_goal=" <<END_do_goal_time_secs-START_do_goal_time_secs<< std::endl;
+	}
+
+	robot_node_end = clock();
+	unsigned int clock_start4;
+	unsigned int clock_end4;
+	double END_time_secs;
+	if(check_execution_times_){
+		robot_node_end = clock();
+		clock_start4= (unsigned int) robot_node_start;
+		clock_end4= (unsigned int) robot_node_end;
+		END_time_secs =ros::Time::now().toSec();
+		//std::cout<< "IIIIIIIIIIIIII ros_time_node=" <<END_time_secs-START_time_secs<< std::endl;
+	}
+
+   this->planner_mutex_exit();
+
+
+	
+	cmd_vel.linear.x*=this->config_.speed_k; // IMPORTANT, do not change for TIBI. It is for real robot. OUR velocity controller divides the robot's velocity by 2. Then, we need to multiply with this speed_k here.
+
+	if((see_std_out_mesages_ros_)||(see_std_out_velocities_ros_)){
+		ROS_INFO( " cmd_vel.linear.x * Speed_k (cmd_vel=%f) ", cmd_vel.linear.x);
+	}
+
+    if(ros_max_real_speed_out_<cmd_vel.linear.x){
+	cmd_vel.linear.x=ros_max_real_speed_out_;			
+    }
+
+
+    //to stop slowly:
+    // also stop slowly when person stops ant the planner send value 0 to outside, but the robot velocity is bigger. best_next_pose
+
+	if(((cmd_vel.linear.x<0.2)&&(this->robot_pose_.v>0.2))||(stop_robot_manually_)||((!to_stop_we_have_p1_)&&(!to_stop_we_have_p2_))||((!robot_plan_succed)&&(this->robot_pose_.v>0.2))){ // TODO: se puede hacer generico con la velocidad, pero ya veré como hacerlo.
+    	// coges la anterior velocidad del robot y si es +, la reduces X_valor.
+    	// si es negativa, le sumas X_valor hasta que sea 0. 
+
+		if(this->robot_pose_.v>limit_velocity_stop_robot_){
+       		cmd_vel.linear.x  =this->robot_pose_.v - step_decreace_velocity_stop_robot_; //step_decreace_velocity_stop_robot_=0.05   limit_velocity_stop_robot_=0.1
+    	}else if(this->robot_pose_.v<-limit_velocity_stop_robot_){
+    		cmd_vel.linear.x  =this->robot_pose_.v + step_decreace_velocity_stop_robot_;
+    	}else{
+    		cmd_vel.linear.x  = 0.0;
+    	}
+    	if(this->robot_pose_.w>limit_velocity_stop_robot_){
+    		cmd_vel.angular.z =this->robot_pose_.w - step_decreace_velocity_stop_robot_;
+    	}else if(this->robot_pose_.w<-limit_velocity_stop_robot_){
+    		cmd_vel.angular.z =this->robot_pose_.w + step_decreace_velocity_stop_robot_;
+    	}else{
+    		cmd_vel.angular.z = 0.0;
+    	}
+
+			if(output_screen_messages_){
+			ROS_ERROR(" (out) STOP  slowly  ROBOT!; step_decreace_velocity_stop_robot_=%f, cmd_vel.linear.x=%f; this->robot_pose_.v=%f",step_decreace_velocity_stop_robot_,cmd_vel.linear.x,this->robot_pose_.v);
+			}
+    }
+	
+    //TODO: caso Vr>0.5 o 0.6 y se va la velocidad a 0.0 de golpe! tambien he de frenar lento! (hay que incluirlo aquí al final, gestion de cambios muy bruscos de velocidad)
+
+    // PROVISIONAL SPEECH near goal, to return! With hard coded goal position. (despues de esto podríamos coger la posicion del reconfigure o ya se vera.)
+    Spoint return_goal_position=Spoint(44.0,20.0);
+    double distance_to_return=this->robot_pose_.distance(return_goal_position);
+
+    if(stop_robot_manually_){
+    	planner_companion_status_=7;
+    }
+
+    if(distance_to_return<meters_to_return_){
+    	planner_companion_status_=3; // state, say to stop and return!
+    }
+
+
+    if((!to_stop_we_have_p1_)&&(!to_stop_we_have_p2_)){
+    	if((see_std_out_mesages_ros_)||(see_std_out_velocities_ros_)){
+    		ROS_ERROR(" NO ID's! NO PEOPLE!");
+    	}
+    	// ESTADO planner.
+    	if(!stop_robot_manually_){ // si no estamos parando al robot.
+    		planner_companion_status_=1; //No P1 ni P2
+    	}
+
+    }
+
+	if((see_std_out_mesages_ros_)||(see_std_out_velocities_ros_)){
+	    ROS_ERROR(" planner_companion_status_=%d",planner_companion_status_);
+	}
+
+    this->tibi_akp_status_UInt64_msg_.data = planner_companion_status_;
+
+    double fin_TIME_comand_vel=ros::Time::now().toSec();
+
+	if(output_screen_messages_){
+	ROS_INFO(" In save states to publish");
+	}
+
+	//if no_people poner .numCompanionPeople=0; // si no encuentro los ids de las person companion
+	if(see_std_out_mesages_ros_){
+		//ROS_INFO(" to_stop_we_have_p1_=%d, to_stop_we_have_p2_=%d",to_stop_we_have_p1_,to_stop_we_have_p2_);
+	}
+	if((!to_stop_we_have_p1_)&&(!to_stop_we_have_p2_)){
+				if(output_screen_messages_){
+	    	ROS_ERROR(" NO ID's! NO PEOPLE!");
+				}
+	    	//  estado. No os veo. Volver a colocaros en la paosición para continuar.
+	    	// ESTADO planner.
+	    	if(!stop_robot_manually_){ 
+					if(output_screen_messages_){ROS_INFO(" no people msg");}
+			//companionState_companionStateResults_msg_.numCompanionPeople=0;	// if no_people poner .numCompanionPeople=0; // si no encuentro los ids de las person companion
+		}
+	}else{
+		//companionState_companionStateResults_msg_.numCompanionPeople=num_people_for_state_;//num_people_for_state_; Only one person accompaniment.
+	}
+
+	//this->companionState_companionStateResults_msg_.idsCompanionPeople.resize(0);
+
+	// this->companionState_companionStateResults_msg_.idsCompanionPeople.resize(1);
+	// companionState_companionStateResults_msg_.idsCompanionPeople[0]=id_person_companion_;
+
+	//companionState_companionStateResults_msg_.maximumRobotVelocity=this->planner_.get_max_v_by_system();
+	Sdestination robot_actual_dest=this->planner_.get_robot_destination();
+	//companionState_companionStateResults_msg_.destinations.resize(1);
+	//iri_nav_msgs::destination actual_dest_pers_robot;
+	//actual_dest_pers_robot.personid=id_person_companion_;
+	//actual_dest_pers_robot.position.x=robot_actual_dest.x;
+//	actual_dest_pers_robot.position.y=robot_actual_dest.y;
+//	actual_dest_pers_robot.position.z=0.0;	
+	//companionState_companionStateResults_msg_.destinations[0]=actual_dest_pers_robot;
+	// estas dos siguientes era mejor no usarlas y no decir nada. Hubiera sido un incordio y ya se veia que estaba evitando obstaculos.
+	//companionState_companionStateResults_msg_.estoyEvitandoObstaculosEstaticos=false; //this->planner_.get_bool_evitando_obst_estaticos();
+	//companionState_companionStateResults_msg_.estoyEvitandoObstaculosDynamicos=false;//this->planner_.get_bool_evitando_obst_dynamicos();
+	//companionState_companionStateResults_msg_.estateNoPathObstacleClose=this->planner_.get_obstacle_very_close_no_path();
+
+	bool robot_in_lat=true;
+	robot_in_lat=true;
+
+	//companionState_companionStateResults_msg_.robotLateral=robot_in_lat;
+	if(output_screen_messages_){
+	ROS_INFO("(actual) NO path; this->planner_.get_obstacle_very_close_no_path()=%d",this->planner_.get_obstacle_very_close_no_path());
+	}
+
+ //	this->companionState_publisher_.publish(this->companionState_companionStateResults_msg_);
+	if((see_std_out_mesages_ros_)||(see_std_out_velocities_ros_)){
+		std::cout<< "LAST ROBOT VELOCITY (Si V!=0, TODO BIEN) => V.x="<<cmd_vel.linear.x<<"; y="<<cmd_vel.linear.y <<"; W="<< cmd_vel.angular.z<<"; this->config_.speed_k="<<this->config_.speed_k<< std::endl;
+	}
+
+
+	///INI  USE diferent params for side-by-side central and lateral, for people companion!
+	//params_side_by_side_central_.reserve(5);
+	params_side_by_side_lateral_or_one_person_.reserve(5);
+
+	//this->planner_.set_sfm_to_person_companion( params_side_by_side_lateral_or_one_person_ );
+	//std::vector<double> param_now=this->planner_.get_set_sfm_to_person_companion();
+
+	///FIN  USE diferent params for side-by-side central and lateral, for people companion!
+
+	if(output_screen_messages_){
+	ROS_ERROR(" (LAST velocity robot)  cmd_vel.linear.x=%f; cmd_vel.linear.y=%f this->robot_pose_.v=%f; cmd_vel.angular.z=%f; robot_plan_succed=%d",cmd_vel.linear.x,cmd_vel.linear.y,this->robot_pose_.v,cmd_vel.angular.z,robot_plan_succed);
+	}
+
+  return robot_plan_succed;
+}
+
+bool AkpLocalPlanner::setPlan(const std::vector<geometry_msgs::PoseStamped>& orig_global_plan)
+{
+  //ROS_INFO("!!!!!!!!!!!!!!!!!!! ENTRO EN AkpLocalPlanner::setPlan!!!");
+  // (1) funcion, local planer. Da las posiciones del local plan, path, a seguir por el robot. la que toca de verdad la libreria de Gonzalo. El plan que el calcula.
+  // ROS_INFO("AkpLocalPlanner::setPlan");
+  if(!initialized_)
+  {
+    ROS_ERROR("AkpLocalPlanner::setPlan: This planner has not been initialized, please call initialize() before using this planner");
+    return false;
+  }
+  velocities_.clear();//clears the average of velocities when new plans are calculated
+  this->global_plan_.clear();
+  this->global_plan_ =  orig_global_plan;
+
+  // slice global plan into subgoals
+  if ( goal_providing_mode_ == AkpLocalPlanner::Slicing_global )
+    slice_plan( );
+
+  //else , there is no need to do anything
+  return true;
+}
+
+void AkpLocalPlanner::slice_plan()
+{
+
+ //ROS_INFO("ENTRO EN AkpLocalPlanner::slice_plan!!!");
+
+  sliced_global_plan_.clear();
+  std::vector<double> orientations, avg_orientations;
+  unsigned int n(5), i_down, i_up;
+  double dx, dy, theta, accumulated_orientation, avg_ori;
+  
+  // get vector of orientaions in 2D-> yaw angle
+  assert(orientations.size() <=1 && "AkpLocalPlanner::slice_plan: global_plan vector empty");
+  for( unsigned int i=1; i < global_plan_.size(); ++i )
+  {
+      
+    //differential in 2d
+    dy = global_plan_[i].pose.position.y - global_plan_[i-1].pose.position.y;
+    dx = global_plan_[i].pose.position.x - global_plan_[i-1].pose.position.x;
+    orientations.push_back( atan2( dy, dx ) );
+    //ROS_INFO("2d processing = %f", theta);
+  }
+  
+  
+  assert(!orientations.empty() && "AkpLocalPlanner::slice_plan: orientations vector empty");
+  //calculate the differential of orientations in 2D in [-pi, pi]
+  for(unsigned int i=1; i < orientations.size(); ++i)
+  {
+    orientations[i-1] = orientations[i] - orientations[i-1];
+    if( orientations[i-1] > PI )
+      orientations[i-1] -= 2.0*PI;
+    if (orientations[i-1] < -PI )
+      orientations[i-1] += 2.0*PI;
+  }
+  orientations.back() = 0.0;
+   
+  //slice the std::vector<geometry_msgs::PoseStamped> global_plan_
+  //ROS_INFO("accumulated orientation = %d", orientations.size());
+  sliced_global_plan_.push_back( global_plan_.back() );
+  accumulated_orientation = 0.0;
+  for(unsigned int i=orientations.size()-1; i > 0 ; --i)
+  {
+    accumulated_orientation += fabs(orientations[i]);
+    //ROS_INFO("accumulated orientation = %f with respect to %f in %d" , accumulated_orientation, 20.0*PI/180.0, i);
+    if ( accumulated_orientation > slicing_path_diff_orientation_*PI/180.0 )
+    {
+      //check if it near the previous on and then discard
+      dx = sliced_global_plan_.back().pose.position.x - global_plan_[i].pose.position.x;
+      dy = sliced_global_plan_.back().pose.position.y - global_plan_[i].pose.position.y;
+      accumulated_orientation = 0.0;
+      Spoint robot_act_global_goal_=Spoint(global_plan_[i].pose.position.x, global_plan_[i].pose.position.y);
+      double  d_horitzon= planner_.get_horizon_time()*planner_.get_robot2()->get_v_max ();//V_robot(0.75)
+
+      //ROS_INFO("[slice_plan() => d_horitzon=%f; robot_vel_max=%f",d_horitzon,planner_.get_robot2()->get_v_max ());
+
+      if ( (dx*dx + dy*dy > 1.0) && (this->robot_pose_.distance( robot_act_global_goal_ ) > d_horitzon) )
+      {
+        sliced_global_plan_.push_back( global_plan_[i] );
+        //ROS_INFO( "Subgoal in (%f, %f) at i = %d", sliced_global_plan_.back().pose.position.x, sliced_global_plan_.back().pose.position.y, i );
+      }
+    }  
+  }
+        
+}
+
+bool AkpLocalPlanner::isGoalReached()
+{ 
+
+  //this->planner_mutex_enter();
+  if(debug_antes_subgoals_entre_AKP_goals_){
+    ROS_INFO("ENTRO EN AkpLocalPlanner::isGoalReached!!!");
+  }
+  // (3) funcion, local planer. Comprueba si el robot llega al goal. Si no llega se vuelve a llamar a la funcion de las velocidades, para conseguir que el robot llegue al goal.
+  // ROS_INFO("AkpLocalPlanner::isGoalReached");
+  bool ok=false;
+  double goal_x=0.0;
+  double goal_y=0.0;
+
+  if(!initialized_){
+    ROS_ERROR("AkpLocalPlanner::isGoalReached: This planner has not been initialized, please call initialize() before using this planner");
+    return false;
+  }
+  if(debug_antes_subgoals_entre_AKP_goals_){
+    ROS_INFO("AkpLocalPlanner::setPlan: global_plan_ points.x= %f ; points.y= %f", this->global_plan_.back().pose.position.x, this->global_plan_.back().pose.position.y);
+  }
+
+   if( goal_providing_mode_ == AkpLocalPlanner::Slicing_global )
+  {
+
+    //propose the new goal as the last of
+    robot_goal_.x = sliced_global_plan_.back().pose.position.x;
+    robot_goal_.y = sliced_global_plan_.back().pose.position.y;  
+    //identify of it is the last subgoal is reached and then propose a new one if any
+    if( this->robot_pose_.distance( this->robot_goal_ ) < planner_.get_distance_to_stop() &&
+        sliced_global_plan_.size() > 1  )
+    {
+      sliced_global_plan_.pop_back();
+      robot_goal_.x = sliced_global_plan_.back().pose.position.x;
+      robot_goal_.y = sliced_global_plan_.back().pose.position.y;  
+    }
+  }
+  else // if( goal_providing_mode_ == AkpLocalPlanner::Crop_local_window)
+  {
+
+    //transform plan from global to local coordinates, and crop it to the local costmap window
+    std::string base_frame_ = this->robot_frame;
+    if(!transformGlobalPlan(*this->tf_, this->global_plan_, *this->costmap_ros_, base_frame_, this->local_plan_))
+    {
+      ROS_WARN("AkpLocalPlanner::isGoalReached(): Could not transform the global plan to the frame of the controller, %s", base_frame_.c_str());
+      return false;
+    }
+
+    //transform last pose of the local plan to global coordinates
+    geometry_msgs::PoseStamped last_pose(this->local_plan_.back());
+    std::string global_frame_ = this->fixed_frame;
+    if(!transformPose(*this->tf_, last_pose, *this->costmap_ros_, global_frame_, last_pose))
+    {
+      ROS_WARN("AkpLocalPlanner::isGoalReached(): Could not transform the goal to the frame of the controller, %s", base_frame_.c_str());
+      return false;
+    }
+
+    //send that pose as goal
+    tf::Stamped<tf::Pose> goal_point;
+    tf::poseStampedMsgToTF(last_pose, goal_point);
+    goal_x  = goal_point.getOrigin().getX();
+    goal_y  = goal_point.getOrigin().getY();
+
+    this->robot_goal_.x = goal_x;
+    this->robot_goal_.y = goal_y;
+  }//end of else, case for the Crop_local_window
+
+	
+	this->planner_mutex_enter();
+	this->planner_.set_robot_goal(this->robot_goal_);
+	this->planner_.set_robot_goal_person_goal_global_plan_IN_robot_VERSION(this->robot_goal_);
+	this->planner_mutex_exit();
+
+  if(this->robot_pose_.distance( this->robot_goal_ ) < this->xy_goal_tolerance
+     && this->robot_pose_.v < this->v_goal_tolerance)
+  {
+    ok=true;
+    this->planner_.set_final_goal_reached_in_node(true);
+
+	this->robot_pose_.v=0;
+	this->robot_pose_.w=0;
+    //ROS_INFO("AkpLocalPlanner::isGoalReached: GOAL REACHED x,y: %f, %f at distance %f; this->robot_pose_.v=%f; this->v_goal_tolerance=%f", this->robot_goal_.x, this->robot_goal_.y, this->robot_pose_.distance( this->robot_goal_ ),this->robot_pose_.v,this->v_goal_tolerance);
+  }else{
+    this->planner_.set_final_goal_reached_in_node(false);
+  }
+
+	ok=false;
+  //ROS_DEBUG("AkpLocalPlanner::isGoalReached: x,y: %f, %f and size = %d", robot_goal_.x, robot_goal_.y, (int)sliced_global_plan_.size());
+  return ok;
+}
+
+/*  [subscriber callbacks] */
+void AkpLocalPlanner::fscan_callback(const sensor_msgs::LaserScan::ConstPtr& msg) 
+{
+  //ROS_INFO("AkpLocalPlanner::scan_callback: New Message Received"); 
+
+  this->fscan_mutex_enter(); 
+  this->fscan = *msg;
+  this->fscan_received=true;
+  this->fscan_mutex_exit(); 
+}
+
+void AkpLocalPlanner::rscan_callback(const sensor_msgs::LaserScan::ConstPtr& msg) 
+{
+  //ROS_INFO("AkpLocalPlanner::scan_callback: New Message Received"); 
+
+  this->rscan_mutex_enter(); 
+  this->rscan = *msg;
+  this->rscan_received=true;
+  this->rscan_mutex_exit(); 
+}
+
+std::vector<Spoint> AkpLocalPlanner::scan2points(const sensor_msgs::LaserScan scan)
+{
+  
+  header_point_.header= scan.header;  // variable for companion (ely)
+
+  std::vector<Spoint> points;
+  points.clear();
+  std::string source_frame = scan.header.frame_id;
+  std::string target_frame = this->fixed_frame;
+  ros::Time target_time    = scan.header.stamp;
+
+
+  if(source_frame!=target_frame){
+
+    try
+    {
+
+      bool tf_exists = this->tf_->waitForTransform(target_frame, source_frame, target_time, ros::Duration(1), ros::Duration(0.01));
+      if(tf_exists)
+      {
+
+        geometry_msgs::PointStamped pointIn;
+        geometry_msgs::PointStamped pointOut;
+        pointIn.header = scan.header;
+        double t;
+        for( unsigned int i = 0; i < scan.ranges.size(); ++i)
+        {
+
+          if ( scan.ranges[i]  < 15.0  && scan.ranges[i] > 0.05)
+          {
+            t = scan.angle_min + (double)i*scan.angle_increment;
+            pointIn.point.x = scan.ranges[i] * cos( t );
+            pointIn.point.y = scan.ranges[i] * sin( t );
+            this->tf_->transformPoint(target_frame, pointIn, pointOut);
+            points.push_back( Spoint( pointOut.point.x, pointOut.point.y ) );
+          }
+        }
+      }
+      else
+      {
+        ROS_WARN("AkpLocalPlanner::scan2points: No transform: %s-->%s", source_frame.c_str(), target_frame.c_str());
+      }
+    }
+    catch (tf::TransformException &ex)
+    {
+      ROS_WARN("AkpLocalPlanner::scan2points: %s",ex.what());
+    }
+  }else{
+     double t;
+     for( unsigned int i = 0; i < scan.ranges.size(); ++i)
+     {
+          if ( scan.ranges[i]  < 15.0  && scan.ranges[i] > 0.05)
+          {
+            t = scan.angle_min + (double)i*scan.angle_increment;   
+            points.push_back( Spoint( scan.ranges[i] * cos( t ), scan.ranges[i] * sin( t ) ) );
+          }
+     }
+
+  }
+
+
+
+  return points;
+}
+
+void AkpLocalPlanner::odom_callback(const nav_msgs::Odometry::ConstPtr& msg) 
+{
+ // ROS_INFO("AkpLocalPlanner::odom_callback: New Message Received");
+	double odom_time=ros::Time::now().toSec();
+	before_odom_time_=odom_time;
+
+  Spose actual_odom_robot_pose;
+  actual_odom_robot_pose.v = msg->twist.twist.linear.x;
+  actual_odom_robot_pose.w = msg->twist.twist.angular.z;
+
+  //Get Robot position: transform empty/zero pose from base_link to map
+  std::string target_frame = this->fixed_frame;
+  std::string source_frame = this->robot_frame; 
+  ros::Time target_time    = ros::Time::now();
+
+	double time_start=ros::Time::now().toSec();
+  try
+  {
+    bool tf_exists = this->tf_->waitForTransform(target_frame, source_frame, target_time, ros::Duration(1), ros::Duration(0.01));
+    if(tf_exists)
+    {
+      geometry_msgs::PoseStamped poseIn;
+      geometry_msgs::PoseStamped poseOut;
+      poseIn.header.stamp    = target_time;
+      poseIn.header.frame_id = source_frame;
+      poseIn.pose.orientation.z = 1.0; //valid quaternion
+      this->tf_->transformPose(target_frame, poseIn, poseOut);
+      actual_odom_robot_pose.x = poseOut.pose.position.x;
+      actual_odom_robot_pose.y = poseOut.pose.position.y;
+      actual_odom_robot_pose.time_stamp = poseOut.header.stamp.toSec();
+
+      //vector of the orientation
+      poseIn.pose.position.x = 1.0;
+      this->tf_->transformPose(target_frame, poseIn, poseOut);
+      actual_odom_robot_pose.theta = atan2(poseOut.pose.position.y - this->robot_pose_.y , poseOut.pose.position.x - this->robot_pose_.x);
+
+      //ROS_DEBUG("AkpLocalPlanner::odom_callback: robot pose x,y,th,v,w: %f, %f, %f, %f, %f", this->robot_pose_.x, this->robot_pose_.y, this->robot_pose_.theta, this->robot_pose_.v, this->robot_pose_.w);
+    }
+    else
+    {
+      ROS_WARN("AkpLocalPlanner::odom_callback: No transform: %s-->%s", source_frame.c_str(), target_frame.c_str());
+    }
+  }
+  catch (tf::TransformException &ex)
+  {
+    ROS_WARN("AkpLocalPlanner::odom_callback: %s",ex.what());
+  }
+
+	double time_end=ros::Time::now().toSec();
+
+	//ROS_INFO("AkpLocalPlanner::odom_callback: tf_time=%f", time_end-time_start);
+	
+	this->odom_mutex_enter();
+	this->robot_pose_=actual_odom_robot_pose;
+  this->odom_mutex_exit();
+}
+
+
+
+void AkpLocalPlanner::tracks_callback(const iri_perception_msgs::detectionArray::ConstPtr& msg) 
+{
+ //ROS_INFO("AkpLocalPlanner::tracks_callback: New Message Received");
+  if(msg->header.frame_id == this->fixed_frame)
+  {
+
+    this->tracks_mutex_enter();
+
+    this->obs.clear();
+    std::vector<double> cov;
+    cov.resize(16,0.0);
+
+    for( unsigned int i = 0; i< msg->detection.size(); ++i)
+    {
+      //ROS_INFO(" [IN ROBOT TRACKS!!!] AkpLocalPlanner::tracks_callback: id = %d, (x,y) = (%f, %f), (vx,vy) = (%f, %f), prob=%f", msg->detection[i].id, msg->detection[i].position.x, msg->detection[i].position.y, msg->detection[i].velocity.x, msg->detection[i].velocity.y, msg->detection[i].probability);
+      //covariances conversion from 4x4 to 6x6
+      cov[0] = msg->detection[i].covariances[0];//x x
+      cov[1] = msg->detection[i].covariances[1];//x y
+      cov[2] = msg->detection[i].covariances[3];//x vx
+      cov[3] = msg->detection[i].covariances[4];//x vy
+      cov[4] = msg->detection[i].covariances[6];//x y
+      cov[5] = msg->detection[i].covariances[7];//y y
+      cov[6] = msg->detection[i].covariances[9];//y vx
+      cov[7] = msg->detection[i].covariances[10];//y vy
+      cov[8] = msg->detection[i].covariances[18];//vx x
+      cov[9] = msg->detection[i].covariances[19];//vx y
+      cov[10] = msg->detection[i].covariances[21];//vx vx
+      cov[11] = msg->detection[i].covariances[22];//vx vy
+      cov[12] = msg->detection[i].covariances[24];//vy x
+      cov[13] = msg->detection[i].covariances[25];//vy y
+      cov[14] = msg->detection[i].covariances[27];//vy vx
+      cov[15] = msg->detection[i].covariances[28];//vy vy
+
+			unsigned int id_person;	
+			id_person=msg->detection[i].id;
+	
+  		this->obs.push_back(SdetectionObservation(id_person, msg->header.stamp.toSec(),
+                                          msg->detection[i].position.x,  msg->detection[i].position.y ,
+                                          msg->detection[i].velocity.x, msg->detection[i].velocity.y, cov));
+
+			if(msg->detection[i].id==id_person_companion_){//(msg->detection[i].id==id_SECOND_person_companion_)||
+				//ROS_INFO("AkpLocalPlanner::tracks_callback: msg->detection[i].Track.id = %d; track.probability=%f",msg->detection[i].id,msg->detection[i].probability);
+			}
+    }
+    this->tracks_mutex_exit();
+    //ROS_INFO("AkpLocalPlanner::tracks_callback: Exit"); 
+  }
+  else
+  {
+    ROS_ERROR("AkpLocalPlanner::tracks_callback: tracks are in %s frame instead of %s", msg->header.frame_id.c_str(), this->fixed_frame.c_str());
+  }
+  
+}
+
+
+void AkpLocalPlanner::params_values_callback(const std_msgs::Float64MultiArray::ConstPtr& msg)
+{
+  //ROS_INFO("AkpLocalPlanner::params_values_callback: new message");
+  this->planner_.set_plan_cost_parameters(msg->data[0],//distance
+                              msg->data[1],//orientation
+                              msg->data[2],//robot
+                              msg->data[3],//people
+                              0.0,        //time
+                              msg->data[4],//obstacles
+                              msg->data[5],//past trajetory
+                              0.0);//local minima
+
+}
+
+
+/*  [service callbacks] */
+
+/*  [action callbacks] */
+
+/*  [action requests] */
+
+void AkpLocalPlanner::reconfigureCallback(iri_robot_aspsi::AkpLocalPlannerConfig &config, uint32_t level)
+{
+	this->planner_mutex_enter();
+	/*if(change_ps3_config_){
+	//ROS_INFO("(change_ps3_config_) PlatformTeleopAlgNode::joy_callback: this->config_.id_person_companion=%d; this->config_.id_SECOND_person_companion=%d!!! ",this->config_.id_SECOND_person_companion);
+		change_ps3_config_=false;
+		config.id_person_companion=this->config_.id_person_companion;
+	}*/
+	
+	/// Fin Selec closes person as companion!!!
+	std::vector<double> params(5,0.0);
+	//params_side_by_side_central_.reserve(5);
+	params_side_by_side_lateral_or_one_person_.reserve(5);
+
+this->frame_map_ = config.frame_map;
+	this->frame_robot_footprint_ = config.frame_robot_footprint;
+
+ 		this->fixed_frame = this->frame_map_;//"/map";
+    //this->robot_frame  = "/" + this->robot_ + "/base_link";
+     // this->robot_frame  = "/tibi/base_footprint";
+   this->robot_frame  = this->frame_robot_footprint_;//"/ti
+ROS_INFO("AkpLocalPlanner::scan2points:transform: frame_map_: %s-->frame_robot_footprint_:%s", frame_map_.c_str(), frame_robot_footprint_.c_str());
+
+	if(!setup_)
+	{
+
+		//ROS_INFO(" INI AkpLocalPlanner::reconfigureCallback (if !setup_)");
+
+		this->config_=config;
+		this->robot_goal_force_marker       = config.robot_goal_force_marker;
+		this->robot_person_forces_marker    = config.robot_person_forces_marker;
+		this->robot_obstacles_forces_marker = config.robot_obstacles_forces_marker;
+		this->robot_resultant_force_marker  = config.robot_resultant_force_marker;
+		this->config_=config;
+		default_config_ = config;
+		setup_ = true;
+		// change (ely) para puentear lo de move_base a true! (que me deje dar goals desde el principio!)
+
+		this->move_base = config.move_base;
+
+		if(debug_antes_subgoals_entre_AKP_goals_){
+		  std::cout << " AkpLocalPlanner::reconfigureCallback this->move_base ="<< this->move_base  << std::endl;
+		}
+		this->plan_mode_ = (Cplan_local_nav::plan_mode) config.plan_mode;
+		this->planner_.set_planning_mode(plan_mode_);
+		this->planner_.set_distance_mode((Cplan_local_nav::distance_mode)config.distance_mode );
+		this->planner_.set_global_mode((Cplan_local_nav::global_mode)config.global_mode );
+		this->planner_.set_number_of_vertex(config.number_vertex);
+		// ROS_INFO("\n\n\n numer of vertex = %d\n\n\n\n" , config.number_vertex);
+		this->planner_.set_horizon_time( config.horizon_time );
+
+		this->planner_.set_plan_cost_parameters(config.cost_distance,
+								  config.cost_orientation,
+								  config.cost_w_robot,
+								  config.cost_w_people,
+								  config.cost_time,
+								  config.cost_obs,
+								  config.cost_old_path,
+								  config.cost_l_minima);
+		this->planner_.set_robot_params(config.v_max, config.w_max, config.av_max, config.av_break, config.aw_max, config.platform_radii, config.av_max_negativa, config.av_max_VrobotZero, config.lim_VrobotZero);
+		this->vis_mode_ = config.vis_mode;
+		this->frozen_mode_ = config.frozen_mode;
+		this->planner_.set_min_v_to_predict( config.min_v_to_predict );//Cscene_bhmip
+		this->planner_.set_ppl_collision_mode( config.ppl_collision_mode );
+		this->planner_.set_pr_force_mode( config.pr_force_mode );
+		goal_providing_mode_ = (AkpLocalPlanner::Goal_providing_mode)config.goal_providing_mode;
+		slicing_path_diff_orientation_ = config.slicing_diff_orientation;
+	}
+	else if(setup_)
+  {
+ 		//ROS_INFO(" INI AkpLocalPlanner::reconfigureCallback (if setup_)");
+
+		this->move_base = config.move_base;
+
+		if(debug_antes_subgoals_entre_AKP_goals_){
+			std::cout << " AkpLocalPlanner::reconfigureCallback this->move_base ="<< this->move_base  << std::endl;
+		}
+		this->plan_mode_ = (Cplan_local_nav::plan_mode) config.plan_mode;
+ 		this->planner_.set_planning_mode(plan_mode_);
+		this->planner_.set_distance_mode((Cplan_local_nav::distance_mode)config.distance_mode );
+		this->planner_.set_global_mode((Cplan_local_nav::global_mode)config.global_mode );
+		this->planner_.set_number_of_vertex(config.number_vertex);
+		if(debug_antes_subgoals_entre_AKP_goals_){
+			ROS_INFO("\n\n\n numer of vertex = %d\n\n\n\n" , config.number_vertex);
+		}
+		this->planner_.set_horizon_time( config.horizon_time );
+		if(debug_antes_subgoals_entre_AKP_goals_){
+			ROS_INFO("\n\n\n horizon_time = %f\n\n\n\n" , config.horizon_time );
+		}
+	
+		this->planner_.set_plan_cost_parameters(config.cost_distance,
+                                config.cost_orientation,
+                                config.cost_w_robot,
+                                config.cost_w_people,
+                                config.cost_time,
+                                config.cost_obs,
+                                config.cost_old_path,
+                                config.cost_l_minima);
+		this->planner_.set_robot_params(config.v_max, config.w_max, config.av_max, config.av_break, config.aw_max, config.platform_radii,config.av_max_negativa,config.av_max_VrobotZero, config.lim_VrobotZero);
+		this->vis_mode_ = config.vis_mode;
+		this->frozen_mode_ = config.frozen_mode;
+		this->planner_.set_min_v_to_predict( config.min_v_to_predict );//Cscene_bhmip
+		this->planner_.set_ppl_collision_mode( config.ppl_collision_mode );
+		this->planner_.set_pr_force_mode( config.pr_force_mode );
+		goal_providing_mode_ = (AkpLocalPlanner::Goal_providing_mode)config.goal_providing_mode;
+		slicing_path_diff_orientation_ = config.slicing_diff_orientation;
+	}
+
+	// ini companion config variables.
+	this->planner_.set_robot_person_proximity_distance(config.proximity_distance_between_robot_and_person);
+	
+	this->planner_.set_max_d_to_detect_laser_obs(config.detection_laser_obstacle_distances);    
+	external_goal_=config.external_goal;
+	if(config.external_goal==true){
+		ROS_INFO("\n\n\n 1 config.external_goal = %d\n\n\n\n" , config.external_goal);
+		this->planner_.set_companion_same_person_goal(false);
+	}else{
+		ROS_INFO("\n\n\n 2 config.external_goal = %d\n\n\n\n" , config.external_goal);
+		this->planner_.set_companion_same_person_goal(true);
+	}
+	this->planner_.set_max_asos_point_to_person(config.in_max_asos_point_to_person);
+
+	this->config_ = config; // para mi es generico, necesito que se me quede con el config cada vez que entra.
+	
+	this->planner_.set_side_by_side_companion_angle(config.real_companion_angle_SideBySide);
+
+	this->planner_.set_real_companion_angle(config.real_companion_angle_SideBySide);
+	real_companion_angle_SideBySide_=config.real_companion_angle_SideBySide;
+
+	this->planner_.set_normal_vel_dampening_parameter_planner(config.conf_normal_vel_dampening_parameter);
+	this->planner_.set_limit_linear_vel_for_dampening_parameter_planner(config.conf_limit_linear_vel_for_dampening_parameter);
+	this->planner_.set_limit_angular_vel_for_dampening_parameter_planner(config.conf_limit_angular_vel_for_dampening_parameter);
+
+	this->planner_.set_id_person_companion(config.id_person_companion);
+	this->planner_.set_id_person_companion_Cprediction_bhmip(config.id_person_companion);
+	id_person_companion_=config.id_person_companion;
+	std::cout << " CHANGE id_person_companion_="<< id_person_companion_  << std::endl;
+
+	this->planner_.set_number_of_group_people(config.number_of_people_in_group);
+	number_of_people_in_group_=config.number_of_people_in_group;
+
+	//std::cout << "(config) num_people_for_state_="<< num_people_for_state_  << std::endl;
+
+	in_set_planner_dt_=config.set_planner_dt;
+	this->planner_.set_dt(in_set_planner_dt_);
+
+
+
+	//std::cout << " OUT!!!! AkpLocalPlanner::reconfigureCallback before last changes"<< std::endl;
+	this->planner_.set_new_time_window_for_filter_velocity(config.change_time_window_filter_vel_people);
+	
+	//ROS_INFO("out case select near person as companion! id_person");
+
+	this->planner_.set_final_max_v(config.conf_final_max_v);
+	
+	num_people_node_=config.number_of_people_in_group;
+
+	this->planner_.plan_set_initial_v_robot_needed(config.set_initial_v_robot_needed_for_odom);
+
+	radi_other_people_detection_=config.radi_to_detect_other_people_no_companions;
+ 	this->planner_.set_metros_al_dynamic_goal_Vform(config.distance_to_dynamic_goal_Vform);
+
+
+	/// INI Launch a goal from reconfigure
+ 	if(config.launch_goal){
+		std::cout << " Launch Goal true." << std::endl;
+
+
+		geometry_msgs::PoseStamped target_goal_simple;
+	 	target_goal_simple.pose.position.x =this->robot_pose_.x;
+		target_goal_simple.pose.position.y = this->robot_pose_.y;
+		target_goal_simple.pose.position.z = 0;
+		target_goal_simple.pose.orientation.w = 1;
+		target_goal_simple.header.frame_id = "map";
+
+		this->goal_publisher_.publish(target_goal_simple);
+			
+		this->planner_.set_new_time_window_for_filter_velocity(4.0);
+
+		char Str[10] = "";
+		Spoint facke_point1;
+		facke_point1.itoa(id_person_companion_, Str);
+		std::string file_name_person1=Str;
+
+		char Str2[10] = "";
+
+		std::string file_name_person2=Str2;
+
+	}
+	// FIN launch a goal from reconfigure
+
+	// limit final speed robot.
+	ros_max_real_speed_out_=config.max_real_speed_out;
+	//fuera_bolitas_goals_companion_markers_=config.fuera_bolitas_goals_companion_markers_conf;
+
+  // INI select closes person as companion (CASE 1 People)
+ 	if(config.select_near_pers_as_companion_one_person){
+ 		//change_ps3_config_=true;
+ 		
+		unsigned int id_min_dist_per;
+		if(!this->obs.empty()){
+			Spoint actual_robot_pose;   //observation[i].id 
+			actual_robot_pose.x=this->robot_pose_.x;
+			actual_robot_pose.y=this->robot_pose_.y;
+			actual_robot_pose.time_stamp=this->robot_pose_.time_stamp;
+			std::vector<double> distances;  // vector distancias.
+			std::vector<Spoint> actual_person; // vector Spoints.
+			std::vector<unsigned int> ids_people;           
+			for(unsigned int t=0; t<this->obs.size(); t++){
+				actual_person.push_back(this->obs[t]);
+				distances.push_back(actual_person[t].distance(actual_robot_pose));
+				ids_people.push_back(this->obs[t].id);
+			
+			}
+
+ 			double min_distance=distances[0];
+			id_min_dist_per=this->obs[0].id;
+			unsigned int min_t=0;
+
+			for(unsigned int t=0; t<distances.size(); t++){
+		    // calculate near person!
+				if(distances[t]<min_distance){
+					min_distance=distances[t];
+					id_min_dist_per=ids_people[t];
+ 					min_t=t;
+				}
+ 			}
+	
+			// person companion:
+	 		this->planner_.set_id_person_companion(id_min_dist_per);
+	 		this->planner_.set_id_person_companion_Cprediction_bhmip(id_min_dist_per);
+	 		id_person_companion_=id_min_dist_per;
+			this->config_.id_person_companion=id_min_dist_per;
+			config.id_person_companion=this->config_.id_person_companion;
+			this->vis_mode_ = 2.0;
+			this->config_.vis_mode = 2.0;	
+
+		}
+
+
+  }
+  // FIN select closes person as companion (CASE 1 people)
+ 	stop_robot_manually_=config.stop_robot_manually_conf;
+ 	step_decreace_velocity_stop_robot_=config.step_decreace_velocity_stop_robot_conf;
+ 	limit_velocity_stop_robot_=config.limit_velocity_stop_robot_conf;
+
+	this->planner_.set_change_dynamic_of_final_dest(config.in_change_dynamically_final_dest);
+
+	see_std_out_mesages_ros_=config.see_std_out_mesages;
+
+	see_std_out_velocities_ros_=config.see_std_out_velocities;
+	this->planner_.set_see_std_out_velocities(config.see_std_out_velocities);
+
+	this->planner_.set_see_save_in_file(config.conf_see_save_in_file);
+	
+	output_screen_messages_=config.output_screen_messages;
+	this->planner_.set_output_screen_messages(config.output_screen_messages);
+
+	//std::cout << " OUT!!!! AkpLocalPlanner::reconfigureCallback this->move_base ="<< this->move_base  << std::endl;
+	this->planner_mutex_exit();
+}
+
+//copied from goal_functions.cpp in base_local_planner
+bool AkpLocalPlanner::transformGlobalPlan(const tf::TransformListener& tf, 
+                                            const std::vector<geometry_msgs::PoseStamped>& global_plan, 
+                                            const costmap_2d::Costmap2DROS& costmap, 
+                                            const std::string& global_frame, 
+                                            std::vector<geometry_msgs::PoseStamped>& transformed_plan)
+{
+
+    //ROS_INFO("AkpLocalPlanner::transformGlobalPlan!!!!");
+
+  bool ok=true;
+  transformed_plan.clear();
+
+  try
+  {
+    if (!global_plan.size() > 0)
+    {
+      ROS_ERROR("AkpLocalPlanner::transformGlobalPlan: Recieved plan with zero length");
+      return false;
+    }
+    const geometry_msgs::PoseStamped& plan_pose = global_plan[0];
+    tf::StampedTransform transform;
+    tf.lookupTransform(global_frame, ros::Time(), plan_pose.header.frame_id, plan_pose.header.stamp, plan_pose.header.frame_id, transform);
+
+    //let's get the pose of the robot in the frame of the plan
+    tf::Stamped<tf::Pose> robot_pose;
+    robot_pose.setIdentity();
+    robot_pose.frame_id_ = this->robot_frame;
+    robot_pose.stamp_ = ros::Time();
+    tf.transformPose(plan_pose.header.frame_id, robot_pose, robot_pose);
+
+    //we'll keep points on the plan that are within the window that we're looking at
+    double dist_threshold = planner_.get_workspace_radii();
+    if(dist_threshold ==0)
+      dist_threshold=0.5;
+    unsigned int i = 0;
+    double sq_dist_threshold = dist_threshold * dist_threshold;
+    double sq_dist = DBL_MAX;
+    //we need to loop to a point on the plan that is within a certain distance of the robot
+    while(i < (unsigned int)global_plan.size() && sq_dist > sq_dist_threshold)
+    {
+      double x_diff = robot_pose.getOrigin().x() - global_plan[i].pose.position.x;
+      double y_diff = robot_pose.getOrigin().y() - global_plan[i].pose.position.y;
+      sq_dist = x_diff * x_diff + y_diff * y_diff;
+      ++i;
+    }
+    //make sure not to count the first point that is too far away
+    if(i > 0)
+      --i;
+
+    tf::Stamped<tf::Pose> tf_pose;
+    geometry_msgs::PoseStamped newer_pose;
+
+    //now we'll transform until points are outside of our distance threshold
+    while(i < (unsigned int)global_plan.size() && sq_dist < sq_dist_threshold)
+    {
+      double x_diff = robot_pose.getOrigin().x() - global_plan[i].pose.position.x;
+      double y_diff = robot_pose.getOrigin().y() - global_plan[i].pose.position.y;
+      sq_dist = x_diff * x_diff + y_diff * y_diff;
+      const geometry_msgs::PoseStamped& pose = global_plan[i];
+      poseStampedMsgToTF(pose, tf_pose);
+      tf_pose.setData(transform * tf_pose);
+      tf_pose.stamp_ = transform.stamp_;
+      tf_pose.frame_id_ = global_frame;
+      poseStampedTFToMsg(tf_pose, newer_pose);
+      transformed_plan.push_back(newer_pose);
+      ++i;
+    }
+  }
+  catch(tf::LookupException& ex)
+  {
+    ROS_ERROR("No Transform available Error: %s\n", ex.what());
+    return false;
+  }
+  catch(tf::ConnectivityException& ex)
+  {
+    ROS_ERROR("Connectivity Error: %s\n", ex.what());
+    return false;
+  }
+  catch(tf::ExtrapolationException& ex)
+  {
+    ROS_ERROR("Extrapolation Error: %s\n", ex.what());
+    if (global_plan.size() > 0)
+      ROS_ERROR("Global Frame: %s Plan Frame size %d: %s\n", global_frame.c_str(), (unsigned int)global_plan.size(), global_plan[0].header.frame_id.c_str());
+    return false;
+  }
+  if(transformed_plan.size()==0)
+    ok=false;
+  return ok;
+}
+
+bool AkpLocalPlanner::transformPose(const tf::TransformListener& tf, 
+                                      const geometry_msgs::PoseStamped& plan_pose, 
+                                      const costmap_2d::Costmap2DROS& costmap, 
+                                      const std::string& target_frame, 
+                                      geometry_msgs::PoseStamped& transformed_pose)
+{
+
+
+  // ROS_INFO("AkpLocalPlanner::transformPose!!!");
+
+  try
+  {
+    tf::StampedTransform transform;
+    tf.lookupTransform(target_frame, ros::Time(), 
+                        plan_pose.header.frame_id, plan_pose.header.stamp, 
+                        plan_pose.header.frame_id, transform);
+    tf.transformPose(target_frame, plan_pose, transformed_pose);
+  }
+  catch(tf::LookupException& ex)
+  {
+    ROS_ERROR("AkpLocalPlanner::transformPose: No Transform available Error: %s\n", ex.what());
+    return false;
+  }
+  catch(tf::ConnectivityException& ex)
+  {
+    ROS_ERROR("AkpLocalPlanner::transformPose: Connectivity Error: %s\n", ex.what());
+    return false;
+  }
+  catch(tf::ExtrapolationException& ex)
+  {
+    ROS_ERROR("AkpLocalPlanner::transformPose: Extrapolation Error: %s\n", ex.what());
+    return false;
+  }
+  return true;
+}
+
+void AkpLocalPlanner::publishPlan(const std::vector<geometry_msgs::PoseStamped>& path, const ros::Publisher& pub)
+{
+  //ROS_INFO("AkpLocalPlanner::publishPlan!!!");
+  //given an empty path we won't do anything
+  if(path.empty())
+    return;
+  //create a path message
+  nav_msgs::Path gui_path;
+  gui_path.poses.resize(path.size());
+  gui_path.header.frame_id = path[0].header.frame_id;
+  gui_path.header.stamp = path[0].header.stamp;
+  // Extract the plan in world co-ordinates, we assume the path is all in the same frame
+  for(unsigned int i=0; i < path.size(); i++)
+  {
+    gui_path.poses[i] = path[i];
+  }
+  pub.publish(gui_path);
+}
+
+void AkpLocalPlanner::init_force_planner_and_markers()
+{
+  //target marker. Predicts the trajectories of people
+  pred_traj_marker_.header.frame_id = this->fixed_frame;
+  pred_traj_marker_.ns = "pred";
+  pred_traj_marker_.type = visualization_msgs::Marker::CYLINDER;
+  pred_traj_marker_.action = visualization_msgs::Marker::ADD;
+  pred_traj_marker_.lifetime = ros::Duration(1.23f);
+  pred_traj_marker_.scale.z = planner_.get_dt();
+  pred_traj_marker_.color.a = 0.05;
+  pred_traj_marker_.color.r = 0.3;
+  pred_traj_marker_.color.g = 1.0;
+  pred_traj_marker_.color.b = 0.3;
+  pred_traj_marker_.pose.orientation.w = 1.0;
+  
+  //target marker of the best path, projected in 2d
+  pred_traj2d_marker_.header.frame_id = this->fixed_frame;
+  pred_traj2d_marker_.ns = "pred2d";
+  pred_traj2d_marker_.type = visualization_msgs::Marker::CYLINDER;
+  pred_traj2d_marker_.action = visualization_msgs::Marker::ADD;
+  pred_traj2d_marker_.lifetime = ros::Duration(1.23f);
+  pred_traj2d_marker_.scale.z = 0.05;
+  pred_traj2d_marker_.color.a = 0.05;
+  pred_traj2d_marker_.color.r = 0.3;
+  pred_traj2d_marker_.color.g = 1.0;
+  pred_traj2d_marker_.color.b = 0.3;
+  pred_traj2d_marker_.pose.orientation.w = 1.0;
+  pred_traj2d_marker_.pose.position.z = 0.025;
+
+  //cylinder marker, for destinations and goals
+  cylinder_marker_.header.frame_id = this->fixed_frame;
+  cylinder_marker_.ns = "scene";
+  cylinder_marker_.type = visualization_msgs::Marker::CYLINDER;
+  cylinder_marker_.action = visualization_msgs::Marker::ADD;
+  cylinder_marker_.lifetime = ros::Duration(1.3f);
+  cylinder_marker_.color.a = 1.0;
+  cylinder_marker_.color.r = 0.3;
+  cylinder_marker_.color.g = 0.1;
+  cylinder_marker_.color.b = 0.8;
+  cylinder_marker_.scale.x = 0.7;
+  cylinder_marker_.scale.y = 0.7;
+  cylinder_marker_.scale.z = 1.2;
+  cylinder_marker_.pose.position.z = 0.6;
+  cylinder_marker_.pose.orientation.w = 1.0;
+
+  // robot goal marker, cylinders plot in the scene
+  robot_goal_marker_.header.frame_id = this->fixed_frame;
+  robot_goal_marker_.ns = "scene_goal1";
+  robot_goal_marker_.type = visualization_msgs::Marker::CYLINDER;
+  robot_goal_marker_.action = visualization_msgs::Marker::ADD;
+  robot_goal_marker_.lifetime = ros::Duration(1.3f);
+  robot_goal_marker_.color.a = 1.0;
+  robot_goal_marker_.color.r = 0.0; // 0.9
+  robot_goal_marker_.color.g = 0.0; // 0.3
+  robot_goal_marker_.color.b = 0.0; // 0.3
+  robot_goal_marker_.scale.x = 0.4;
+  robot_goal_marker_.scale.y = 0.4;
+  robot_goal_marker_.scale.z = 0.2;
+  robot_goal_marker_.pose.position.z = 0.1;
+  robot_goal_marker_.pose.orientation.w = 1.0;
+  
+  robot_subgoal_marker_ = robot_goal_marker_;
+  robot_subgoal_marker_.color.r = 0.9;
+  robot_subgoal_marker_.color.g = 0.6;
+  robot_subgoal_marker_.color.b = 0.6;
+  robot_subgoal_marker_.scale.x = 0.3;
+  robot_subgoal_marker_.scale.y = 0.3;
+
+  // robot_real_goal_marker!!!
+  robot_goal_marker2_.header.frame_id = this->fixed_frame;
+  robot_goal_marker2_.ns = "scene_goal";
+  robot_goal_marker2_.type = visualization_msgs::Marker::CYLINDER;
+  robot_goal_marker2_.action = visualization_msgs::Marker::ADD;
+  robot_goal_marker2_.lifetime = ros::Duration(1.3f);
+  robot_goal_marker2_.color.a = 1.0;
+  robot_goal_marker2_.color.r = 0.0;
+  robot_goal_marker2_.color.g = 0.0;
+  robot_goal_marker2_.color.b = 1.0;
+  robot_goal_marker2_.scale.x = 0.4;
+  robot_goal_marker2_.scale.y = 0.4;
+  robot_goal_marker2_.scale.z = 1.0;
+  robot_goal_marker2_.pose.position.z = 0.1;
+  robot_goal_marker2_.pose.orientation.w = 1.0;
+
+  // robot_real_goal_marker!!!
+  robot_goal_marker3_.header.frame_id = this->fixed_frame;
+  robot_goal_marker3_.ns = "scene_goal2";
+  robot_goal_marker3_.type = visualization_msgs::Marker::CYLINDER;
+  robot_goal_marker3_.action = visualization_msgs::Marker::ADD;
+  robot_goal_marker3_.lifetime = ros::Duration(1.3f);
+  robot_goal_marker3_.color.a = 0.0;
+  robot_goal_marker3_.color.r = 0.5;
+  robot_goal_marker3_.color.g = 1.0;
+  robot_goal_marker3_.color.b = 1.0;
+  robot_goal_marker3_.scale.x = 1.4;
+  robot_goal_marker3_.scale.y = 1.4;
+  robot_goal_marker3_.scale.z = 2.0;
+  robot_goal_marker3_.pose.position.z = 0.1;
+  robot_goal_marker3_.pose.orientation.w = 1.0;
+
+
+  // workspace marker
+  workspace_marker_.header.frame_id = this->fixed_frame;
+  workspace_marker_.ns = "scene_w";
+  workspace_marker_.type = visualization_msgs::Marker::LINE_LIST;
+  workspace_marker_.action = visualization_msgs::Marker::ADD;
+  workspace_marker_.lifetime = ros::Duration(1.3f);
+  workspace_marker_.scale.x = 0.05;
+  workspace_marker_.color.a = 0.8;
+
+  //planning marker. Calculated robot trajectories in space x time coordinates
+  planning_marker_.header.frame_id = this->fixed_frame;
+  planning_marker_.ns = "p3";
+  planning_marker_.type = visualization_msgs::Marker::LINE_LIST;
+  planning_marker_.action = visualization_msgs::Marker::ADD;
+  planning_marker_.lifetime = ros::Duration(1.3f);
+  planning_marker_.id = 0;
+  planning_marker_.scale.x = 0.05;
+  planning_marker_.color.a = 0.3;
+  planning_marker_.color.r = 0.1;
+  planning_marker_.color.g = 0.2;
+  planning_marker_.color.b = 0.9;
+
+  planning_marker_.points.reserve( this->planner_.get_number_of_vertex(  ) );
+
+  //cylinder marker, planning random goals
+  planning_goals_marker_.header.frame_id = this->fixed_frame;
+  planning_goals_marker_.ns = "goals";
+  planning_goals_marker_.type = visualization_msgs::Marker::CYLINDER;
+  planning_goals_marker_.action = visualization_msgs::Marker::ADD;
+  planning_goals_marker_.lifetime = ros::Duration(1.3f);
+  planning_goals_marker_.color.a = 0.6;
+  planning_goals_marker_.color.r = 0.9;
+  planning_goals_marker_.color.g = 0.1;
+  planning_goals_marker_.color.b = 0.0;
+  planning_goals_marker_.scale.x = 0.2;
+  planning_goals_marker_.scale.y = 0.2;
+  planning_goals_marker_.scale.z = 0.1;
+  planning_goals_marker_.pose.position.z = 0.05;
+  planning_goals_marker_.pose.orientation.w = 1.0;
+
+  //best path marker
+  best_path_marker_.header.frame_id = this->fixed_frame;
+  best_path_marker_.ns = "best3";
+  best_path_marker_.type = visualization_msgs::Marker::LINE_STRIP;
+  best_path_marker_.action = visualization_msgs::Marker::ADD;
+  best_path_marker_.lifetime = ros::Duration(1.3f);
+  best_path_marker_.scale.x = 0.05;
+  best_path_marker_.color.a = 0.7;
+  best_path_marker_.color.r = 0.9;
+  best_path_marker_.color.g = 0.2;
+  best_path_marker_.color.b = 0.2;
+	
+  //best path marker
+  best_path2d_marker_ = best_path_marker_;
+  best_path2d_marker_.ns = "best2";
+  best_path2d_marker_.id = 0;
+
+  //non-dominated marker
+  nd_path_marker_.header.frame_id = this->fixed_frame;
+  nd_path_marker_.ns = "nd3";
+  nd_path_marker_.type = visualization_msgs::Marker::LINE_LIST;
+  nd_path_marker_.action = visualization_msgs::Marker::ADD;
+  nd_path_marker_.lifetime = ros::Duration(1.3f);
+  nd_path_marker_.id = 0;
+  nd_path_marker_.scale.x = 0.05;
+  nd_path_marker_.color.a = 0.7;
+  nd_path_marker_.color.r = 1.0;
+  nd_path_marker_.color.g = 0.5;
+  nd_path_marker_.color.b = 0.0;
+	
+  //non dominated path marker
+  nd_path2d_marker_ = nd_path_marker_;
+  nd_path2d_marker_.ns = "nd2";
+  nd_path2d_marker_.id = 0;
+
+  //laser obstacle marker
+  laser_obstacle_marker_.header.frame_id = this->fixed_frame;
+  laser_obstacle_marker_.ns = "obstacles";
+  laser_obstacle_marker_.type = visualization_msgs::Marker::CYLINDER;
+  laser_obstacle_marker_.action = visualization_msgs::Marker::ADD;
+  laser_obstacle_marker_.lifetime = ros::Duration(1.3f);
+  laser_obstacle_marker_.color.a = 0.7;
+  laser_obstacle_marker_.color.r = 0.0;
+  laser_obstacle_marker_.color.g = 0.0;
+  laser_obstacle_marker_.color.b = 0.0;
+  laser_obstacle_marker_.scale.x = 0.5;
+  laser_obstacle_marker_.scale.y = 0.5;
+  laser_obstacle_marker_.scale.z = 0.2;
+  laser_obstacle_marker_.pose.position.z = 0.1;
+  laser_obstacle_marker_.pose.orientation.w = 1.0;
+
+  //force marker, a summation of all forces (red)
+  force_marker_.header.frame_id = this->fixed_frame;
+  force_marker_.ns =  "forces";
+  force_marker_.type = visualization_msgs::Marker::ARROW;
+  force_marker_.action = visualization_msgs::Marker::ADD;
+  force_marker_.lifetime = ros::Duration(1.3f);
+  force_marker_.scale.x = 0.2;
+  force_marker_.scale.y = 0.25;
+  force_marker_.color.a = 0.8;
+  force_marker_.color.r = 1.0;
+  force_marker_.color.g = 0.0;
+  force_marker_.color.b = 0.0;
+  force_marker_.points.push_back(  geometry_msgs::Point() );
+  force_marker_.points.push_back(  geometry_msgs::Point() );
+
+  // marker to goal (blue)
+  force_goal_marker_ = force_marker_;
+  force_goal_marker_.color.r = 0.0;
+  force_goal_marker_.color.g = 0.4;
+  force_goal_marker_.color.b = 1.0;
+
+  // marker interaction with persons (green)
+  force_int_person_marker_= force_marker_;
+  force_int_person_marker_.color.r = 0.2;
+  force_int_person_marker_.color.g = 0.85;
+  force_int_person_marker_.color.b = 0.2;
+
+  //marker due to obstacles in the scene (black)
+  force_obstacle_marker_ = force_marker_;
+  force_obstacle_marker_.color.r = 0.0;
+  force_obstacle_marker_.color.g = 0.0;
+  force_obstacle_marker_.color.b = 0.0;
+
+  // force of interaction with robot (purple)
+  force_int_robot_marker_ = force_marker_;
+  force_int_robot_marker_.color.r = 0.26;
+  force_int_robot_marker_.color.g = 0.0;
+  force_int_robot_marker_.color.b = 0.66;
+
+  // marker force companion (cian)
+  force_companion_marker_ = force_marker_;
+  force_companion_marker_.color.r = 0.51; //0.01; hacerla verde azulado.
+  force_companion_marker_.color.g = 0.243; // 0.9;
+  force_companion_marker_.color.b = 0.255; //0.55
+
+  
+  //text marker
+  text_marker_.header.frame_id = this->fixed_frame;
+  text_marker_.ns = "text";
+  text_marker_.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+  text_marker_.action = visualization_msgs::Marker::ADD;
+  text_marker_.lifetime = ros::Duration(1.3f);
+  text_marker_.scale.z = 0.3;
+  text_marker_.pose.position.z = 0.0;
+  text_marker_.color.a = 1.0;
+
+  // apartir de aquí ya no se publican!
+  //person_companion marker, for know the person position in the simulation. 
+  person_companion_marker_.header.frame_id = this->fixed_frame;
+  person_companion_marker_.ns = "personCompanion";
+  person_companion_marker_.type = visualization_msgs::Marker::CYLINDER;
+  person_companion_marker_.action = visualization_msgs::Marker::ADD;
+  person_companion_marker_.lifetime = ros::Duration(1.3f);
+  person_companion_marker_.color.a = 1.0;
+  person_companion_marker_.color.r = 0.5;
+  person_companion_marker_.color.g = 0.0;
+  person_companion_marker_.color.b = 1.0;
+  person_companion_marker_.scale.x = 0.5;
+  person_companion_marker_.scale.y = 0.5;
+  person_companion_marker_.scale.z = 1.2;
+  person_companion_marker_.pose.position.z = 0.6;
+  person_companion_marker_.pose.orientation.w = 1.0;
+
+  //Robot_companion marker, for know the person position in the simulation. 
+  robot_companion_marker_.header.frame_id = this->fixed_frame;
+  robot_companion_marker_.ns = "robotCompanion";
+  robot_companion_marker_.type = visualization_msgs::Marker::CYLINDER;
+  robot_companion_marker_.action = visualization_msgs::Marker::ADD;
+  robot_companion_marker_.lifetime = ros::Duration(1.3f);
+  robot_companion_marker_.color.a = 1.0;
+  robot_companion_marker_.color.r = 0.0;
+  robot_companion_marker_.color.g = 1.0;
+  robot_companion_marker_.color.b = 0.0;
+  robot_companion_marker_.scale.x = 0.5;
+  robot_companion_marker_.scale.y = 0.5;
+  robot_companion_marker_.scale.z = 1.2;
+  robot_companion_marker_.pose.position.z = 0.6;
+  robot_companion_marker_.pose.orientation.w = 1.0;
+
+  //center_companion marker, for know the center position of the companion robot-person in the simulation.  
+  center_companion_marker_.header.frame_id = this->fixed_frame;
+  center_companion_marker_.ns = "centerCompanion";
+  center_companion_marker_.type = visualization_msgs::Marker::SPHERE;
+  center_companion_marker_.action = visualization_msgs::Marker::ADD;
+  center_companion_marker_.lifetime = ros::Duration(1.3f);
+  center_companion_marker_.color.a = 0.0;
+  center_companion_marker_.color.r = 0.0;
+  center_companion_marker_.color.g = 0.5;  // verde + azul = mar...
+  center_companion_marker_.color.b = 0.5;
+  center_companion_marker_.scale.x = 0.3;
+  center_companion_marker_.scale.y = 0.3;
+  center_companion_marker_.scale.z = 0.3;
+  center_companion_marker_.pose.position.z = 0.0;
+  center_companion_marker_.pose.orientation.w = 1.0;
+
+  // prueba! ver que goal es el (this->robot_goal_)
+  robot_see_goal_marker_.header.frame_id = this->fixed_frame;
+  robot_see_goal_marker_.ns = "robot_see_goal";
+  robot_see_goal_marker_.type = visualization_msgs::Marker::SPHERE;
+  robot_see_goal_marker_.action = visualization_msgs::Marker::ADD;
+  robot_see_goal_marker_.lifetime = ros::Duration(1.3f);
+  robot_see_goal_marker_.color.a = 1.0;
+  robot_see_goal_marker_.color.r = 0.5; // rojo + verde. creo que naranja
+  robot_see_goal_marker_.color.g = 0.5;
+  robot_see_goal_marker_.color.b = 0.0;
+  robot_see_goal_marker_.scale.x = 0.7;
+  robot_see_goal_marker_.scale.y = 0.7;
+  robot_see_goal_marker_.scale.z = 0.7;
+  robot_see_goal_marker_.pose.position.z = 0.0;
+  robot_see_goal_marker_.pose.orientation.w = 1.0;
+
+  // prueba! ver que goal es el (this->robot_goal_)
+  person_90_degre_marker_.header.frame_id = this->fixed_frame;
+  person_90_degre_marker_.ns = "person_90_degre";
+  person_90_degre_marker_.type = visualization_msgs::Marker::SPHERE;
+  person_90_degre_marker_.action = visualization_msgs::Marker::ADD;
+  person_90_degre_marker_.lifetime = ros::Duration(1.3f);
+  person_90_degre_marker_.color.a = 1.0;
+  person_90_degre_marker_.color.r = 1.0; // esfera blanca o negra!
+  person_90_degre_marker_.color.g = 1.0;
+  person_90_degre_marker_.color.b = 1.0;
+  person_90_degre_marker_.scale.x = 0.3;
+  person_90_degre_marker_.scale.y = 0.3;
+  person_90_degre_marker_.scale.z = 0.3;
+  person_90_degre_marker_.pose.position.z = 0.0;
+  person_90_degre_marker_.pose.orientation.w = 1.0;
+
+  // Marker para ver a que puntpo intenta ir la fuerza companion, por si no lo estoy haciendo bien.
+  force_companion_goal_marker_.header.frame_id = this->fixed_frame;
+  force_companion_goal_marker_.ns = "person_companion_goal";
+  force_companion_goal_marker_.type = visualization_msgs::Marker::SPHERE;
+  force_companion_goal_marker_.action = visualization_msgs::Marker::ADD;
+  force_companion_goal_marker_.lifetime = ros::Duration(1.3f);
+  force_companion_goal_marker_.color.a = 1.0;
+  force_companion_goal_marker_.color.r = 0.0; //esfera negra o blanca
+  force_companion_goal_marker_.color.g = 0.0;
+  force_companion_goal_marker_.color.b = 0.0;
+  force_companion_goal_marker_.scale.x = 0.7;
+  force_companion_goal_marker_.scale.y = 0.7;
+  force_companion_goal_marker_.scale.z = 0.7;
+  force_companion_goal_marker_.pose.position.z = 0.0;
+  force_companion_goal_marker_.pose.orientation.w = 1.0;
+
+  // Marker para ver a que punto intenta ir el robot en cada estep, por si no lo estoy haciendo bien.
+  best_next_pose_robot_companion_markers_.header.frame_id = this->fixed_frame;
+  best_next_pose_robot_companion_markers_.ns = "best_next_pose_robot_companion_markers";
+  best_next_pose_robot_companion_markers_.type = visualization_msgs::Marker::SPHERE;
+  best_next_pose_robot_companion_markers_.action = visualization_msgs::Marker::ADD;
+  best_next_pose_robot_companion_markers_.lifetime = ros::Duration(1.3f);
+  best_next_pose_robot_companion_markers_.color.a = 1.0;
+  best_next_pose_robot_companion_markers_.color.r = 0.0;
+  best_next_pose_robot_companion_markers_.color.g = 1.0; // esfera verde!
+  best_next_pose_robot_companion_markers_.color.b = 0.0;
+  best_next_pose_robot_companion_markers_.scale.x = 0.3;
+  best_next_pose_robot_companion_markers_.scale.y = 0.3;
+  best_next_pose_robot_companion_markers_.scale.z = 0.3;
+  best_next_pose_robot_companion_markers_.pose.position.z = 0.0;
+  best_next_pose_robot_companion_markers_.pose.orientation.w = 1.0;
+
+  next_goal_marker_.header.frame_id = this->fixed_frame;
+  next_goal_marker_.ns = "next_goal_Akp";
+  next_goal_marker_.type = visualization_msgs::Marker::CYLINDER;
+  next_goal_marker_.action = visualization_msgs::Marker::ADD;
+  next_goal_marker_.lifetime = ros::Duration(1.3f);
+  next_goal_marker_.color.a = 1.0;
+  next_goal_marker_.color.r = 1.0;
+  next_goal_marker_.color.g = 0.0;
+  next_goal_marker_.color.b = 0.0;
+  next_goal_marker_.scale.x = 1.4;
+  next_goal_marker_.scale.y = 1.4;
+  next_goal_marker_.scale.z = 1.0;
+  next_goal_marker_.pose.position.z = 0.1;
+  next_goal_marker_.pose.orientation.w = 1.0;
+
+// See goal to go to a concrete position respect to the person that the robot accompani. 
+  robot_goal_to_position_respect_to_the_person.header.frame_id = this->fixed_frame;
+  robot_goal_to_position_respect_to_the_person.ns = "goal_to_go_person_side";
+  robot_goal_to_position_respect_to_the_person.type = visualization_msgs::Marker::SPHERE;
+  robot_goal_to_position_respect_to_the_person.action = visualization_msgs::Marker::ADD;
+  robot_goal_to_position_respect_to_the_person.lifetime = ros::Duration(1.3f);
+  robot_goal_to_position_respect_to_the_person.color.a = 1.0;
+  robot_goal_to_position_respect_to_the_person.color.r = 1.0; // esfera roja y azul! (magenta)
+  robot_goal_to_position_respect_to_the_person.color.g = 0.0;
+  robot_goal_to_position_respect_to_the_person.color.b = 1.0;
+  robot_goal_to_position_respect_to_the_person.scale.x = 0.7;
+  robot_goal_to_position_respect_to_the_person.scale.y = 0.3;
+  robot_goal_to_position_respect_to_the_person.scale.z = 0.3;
+  robot_goal_to_position_respect_to_the_person.pose.position.z = 0.0;
+  robot_goal_to_position_respect_to_the_person.pose.orientation.w = 1.0;
+
+// See goal to go follow the path
+  robot_goal_to_follow_the_path.header.frame_id = this->fixed_frame;
+  robot_goal_to_follow_the_path.ns = "goal_to_follow_path";
+  robot_goal_to_follow_the_path.type = visualization_msgs::Marker::SPHERE;
+  robot_goal_to_follow_the_path.action = visualization_msgs::Marker::ADD;
+  robot_goal_to_follow_the_path.lifetime = ros::Duration(1.3f);
+  robot_goal_to_follow_the_path.color.a = 1.0;
+  robot_goal_to_follow_the_path.color.r = 0.75; // esfera rara!
+  robot_goal_to_follow_the_path.color.g = 0.75;
+  robot_goal_to_follow_the_path.color.b = 1.0;
+  robot_goal_to_follow_the_path.scale.x = 0.3;
+  robot_goal_to_follow_the_path.scale.y = 0.3;
+  robot_goal_to_follow_the_path.scale.z = 0.3;
+  robot_goal_to_follow_the_path.pose.position.z = 0.0;
+  robot_goal_to_follow_the_path.pose.orientation.w = 1.0;
+
+// See the final goal to go, that combine these before goals with the interactions with other people and objects of the environment.
+  final_robot_goal_act_iteration.header.frame_id = this->fixed_frame;
+  final_robot_goal_act_iteration.ns = "final_goal_to_go";
+  final_robot_goal_act_iteration.type = visualization_msgs::Marker::SPHERE;
+  final_robot_goal_act_iteration.action = visualization_msgs::Marker::ADD;
+  final_robot_goal_act_iteration.lifetime = ros::Duration(1.3f);
+  final_robot_goal_act_iteration.color.a = 1.0;
+  final_robot_goal_act_iteration.color.r = 1.0; // esfera rara!
+  final_robot_goal_act_iteration.color.g = 0.2;
+  final_robot_goal_act_iteration.color.b = 0.2;
+  final_robot_goal_act_iteration.scale.x = 0.3;
+  final_robot_goal_act_iteration.scale.y = 0.3;
+  final_robot_goal_act_iteration.scale.z = 0.3;
+  final_robot_goal_act_iteration.pose.position.z = 0.0;
+  final_robot_goal_act_iteration.pose.orientation.w = 1.0;
+
+  // see prediction path of the person target 
+  pred_traj_point_marker_.header.frame_id = this->fixed_frame;
+  pred_traj_point_marker_.ns = "trajectory_target_person";
+  pred_traj_point_marker_.type = visualization_msgs::Marker::SPHERE;
+  pred_traj_point_marker_.action = visualization_msgs::Marker::ADD;
+  pred_traj_point_marker_.lifetime = ros::Duration(1.3f);
+  pred_traj_point_marker_.color.a = 0.0;
+  pred_traj_point_marker_.color.r = 0.0;
+  pred_traj_point_marker_.color.g = 1.0;
+  pred_traj_point_marker_.color.b = 0.0;
+  pred_traj_point_marker_.scale.x = 0.3;
+  pred_traj_point_marker_.scale.y = 0.3;
+  pred_traj_point_marker_.scale.z = 0.3;
+  pred_traj_point_marker_.pose.position.z = 0.0;
+  pred_traj_point_marker_.pose.orientation.w = 1.0;
+
+  see_before_next_goal_of_robot_.header.frame_id = this->fixed_frame;
+  see_before_next_goal_of_robot_.ns = "before_next_goal_of_robot";
+  see_before_next_goal_of_robot_.type = visualization_msgs::Marker::SPHERE;
+  see_before_next_goal_of_robot_.action = visualization_msgs::Marker::ADD;
+  see_before_next_goal_of_robot_.lifetime = ros::Duration(1.3f);
+  see_before_next_goal_of_robot_.color.a = 0.5;
+  see_before_next_goal_of_robot_.color.r = 0.75;
+  see_before_next_goal_of_robot_.color.g = 0.5; // amarillo, raro que no tengo ninguno
+  see_before_next_goal_of_robot_.color.b = 0.0;
+  see_before_next_goal_of_robot_.scale.x = 0.4;
+  see_before_next_goal_of_robot_.scale.y = 0.4;
+  see_before_next_goal_of_robot_.scale.z = 0.9;
+  see_before_next_goal_of_robot_.pose.position.z = 0.0;
+  see_before_next_goal_of_robot_.pose.orientation.w = 1.0;
+
+  // random goals (companion people) case side-by-side 2 people 
+  // random_goal companion p1
+  rand_goal_comp_p1_marker_.header.frame_id = this->fixed_frame;
+  rand_goal_comp_p1_marker_.ns = "rand_goal_cp1";
+  rand_goal_comp_p1_marker_.type = visualization_msgs::Marker::SPHERE;
+  rand_goal_comp_p1_marker_.action = visualization_msgs::Marker::ADD;
+  rand_goal_comp_p1_marker_.lifetime = ros::Duration(1.3f);
+  rand_goal_comp_p1_marker_.color.a = 1.0;
+  rand_goal_comp_p1_marker_.color.r = 0.0;
+  rand_goal_comp_p1_marker_.color.g = 0.0;
+  rand_goal_comp_p1_marker_.color.b = 0.5; // azul a oscuro creo.
+  rand_goal_comp_p1_marker_.scale.x = 0.3;
+  rand_goal_comp_p1_marker_.scale.y = 0.3;
+  rand_goal_comp_p1_marker_.scale.z = 0.3;
+  rand_goal_comp_p1_marker_.pose.position.z = 0.0;
+  rand_goal_comp_p1_marker_.pose.orientation.w = 1.0;
+
+	// random_goal companion p2
+  rand_goal_comp_p2_marker_.header.frame_id = this->fixed_frame;
+  rand_goal_comp_p2_marker_.ns = "rand_goal_cp1";
+  rand_goal_comp_p2_marker_.type = visualization_msgs::Marker::SPHERE;
+  rand_goal_comp_p2_marker_.action = visualization_msgs::Marker::ADD;
+  rand_goal_comp_p2_marker_.lifetime = ros::Duration(1.3f);
+  rand_goal_comp_p2_marker_.color.a = 1.0;
+  rand_goal_comp_p2_marker_.color.r = 0.5;
+  rand_goal_comp_p2_marker_.color.g = 0.5;
+  rand_goal_comp_p2_marker_.color.b = 0.0;
+  rand_goal_comp_p2_marker_.scale.x = 0.3;
+  rand_goal_comp_p2_marker_.scale.y = 0.3;
+  rand_goal_comp_p2_marker_.scale.z = 0.3;
+  rand_goal_comp_p2_marker_.pose.position.z = 0.0;
+  rand_goal_comp_p2_marker_.pose.orientation.w = 1.0;
+
+// See centre of the group
+  centre_group_for_goals_marker_.header.frame_id = this->fixed_frame;
+  centre_group_for_goals_marker_.ns = "rand_goal_cp1";
+  centre_group_for_goals_marker_.type = visualization_msgs::Marker::SPHERE;
+  centre_group_for_goals_marker_.action = visualization_msgs::Marker::ADD;
+  centre_group_for_goals_marker_.lifetime = ros::Duration(1.3f);
+  centre_group_for_goals_marker_.color.a = 1.0;
+  centre_group_for_goals_marker_.color.r = 1.0;
+  centre_group_for_goals_marker_.color.g = 1.0;
+  centre_group_for_goals_marker_.color.b = 1.0;
+  centre_group_for_goals_marker_.scale.x = 0.3;
+  centre_group_for_goals_marker_.scale.y = 0.3;
+  centre_group_for_goals_marker_.scale.z = 0.3;
+  centre_group_for_goals_marker_.pose.position.z = 0.0;
+  centre_group_for_goals_marker_.pose.orientation.w = 1.0;
+
+}
+
+void AkpLocalPlanner::fill_my_covariance_marker( visualization_msgs::Marker& marker, const SpointV_cov& point , unsigned int track_id)
+{
+	//ROS_INFO(" iN MY COV MARKER");
+	marker.pose.position.x = point.x;
+	marker.pose.position.y = point.y;
+	marker.pose.position.z = 0.0;
+   
+	if(id_person_companion_==track_id){
+		marker.color.r = 0.0;
+		marker.color.g = 0.5;
+		marker.color.b = 0.6;
+	}else{
+		marker.color.r = 0.0;
+ 		marker.color.g = 1.0;
+		marker.color.b = 0.0;
+	}
+
+  //plot covariances ellipses
+  Eigen::Matrix2d cov;
+  cov(0, 0) = point.cov.at(0);//xx
+  cov(0, 1) = point.cov.at(1);
+  cov(1, 0) = point.cov.at(4);
+  cov(1, 1) = point.cov.at(5);//yy
+
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> eig(cov);
+  marker.scale.x = sqrt( eig.eigenvalues()[0] ) + 0.001;//major vap
+  marker.scale.y = sqrt( eig.eigenvalues()[1] ) + 0.001;//minor vap
+
+  double angle = atan2( eig.eigenvectors()(1,0), eig.eigenvectors()(0,0) );
+  marker.pose.orientation = tf::createQuaternionMsgFromYaw(angle);
+}
+
+
+void AkpLocalPlanner::fill_my_prediction_points( visualization_msgs::Marker& marker, const SpointV_cov& point )
+{
+  marker.pose.position.x = point.x;
+  marker.pose.position.y = point.y;
+  marker.pose.position.z = 0.0;  
+}
+
+
+void AkpLocalPlanner::fill_forces_markers()
+{
+	//ROS_INFO("(ROS) 1 after  get_forces_person_companion ");
+  const std::list<Cperson_abstract *>* person_list = planner_.get_scene( );
+  Sforce force_to_goal, force_int_person , force_int_robot, force_obstacle, force_total, force_companion;
+  geometry_msgs::Point ros_point, ros_point_ini;
+  unsigned int cont_f = 0;
+
+  for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin(); iit!=person_list->end(); iit++ )
+  {
+    // fill FORCES for each person
+    force_total = (*iit)->get_forces_person( force_to_goal, force_int_person , force_int_robot, force_obstacle );
+    ros_point_ini.x = (*iit)->get_current_pointV().x;
+    ros_point_ini.y = (*iit)->get_current_pointV().y;
+
+    //scaled person interaction force (green)
+    force_int_person_marker_.points[0]= ros_point_ini;
+    ros_point.x = ros_point_ini.x + force_int_person.fx*0.65; // Ely: I need these forces small, if not we will see it very big.
+    ros_point.y = ros_point_ini.y + force_int_person.fy*0.65;
+    force_int_person_marker_.points[1] = ros_point;
+    force_int_person_marker_.id = cont_f;
+    ++cont_f;
+    MarkerArray_msg_.markers.push_back(  force_int_person_marker_  );
+
+    // robot to person interaction force (pink)
+    force_int_robot_marker_.points[0]= ros_point_ini;
+    ros_point.x = ros_point_ini.x + force_int_robot.fx;
+    ros_point.y = ros_point_ini.y + force_int_robot.fy;
+    force_int_robot_marker_.points[1] = ros_point;
+    force_int_robot_marker_.id = cont_f;
+    ++cont_f;
+    MarkerArray_msg_.markers.push_back(  force_int_robot_marker_  );
+
+    //map obstacles interaction force (black)
+    force_obstacle_marker_.points[0] = ros_point_ini;
+    ros_point.x = ros_point_ini.x + force_obstacle.fx;
+    ros_point.y = ros_point_ini.y + force_obstacle.fy;
+    force_obstacle_marker_.points[1] =  ros_point;
+    force_obstacle_marker_.id = cont_f;
+    ++cont_f;
+    MarkerArray_msg_.markers.push_back(  force_obstacle_marker_  );
+  }
+  //print robot forces
+ 
+  force_total = planner_.get_robot()->get_forces_person_companion(force_to_goal, force_int_person , force_int_robot, force_obstacle, force_companion);
+  ros_point_ini.x = planner_.get_robot()->get_current_pointV().x;
+  ros_point_ini.y = planner_.get_robot()->get_current_pointV().y;
+
+  if(debug_antes_subgoals_entre_AKP_goals_){
+    ROS_INFO("AkpLocalPlanner::markers, ros_point_ini.x=%f=",ros_point_ini.x);
+    ROS_INFO("AkpLocalPlanner::markers, ros_point_ini.y=%f=",ros_point_ini.y);
+    ROS_INFO("(ROS) AkpLocalPlanner::markers, force_int_person.fx=%f",force_int_person.fx);
+    ROS_INFO("(ROS) AkpLocalPlanner::markers, force_int_person.fy=%f",force_int_person.fy);
+  }
+
+	//ROS_INFO("(ROS) 3 after  get_forces_person_companion ");
+  //scaled force to goal: ( blue )
+  if(this->robot_goal_force_marker)
+  {
+    if(debug_antes_subgoals_entre_AKP_goals_){
+      ROS_INFO("(ROS) robot force goal");
+      ROS_INFO("(ROS) ros_point_ini.x=%f",ros_point_ini.x);
+      ROS_INFO("(ROS) ros_point_ini.y=%f",ros_point_ini.y);
+      ROS_INFO("(ROS) force_to_goal.fx=%f",force_to_goal.fx);
+      ROS_INFO("(ROS) force_to_goal.fy=%f",force_to_goal.fy);  
+    }
+
+    force_goal_marker_.points[0]= ros_point_ini;
+    ros_point.x = ros_point_ini.x + 2*force_to_goal.fx;
+    ros_point.y = ros_point_ini.y + 2*force_to_goal.fy;
+
+    if(debug_real_test_companion_){
+      ROS_INFO("force_goal_marker_ (ROS) ros_point.x=%f",ros_point.x);
+      ROS_INFO("force_goal_marker_ (ROS) ros_point.y=%f",ros_point.y);
+    }
+
+    force_goal_marker_.points[1] = ros_point;
+    force_goal_marker_.id = cont_f;
+    ++cont_f;
+    MarkerArray_msg_.markers.push_back(  force_goal_marker_  );
+  }
+
+  //scaled person interaction force (green)
+  if(this->robot_person_forces_marker)
+  { 
+    if(debug_antes_subgoals_entre_AKP_goals_){
+      ROS_INFO("(ROS) robot force person");
+      ROS_INFO("(ROS) force_int_person.fx=%f",force_int_person.fx);
+      ROS_INFO("(ROS) force_int_person.fy=%f",force_int_person.fy);
+    }
+
+    force_int_person_marker_.points[0]= ros_point_ini;
+    ros_point.x = ros_point_ini.x + 2*force_int_person.fx;
+    ros_point.y = ros_point_ini.y + 2*force_int_person.fy;
+    force_int_person_marker_.points[1] = ros_point;
+    force_int_person_marker_.id = cont_f;
+    ++cont_f;
+    MarkerArray_msg_.markers.push_back(  force_int_person_marker_  );
+  }
+
+  //map obstacles interaction force (black)
+  if(this->robot_obstacles_forces_marker)
+  {
+    if(debug_antes_subgoals_entre_AKP_goals_){
+      ROS_INFO("(ROS) robot force obstacles");
+    }
+
+    force_obstacle_marker_.points[0] = ros_point_ini;
+    ros_point.x = ros_point_ini.x + 2*force_obstacle.fx;
+    ros_point.y = ros_point_ini.y + 2*force_obstacle.fy;
+    force_obstacle_marker_.points[1] =  ros_point;
+    force_obstacle_marker_.id = cont_f;
+    ++cont_f;
+    MarkerArray_msg_.markers.push_back(  force_obstacle_marker_  );
+  }
+
+  //weighted resultant force (red)
+  if(this->robot_resultant_force_marker)
+  {
+    force_marker_.points[0] = ros_point_ini;
+    ros_point.x = ros_point_ini.x + 2*force_total.fx;
+    ros_point.y = ros_point_ini.y + 2*force_total.fy;
+    force_marker_.points[1] =  ros_point;
+    force_marker_.id = cont_f;
+    ++cont_f;
+    MarkerArray_msg_.markers.push_back(  force_marker_  );
+  }
+  //scaled force to goal: ( Cian )
+	force_companion_marker_.points[0]= ros_point_ini;
+	ros_point.x = ros_point_ini.x + 2*force_companion.fx;
+	ros_point.y = ros_point_ini.y + 2*force_companion.fy;
+
+	force_companion_marker_.points[1] = ros_point;
+	force_companion_marker_.id = cont_f;
+	++cont_f;
+	MarkerArray_msg_.markers.push_back(  force_companion_marker_  );
+
+  Sdestination robot_companion_dest= planner_.get_robot()->get_companion_force_goal();
+  force_companion_goal_marker_.pose.position.x = robot_companion_dest.x;
+  force_companion_goal_marker_.pose.position.y = robot_companion_dest.y;
+  force_companion_goal_marker_.id = 20;  
+}
+
+void AkpLocalPlanner::fill_scene_markers()
+{
+  unsigned int cont(0);
+  const std::vector<Sdestination>* dest = planner_.get_destinations();
+  for( unsigned int i = 0; i < dest->size(); ++i)
+  {
+    cylinder_marker_.pose.position.x = dest->at(i).x;
+    cylinder_marker_.pose.position.y = dest->at(i).y;
+    cylinder_marker_.id = cont;
+    MarkerArray_msg_.markers.push_back( cylinder_marker_ );
+    ++cont;
+  } 
+
+  //draw robot destination, both local and global
+  robot_goal_marker_.pose.position.x = planner_.get_robot_local_goal().x;
+  robot_goal_marker_.pose.position.y = planner_.get_robot_local_goal().y;
+  robot_goal_marker_.id = cont;
+  ++cont;
+  MarkerArray_msg_.markers.push_back( robot_goal_marker_ );
+  robot_goal_marker_.pose.position.x = planner_.get_robot_goal().x;
+  robot_goal_marker_.pose.position.y = planner_.get_robot_goal().y;
+  robot_goal_marker_.id = cont;
+  ++cont;
+  MarkerArray_msg_.markers.push_back( robot_goal_marker_ );
+  
+  //if slicing mode, plot the set of destinations
+  for( unsigned int i = 0; i< sliced_global_plan_.size(); ++i )
+  {
+		robot_subgoal_marker_.pose.position.x = sliced_global_plan_[i].pose.position.x;
+		robot_subgoal_marker_.pose.position.y = sliced_global_plan_[i].pose.position.y;
+		robot_subgoal_marker_.id = cont;
+		++cont;
+		MarkerArray_msg_.markers.push_back( robot_subgoal_marker_ );
+	}
+
+  //draw workspace of the robot
+  double r = planner_.get_workspace_radii();
+	geometry_msgs::Point ros_point, center_point;
+  workspace_marker_.points.clear();
+  workspace_marker_.id = cont;
+  ++cont;
+  const std::vector<Spose>* plans = planner_.get_robot()->get_robot_planning_trajectory();
+
+  if(!plans->empty()){
+    center_point.x = plans->at(0).x;
+    center_point.y = plans->at(0).y;
+  }else{
+    center_point.x = robot_pose_.x;
+    center_point.y = robot_pose_.y;
+  }
+
+  for( unsigned int i = 0; i < 40; ++i )
+  {
+    ros_point.x = center_point.x + r*cos( 2*i*PI/40 );
+    ros_point.y = center_point.y + r*sin( 2*i*PI/40 );
+    workspace_marker_.points.push_back( ros_point ); 
+    ros_point.x = center_point.x + r*cos( (2*i+1)*PI/40 );
+    ros_point.y = center_point.y + r*sin( (2*i+1)*PI/40 );
+    workspace_marker_.points.push_back( ros_point ); 
+  }
+  MarkerArray_msg_.markers.push_back( workspace_marker_ );
+
+  // robot_goal_marker!!!
+  Spoint robot_goal=this->planner_.get_robot_goal();
+  robot_goal_marker2_.pose.position.x = robot_goal.x;
+  robot_goal_marker2_.pose.position.y = robot_goal.y;
+  robot_goal_marker2_.id = cont;
+  ++cont;
+  MarkerArray_msg_.markers.push_back( robot_goal_marker2_ );
+
+  Spoint robot_goal2=this->planner_.get_external_robot_goal();
+  robot_goal_marker3_.pose.position.x = robot_goal2.x;
+  robot_goal_marker3_.pose.position.y = robot_goal2.y;
+  robot_goal_marker3_.id = cont;
+  ++cont;
+  MarkerArray_msg_.markers.push_back( robot_goal_marker3_ );
+
+}
+
+void AkpLocalPlanner::fill_planning_markers_2d()
+{
+  const std::vector<Spose>* plans = planner_.get_robot()->get_robot_planning_trajectory();
+	geometry_msgs::Point ros_point;
+  //random goals printing -------------------------------------------------------------------
+  const std::vector<Spoint>* goals =  planner_.get_random_goals();
+  for( unsigned int i = 0; i< goals->size(); ++i )
+  {
+    planning_goals_marker_.pose.position.x = goals->at(i).x;
+    planning_goals_marker_.pose.position.y = goals->at(i).y;
+    planning_goals_marker_.id = i;
+    MarkerArray_msg_.markers.push_back( planning_goals_marker_ );
+  }
+  
+  //std::cout <<"  akp_local_planner_companion!!! "<< std::endl;
+  // plot non-dominated solutions in 2d ..................-------------------------------------
+  const std::vector<unsigned int>* nondominated_path_index = planner_.get_robot_nondominated_plan_index();
+  const std::vector<unsigned int>* nondominated_end_of_path_index = planner_.get_robot_nondominated_end_of_plan_index();
+  nd_path2d_marker_.points.clear();
+  //ROS_INFO("size = %lu" , nondominated_path_index->size());
+  //ROS_INFO("size = %lu" , nondominated_end_of_path_index->size());
+
+  for( unsigned int i = 0; i< nondominated_path_index->size(); i++ )
+  {
+    ros_point.x = plans->at(nondominated_path_index->at(i)).x;
+    ros_point.y = plans->at(nondominated_path_index->at(i)).y;
+    ros_point.z = 0.0;
+    nd_path2d_marker_.points.push_back( ros_point );
+  }
+  //paths always even
+  MarkerArray_msg_.markers.push_back( nd_path2d_marker_ );
+  
+  // plot text id of paths, if MultiObjective function mode is activated ---------------------
+  text_marker_.id = 0;
+  unsigned int i = 0;
+  for(  ; i< nondominated_end_of_path_index->size(); i++ )
+  {
+    text_marker_.id++; 
+    text_marker_.pose.position.x = plans->at(nondominated_end_of_path_index->at(i)).x;
+    text_marker_.pose.position.y = plans->at(nondominated_end_of_path_index->at(i)).y;
+    std::stringstream idText;
+    idText << nondominated_end_of_path_index->at(i);
+    text_marker_.text = idText.str();
+    MarkerArray_msg_.markers.push_back( text_marker_ );
+  }
+  unsigned int text_markers_size = i;
+	text_marker_.action = visualization_msgs::Marker::DELETE;
+  for( ; i< text_markers_old_size_ ; i++)
+  {
+    text_marker_.id++;
+    MarkerArray_msg_.markers.push_back( text_marker_ );
+  }
+	text_marker_.action = visualization_msgs::Marker::ADD;
+  text_markers_old_size_ = text_markers_size;
+}
+
+void AkpLocalPlanner::fill_planning_markers_3d()
+{
+  const std::vector<Spose>* plans = planner_.get_robot()->get_robot_planning_trajectory();
+  const std::vector<Sedge_tree>* edges = planner_.get_plan_edges();
+  geometry_msgs::Point ros_point;
+  double ini_time = plans->front().time_stamp;
+	
+  // plot 3d plan, complete tree
+  planning_marker_.points.clear();
+  for( unsigned int i = 1; i< plans->size(); ++i )
+  {
+    //lines segments beetwen 2 points
+    ros_point.x = plans->at(i).x;
+    ros_point.y = plans->at(i).y;
+    ros_point.z = plans->at(i).time_stamp - ini_time;
+    planning_marker_.points.push_back( ros_point );
+    //ROS_INFO("message of size %d, at %d and parent %d", plans->size(), i, edges->at(i).parent);
+    ros_point.x = plans->at( edges->at(i).parent ).x;
+    ros_point.y = plans->at( edges->at(i).parent ).y;
+    ros_point.z = plans->at(edges->at(i).parent).time_stamp - ini_time;
+    planning_marker_.points.push_back( ros_point );
+  }
+  MarkerArray_msg_.markers.push_back( planning_marker_ ); 
+    
+  //plot best trajectory path in 3d
+  const std::vector<unsigned int>* best_path_index = planner_.get_robot_plan_index();
+  best_path_marker_.points.clear();
+  //ROS_INFO("size = %d" , best_path_marker_.points.size());
+  for( unsigned int i = 0; i< best_path_index->size(); i++ )
+  {
+    ros_point.x = plans->at(best_path_index->at(i)).x;
+    ros_point.y = plans->at(best_path_index->at(i)).y;
+    ros_point.z = plans->at(best_path_index->at(i)).time_stamp - ini_time;
+    best_path_marker_.points.push_back( ros_point );
+  }
+  MarkerArray_msg_.markers.push_back( best_path_marker_ );
+  
+  // plot non-dominated solutions in 3d
+  const std::vector<unsigned int>* nondominated_path_index = planner_.get_robot_nondominated_plan_index();
+  nd_path_marker_.points.clear();
+  //ROS_INFO("size = %d" , nondominated_path_index->size());
+  for( unsigned int i = 0; i< nondominated_path_index->size(); i++ )
+  {
+    ros_point.x = plans->at(nondominated_path_index->at(i)).x;
+    ros_point.y = plans->at(nondominated_path_index->at(i)).y;
+    ros_point.z = plans->at(nondominated_path_index->at(i)).time_stamp - ini_time;
+    nd_path_marker_.points.push_back( ros_point );
+  }
+  //paths always even
+  MarkerArray_msg_.markers.push_back( nd_path_marker_ );
+
+}
+/*
+void AkpLocalPlanner::fill_planning_markers_3d_companion()
+{
+  const std::vector<Spose>* plans = planner_.get_robot()->get_robot_planning_trajectory();
+  const std::vector<Sedge_tree>* edges = planner_.get_plan_edges();
+  geometry_msgs::Point ros_point;
+  double ini_time = plans->front().time_stamp;
+	
+  // plot 3d plan, complete tree
+  planning_marker_.points.clear();
+  for( unsigned int i = 1; i< plans->size(); ++i )
+  {
+    //lines segments beetwen 2 points
+    ros_point.x = plans->at(i).x;
+    ros_point.y = plans->at(i).y;
+    ros_point.z = plans->at(i).time_stamp - ini_time;
+    planning_marker_.points.push_back( ros_point );
+    //ROS_INFO("message of size %d, at %d and parent %d", plans->size(), i, edges->at(i).parent);
+    ros_point.x = plans->at( edges->at(i).parent ).x;
+    ros_point.y = plans->at( edges->at(i).parent ).y;
+    ros_point.z = plans->at(edges->at(i).parent).time_stamp - ini_time;
+    planning_marker_.points.push_back( ros_point );
+  }
+  MarkerArray_msg_m2_.markers.push_back( planning_marker_ );
+    
+  //plot best trajectory path in 3d
+  const std::vector<unsigned int>* best_path_index = planner_.get_robot_plan_index();
+  best_path_marker_.points.clear();
+  //ROS_INFO("size = %d" , best_path_marker_.points.size());
+  for( unsigned int i = 0; i< best_path_index->size(); i++ )
+  {
+    ros_point.x = plans->at(best_path_index->at(i)).x;
+    ros_point.y = plans->at(best_path_index->at(i)).y;
+    ros_point.z = plans->at(best_path_index->at(i)).time_stamp - ini_time;
+    best_path_marker_.points.push_back( ros_point );
+  }
+  MarkerArray_msg_m2_.markers.push_back( best_path_marker_ );
+  
+  // plot non-dominated solutions in 3d
+  const std::vector<unsigned int>* nondominated_path_index = planner_.get_robot_nondominated_plan_index();
+  nd_path_marker_.points.clear();
+  //ROS_INFO("size = %d" , nondominated_path_index->size());
+  for( unsigned int i = 0; i< nondominated_path_index->size(); i++ )
+  {
+    ros_point.x = plans->at(nondominated_path_index->at(i)).x;
+    ros_point.y = plans->at(nondominated_path_index->at(i)).y;
+    ros_point.z = plans->at(nondominated_path_index->at(i)).time_stamp - ini_time;
+    nd_path_marker_.points.push_back( ros_point );
+  }
+  //paths always even
+  MarkerArray_msg_m2_.markers.push_back( nd_path_marker_ );
+
+}
+*/
+
+
+void AkpLocalPlanner::fill_people_prediction_markers_2d()
+{
+ //ROS_INFO( "fill_people_prediction_markers_2d()");
+  //plot people trajectories 2d
+  const std::vector<unsigned int>* best_path_index = planner_.get_robot_plan_index();
+  const std::list<Cperson_abstract *>* person_list = planner_.get_scene( );
+  const std::vector<SpointV_cov>* traj;
+  unsigned int cont_2d = 0;
+  for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin();
+        iit!=person_list->end(); iit++ )
+  {
+    traj = (*iit)->get_planning_trajectory();
+    unsigned int id_person=(*iit)->get_id();
+
+    if ( traj->size() > best_path_index->size() )
+    {
+		unsigned int less_prediction= (best_path_index->size())/2;
+		for( unsigned int i = 0; i< best_path_index->size(); ++i , ++cont_2d)       
+		{
+			fill_my_covariance_marker( pred_traj2d_marker_,  traj->at(best_path_index->at(i)), id_person );
+ 			pred_traj2d_marker_.id = cont_2d;         
+			MarkerArray_msg_.markers.push_back( pred_traj2d_marker_ );
+
+        }
+     }
+  }
+}
+
+
+void AkpLocalPlanner::fill_people_prediction_markers_2d_companion()
+{
+	//ROS_INFO( "fill_people_prediction_markers_2d_companion()");
+  //plot people trajectories 2d
+  const std::vector<unsigned int>* best_path_index = planner_.get_robot_plan_index();
+  const std::list<Cperson_abstract *>* person_list = planner_.get_scene( );
+  const std::vector<SpointV_cov>* traj;
+  unsigned int cont_2d = 0;
+  for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin();
+        iit!=person_list->end(); iit++ )
+  {
+    traj = (*iit)->get_planning_trajectory();
+    unsigned int id_person=(*iit)->get_id();
+
+      if (traj->size() > best_path_index->size() )
+      {
+        for( unsigned int i = 0; i< best_path_index->size(); ++i , ++cont_2d)
+        {
+          fill_my_covariance_marker( pred_traj2d_marker_,  traj->at(best_path_index->at(i)), id_person );
+          pred_traj2d_marker_.id = cont_2d;            
+          MarkerArray_msg_people_prediction_time_.markers.push_back( pred_traj2d_marker_ );
+        }
+     }
+  }
+}
+
+
+
+void AkpLocalPlanner::fill_people_prediction_markers_3d()
+{
+ //ROS_INFO( "fill_people_prediction_markers_3d()");
+  const std::list<Cperson_abstract *>* person_list = planner_.get_scene( );
+  const std::vector<SpointV_cov>* traj;
+  unsigned int cont = 0;
+  double time_stamp_ini = planner_.get_time();
+
+  for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin(); iit!=person_list->end(); iit++ )
+  {
+    if( (*iit)->get_planning_trajectory()->size() <= 1 )
+      traj = (*iit)->get_prediction_trajectory();
+    else
+      traj = (*iit)->get_planning_trajectory();
+
+    unsigned int less_prediction= 13;//= (traj->size())/2;
+    unsigned int id_person=(*iit)->get_id();
+    //fill prediction covariances
+    for( unsigned int i = 0; i< traj->size(); ++i , ++cont)
+		{
+
+			fill_my_covariance_marker( pred_traj_marker_,  traj->at(i), id_person);
+			pred_traj_marker_.pose.position.z = traj->at(i).time_stamp - time_stamp_ini;//2d cov elevated the time azis(z)
+			pred_traj_marker_.id = cont;           
+			MarkerArray_msg_.markers.push_back( pred_traj_marker_ );
+    }
+  }
+}
+
+void AkpLocalPlanner::fill_people_prediction_markers_3d_companion()
+{
+ //ROS_INFO( "fill_people_prediction_markers_3d_companion()");
+  const std::list<Cperson_abstract *>* person_list = planner_.get_scene( );
+  const std::vector<SpointV_cov>* traj;
+  unsigned int cont = 0;
+  double time_stamp_ini = planner_.get_time();
+
+  for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin(); iit!=person_list->end(); iit++ )
+  {
+	  if( (*iit)->get_planning_trajectory()->size() <= 1 )
+		  traj = (*iit)->get_prediction_trajectory();
+	  else
+		  traj = (*iit)->get_planning_trajectory();
+
+    	unsigned int id_person=(*iit)->get_id();
+		//fill prediction covariances
+		for( unsigned int i = 0; i< traj->size(); ++i , ++cont)
+		{
+        
+			fill_my_covariance_marker( pred_traj_marker_,  traj->at(i), id_person);
+			pred_traj_marker_.pose.position.z = traj->at(i).time_stamp - time_stamp_ini;//2d cov elevated the time azis(z)
+			pred_traj_marker_.id = cont;
+			MarkerArray_msg_people_prediction_time_.markers.push_back( pred_traj_marker_ );
+
+		}
+  	}
+}
+
+void AkpLocalPlanner::fill_people_companion_see_normal_and_chancges()
+{
+ //ROS_INFO( "fill_people_companion_see_normal_and_chancges()");
+  const std::list<Cperson_abstract *>* person_list = planner_.get_scene( );
+  unsigned int cont = 0;
+  //ROS_INFO( "person list %d" , person_list->size() );
+  for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin(); iit!=person_list->end(); iit++ )
+  {
+    unsigned int id_person=(*iit)->get_id();
+    if(id_person==id_person_companion_){ //||(id_person==id_SECOND_person_companion_)
+			// normally in blue.
+			pred_traj_marker_.color.a = 0.5;
+			pred_traj_marker_.color.r = 0.0;
+ 			pred_traj_marker_.color.g = 0.5;
+ 			pred_traj_marker_.color.b = 0.6;
+
+			SpointV_cov actual_person_pose=(*iit)->get_current_pointV();
+			//ROS_INFO( "id_person=%d",id_person);
+			fill_my_covariance_marker( pred_traj_marker_,  actual_person_pose, id_person);
+			pred_traj_marker_.pose.position.z = 2.0;//2d cov elevated the time azis(z)
+			pred_traj_marker_.id = cont;
+			MarkerArray_msg_.markers.push_back( pred_traj_marker_ );
+			cont++;
+    }
+  }
+}
+
+
+void AkpLocalPlanner::fill_laser_obstacles()
+{
+  unsigned int cont(0);
+  const std::vector<Spoint>* obstacles = planner_.get_laser_obstacles();
+  for( unsigned int i = 0; i < obstacles->size(); ++i)
+  {
+    laser_obstacle_marker_.pose.position.x = obstacles->at(i).x;
+    laser_obstacle_marker_.pose.position.y = obstacles->at(i).y;
+    laser_obstacle_marker_.id = cont;
+    ++cont;
+    MarkerArray_msg_.markers.push_back( laser_obstacle_marker_ );
+  }
+
+}
+
+void AkpLocalPlanner::fill_best_path_2d()
+{
+  geometry_msgs::Point ros_point;
+  best_path2d_marker_.points.clear();
+  const std::vector<Spose>* plans = planner_.get_robot()->get_robot_planning_trajectory();
+  const std::vector<unsigned int>* best_path_index = planner_.get_robot_plan_index();
+
+  for( unsigned int i = 0; i< best_path_index->size(); i++ )
+  {
+		if(plans->size()>best_path_index->at(i)){ // como mucho me como un vertex del best plan, pero es seguro que no petara.
+    		ros_point.x = plans->at(best_path_index->at(i)).x;
+    		ros_point.y = plans->at(best_path_index->at(i)).y;
+    		ros_point.z = 0.0;
+    		best_path2d_marker_.points.push_back( ros_point );
+		}
+  }
+  MarkerArray_msg_.markers.push_back( best_path2d_marker_ );
+}
+
+
+void AkpLocalPlanner::fill_robot_companion_markers()
+{
+  //ROS_INFO( "entering fill_robot_companion_markers()" );
+  double actual_companion_angle=planner_.get_actual_companion_angle();  
+	// publish a marcker on the center of robot-person companion.
+	center_companion_marker_.pose.position.x = this->robot_pose_.x;
+	center_companion_marker_.pose.position.y = this->robot_pose_.y;
+	center_companion_marker_.id = 2;
+	if(fuera_bolitas_goals_companion_markers_){
+		//ROS_INFO( "enter fuera bolitas companion marker()" );
+		MarkerArray_msg_.markers.push_back( center_companion_marker_ );
+	}
+
+  this->target_frame_id = this->frame_map_;//"/map";
+  this->source_frame_id = this->frame_robot_footprint_;//"/tibi/base_footprint";
+
+  //this->target_frame_id = "/map";
+  //this->source_frame_id = "/tibi/base_footprint";  // in others different from tibi, maybe is: this->source_frame_id = "/base_footprint";
+  std::string source_frame = this->source_frame_id;
+  std::string target_frame = this->target_frame_id;
+  ros::Time   target_time  = ros::Time::now(); // buscar un mensaje donde se guarte el tiempo actual. o coger el ros time now
+
+  try
+  {
+    bool tf_exists = tf_listener_.waitForTransform(target_frame, source_frame, target_time, ros::Duration(0.5), ros::Duration(0.01));
+		//  ROS_INFO("AkpLocalPlanner::fill_robot_companion_markers:  ANTES de  if(tf_exists)");
+    if(tf_exists)
+    {
+      // person transformation
+      //ROS_INFO("AkpLocalPlanner::detections_callback:    if(tf_exists)");  
+      geometry_msgs::PoseStamped people_poseIn;
+      geometry_msgs::PoseStamped people_poseOut;
+      people_poseIn.header             = header_point_.header; // guardar un header de un mensaje actual
+      people_poseIn.header.frame_id    = source_frame;
+      //ROS_INFO("(ROS) AkpLocalPlanner::fill_robot_companion_markers:   actual_companion_angle=%f",actual_companion_angle);  
+      people_poseIn.pose.position.x    = -0.75*cos(actual_companion_angle*(3.14/180));
+      people_poseIn.pose.position.y    = -0.75*sin(actual_companion_angle*(3.14/180));
+      people_poseIn.pose.orientation.z = 1.0;
+      tf_listener_.transformPose(target_frame, people_poseIn, people_poseOut);
+      person_companion_marker_.pose.position.x = people_poseOut.pose.position.x;
+      person_companion_marker_.pose.position.y = people_poseOut.pose.position.y;
+      person_companion_marker_.id = 1;
+     // MarkerArray_msg_.markers.push_back( person_companion_marker_ ); // discoment to get out this marker.
+
+     //ROS_INFO("AkpLocalPlanner::fill_robot_companion_markers:    if(tf_exists)");  
+      geometry_msgs::PoseStamped robot_poseIn;
+      geometry_msgs::PoseStamped robot_poseOut;
+      robot_poseIn.header             = header_point_.header; // guardar un header de un mensaje actual
+      robot_poseIn.header.frame_id    = source_frame;
+      robot_poseIn.pose.position.x    = 0.75*cos(actual_companion_angle*(3.14/180));
+      robot_poseIn.pose.position.y    = 0.75*sin(actual_companion_angle*(3.14/180));
+      robot_poseIn.pose.orientation.z = 1.0;
+      tf_listener_.transformPose(target_frame, robot_poseIn, robot_poseOut);
+      robot_companion_marker_.pose.position.x = robot_poseOut.pose.position.x;
+      robot_companion_marker_.pose.position.y = robot_poseOut.pose.position.y;
+      robot_companion_marker_.id = 2;
+      //MarkerArray_msg_.markers.push_back( robot_companion_marker_ ); // discoment to get out this marker.
+
+      static tf::TransformBroadcaster br;
+      tf::Transform transform;
+      transform.setOrigin( tf::Vector3(robot_poseOut.pose.position.x, robot_poseOut.pose.position.y, 0.0) ); 
+			tf::Quaternion quat;
+			quat.setEuler(0, 0, robot_ini_pose_theta_);
+			transform.setRotation( quat);
+      //transform.setRotation( tf::Quaternion(0, 0, this->robot_pose_.theta) ); // msg->theta= buscar y guardar por arriba orientación robot.
+    //  br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "/map", "/tibi/base_footprint"));//br.sendTransform(tf::StampedTransform(transform, ros::Time::now(), "world", "tibi"));
+    }
+  }catch (tf::TransformException &ex)
+  {
+    ROS_INFO("AkpLocalPlanner::fill_robot_companion_markers:: %s",ex.what());
+  }
+/////////////
+  // prueba! ver que goal es el (this->robot_goal_)
+  robot_see_goal_marker_.pose.position.x = this->robot_goal_.x;
+  robot_see_goal_marker_.pose.position.y = this->robot_goal_.y;
+  robot_see_goal_marker_.id = 3;
+  //MarkerArray_msg_.markers.push_back( robot_see_goal_marker_ ); // discoment to get out this marker.
+
+}
+
+void AkpLocalPlanner::fill_test_markers(){
+  Spoint person=planner_.get_companion_person_position();
+  Sdestination person_dest=planner_.get_person_destination();
+  double actual_companion_angle=planner_.get_actual_companion_angle();
+  double actual_companion_distance=planner_.get_robot_person_proximity_distance();
+
+  double robot_x = this->robot_pose_.x;
+  double robot_y = this->robot_pose_.y;
+  double beta=atan2(robot_y-person.y , robot_x-person.x);
+
+  double theta =atan2(person_dest.y-person.y , person_dest.x-person.x);
+  if( diffangle(theta, beta) < 0 )
+  {
+    person_90_degre_marker_.pose.position.x=person.x+actual_companion_distance*cos(theta+actual_companion_angle*3.14/180);
+    person_90_degre_marker_.pose.position.y=person.y+actual_companion_distance*sin(theta+actual_companion_angle*3.14/180);
+  }else{
+    person_90_degre_marker_.pose.position.x=person.x+actual_companion_distance*cos(theta-actual_companion_angle*3.14/180);
+    person_90_degre_marker_.pose.position.y=person.y+actual_companion_distance*sin(theta-actual_companion_angle*3.14/180);
+  }
+
+  person_90_degre_marker_.id = 3;
+ // MarkerArray_msg_.markers.push_back( person_90_degre_marker_ ); // discoment to get out this marker.
+ // MarkerArray_msg_comp_markers_.markers.push_back( person_90_degre_marker_ ); // discoment to get out this marker.
+
+
+  // To see the goal to go at X position respect to the accompanied person
+  Sdestination robot_goal_from_person_companion=this->planner_.get_person_companion_goal(); 
+  robot_goal_to_position_respect_to_the_person.pose.position.x=robot_goal_from_person_companion.x;
+  robot_goal_to_position_respect_to_the_person.pose.position.y=robot_goal_from_person_companion.y;
+  robot_goal_to_position_respect_to_the_person.id=30;
+
+  if(output_screen_messages_){
+	//ROS_INFO( "enter fuera bolitas companion marker()" );
+  MarkerArray_msg_.markers.push_back(robot_goal_to_position_respect_to_the_person);
+  }
+  // to see the goal to go following the path. 
+  Sdestination robot_goal_from_planning_traj=this->planner_.get_robot_path_goal();
+  robot_goal_to_follow_the_path.pose.position.x=robot_goal_from_planning_traj.x;
+  robot_goal_to_follow_the_path.pose.position.y=robot_goal_from_planning_traj.y;
+  robot_goal_to_follow_the_path.id=40;
+
+  if(fuera_bolitas_goals_companion_markers_){
+	//ROS_INFO( "enter fuera bolitas companion marker()" );
+  MarkerArray_msg_.markers.push_back(robot_goal_to_follow_the_path);
+  }
+  // to see the final goal combitation of both and the environment interactions.
+  Spose final_robot_goal_pose=this->planner_.get_final_combined_goal();
+  final_robot_goal_act_iteration.pose.position.x=final_robot_goal_pose.x;
+  final_robot_goal_act_iteration.pose.position.y=final_robot_goal_pose.y;
+  final_robot_goal_act_iteration.id=50;
+  if(fuera_bolitas_goals_companion_markers_){
+	//ROS_INFO( "enter fuera bolitas companion marker()" );
+  MarkerArray_msg_.markers.push_back(final_robot_goal_act_iteration);
+  }
+
+
+    Spoint before_next_goal_of_robot_act=this->planner_.get_before_next_goal_of_robot();
+    see_before_next_goal_of_robot_.pose.position.x=before_next_goal_of_robot_act.x;
+    see_before_next_goal_of_robot_.pose.position.y=before_next_goal_of_robot_act.y;
+    see_before_next_goal_of_robot_.id=77;
+    if(fuera_bolitas_goals_companion_markers_){
+	//ROS_INFO( "enter fuera bolitas companion marker()" );
+      MarkerArray_msg_.markers.push_back(see_before_next_goal_of_robot_);
+    }
+
+}
+
+
+void AkpLocalPlanner::fill_people_prediction_markers_path_points()
+{
+  const std::list<Cperson_abstract *>* person_list = planner_.get_scene( );
+  const std::vector<SpointV_cov>* traj;
+  unsigned int cont = 0;
+  double time_stamp_ini = planner_.get_time();
+  //ROS_INFO( "(fill_people_prediction_markers_path_points()) person list %lu" , person_list->size() );
+  for( std::list<Cperson_abstract*>::const_iterator iit = person_list->begin(); iit!=person_list->end(); iit++ )
+  {
+    if( (*iit)->get_id()==2){ // solo quiero ver la del person target.
+      if( (*iit)->get_planning_trajectory()->size() <= 1 )
+        traj = (*iit)->get_prediction_trajectory();
+      else
+        traj = (*iit)->get_planning_trajectory();
+
+      unsigned int id_person=(*iit)->get_id();
+     	// ROS_INFO("id_person= %d", id_person);
+        //fill prediction covariances
+        for( unsigned int i = 0; i< traj->size(); ++i , ++cont)
+        {
+          pred_traj_point_marker_.pose.position.x = traj->at(i).x;
+          pred_traj_point_marker_.pose.position.y = traj->at(i).y;
+          pred_traj_point_marker_.pose.position.z = 0.0;// traj->at(i).time_stamp - time_stamp_ini;//2d cov elevated the time azis(z)
+          pred_traj_point_marker_.id = cont;
+          MarkerArray_msg_.markers.push_back( pred_traj_point_marker_ );
+        }
+    }
+  }
+}
+
+
+
+
+///////////////////////// Do goal new (ely) functions to allow companion person goals, not only rviz goals.
+
+
+void AkpLocalPlanner::move_baseDone(const actionlib::SimpleClientGoalState& state,  const move_base_msgs::MoveBaseResultConstPtr& result)
+{
+  //this->alg_.lock(); 
+ if(debug_antes_subgoals_entre_AKP_goals_){
+  ROS_INFO("AkpLocalPlanner::move_baseDone: %s", state.toString().c_str());
+  }
+
+  if(this->move_base_client_.getState() == actionlib::SimpleClientGoalState::SUCCEEDED)
+  {
+    ROS_INFO("moveRobot: Hooray, the base reached the goal!");
+    
+    // evitar que se pare cuando llega al goal, si luego la persona se dirige a otro goal distinto.
+    const std::vector<Sdestination>* dest = planner_.get_destinations();
+    Sdestination act_dest;
+    if(!dest->empty()){
+      act_dest.x=dest->at(0).x;
+      act_dest.y=dest->at(0).y;
+      this->planner_.get_robot2()->set_best_dest(act_dest);
+    }else{
+      act_dest.x=0;
+      act_dest.y=0;
+      this->planner_.get_robot2()->set_best_dest(act_dest);
+    }
+    for( unsigned int i = 0; i < dest->size(); ++i)
+    {
+      ROS_INFO("dest->at(0).x=%f ; dest->at(i).y=%f",dest->at(i).x,dest->at(i).y);
+    } 
+    
+  }
+  else
+  {
+    ROS_WARN("moveRobot: Oops, the base failed to reach the goal for some reason!");
+  } 
+
+  this->isMoveBaseActive=false;
+} 
+
+void AkpLocalPlanner::move_baseActive() 
+{ 
+  //this->alg_.lock(); 
+  //ROS_INFO("AkpLocalPlanner::move_baseActive: Goal just went active!"); 
+  //this->alg_.unlock(); 
+} 
+
+void AkpLocalPlanner::move_baseFeedback(const move_base_msgs::MoveBaseFeedbackConstPtr& feedback) 
+{ 
+  //ROS_INFO(" IN move_baseFeedback ");
+  bool feedback_is_ok = true; 
+  if( !feedback_is_ok ) 
+    this->move_base_client_.cancelGoal(); 
+	//ROS_INFO(" [IN move_baseFeedback] feedback_is_ok=%f ",feedback_is_ok);
+}
+
+
+/////////////  [action requests] //////////////////
+bool AkpLocalPlanner::move_baseMakeActionRequest() 
+{ 
+  //ROS_INFO("[SENDING GOAL] move_baseMakeActionRequest()");
+  bool ok=false;
+    if(this->move_base_client_.isServerConnected())
+    {
+      this->move_base_client_.sendGoal(move_base_goal_, 
+                  boost::bind(&AkpLocalPlanner::move_baseDone,     this, _1, _2), 
+                  boost::bind(&AkpLocalPlanner::move_baseActive,   this), 
+                  boost::bind(&AkpLocalPlanner::move_baseFeedback, this, _1));
+     
+      //ROS_INFO("AkpLocalPlanner::move_baseMakeActionRequest: Goal Sent!");
+      this->isMoveBaseActive=true;
+      ok=true;  
+    }
+    else
+    {
+      ROS_ERROR("AkpLocalPlanner::move_baseMakeActionRequest: move_base server not connected");
+      ok=false;
+    }
+
+  return ok;
+}
+
+bool AkpLocalPlanner::doGoal() //(std::vector<double> goal) bool AkpLocalPlanner::doGoal(Spoint goal)
+{
+  Sdestination best_person_dest=this->planner_.get_robot2()->get_best_dest();
+  Spose actual_robot=this->planner_.get_robot2()->get_current_pose();
+
+  this->move_base_goal_.target_pose.pose.position.x = best_person_dest.x; //goal[0];
+  this->move_base_goal_.target_pose.pose.position.y = best_person_dest.y; //goal[1];
+  double theta = atan2(best_person_dest.y - this->robot_pose_.y , best_person_dest.x - this->robot_pose_.x);
+  this->move_base_goal_.target_pose.pose.orientation.x = 0;
+  this->move_base_goal_.target_pose.pose.orientation.y = 0;
+  if(theta<0.002){ // To avoid error:  Quaternion has length close to zero... discarding as navigation goal
+    theta=0.002;
+  }
+
+	this->move_base_goal_.target_pose.pose.orientation.z = theta;//goal.get_robot_orient_z();
+	this->move_base_goal_.target_pose.pose.orientation.w = 0;//goal.get_robot_orient_w();
+  
+  this->move_base_goal_.target_pose.header.stamp    = ros::Time::now();
+  this->move_base_goal_.target_pose.header.frame_id = "map";// == desde que frame_id mandas el goal, cambiar si va mal!. this->config.faf_frame; (lo que habia antes)
+
+	next_goal_marker_.pose.position.x = best_person_dest.x;
+	next_goal_marker_.pose.position.y = best_person_dest.y;
+	next_goal_marker_.pose.orientation.z = theta;
+	next_goal_marker_.id = 17;
+    
+	if(fuera_bolitas_goals_companion_markers_){
+		//ROS_INFO( "enter fuera bolitas companion marker()" );
+		MarkerArray_msg_.markers.push_back( next_goal_marker_ ); 
+	}
+
+  if(this->move_baseMakeActionRequest())
+    return true;
+  else
+    return false;
+} 
+
+bool AkpLocalPlanner::doGoal2() //(std::vector<double> goal) bool AkpLocalPlanner::doGoal(Spoint goal)
+{
+
+  if(get_scout_results_doGoal_){
+    ROS_INFO("AkpLocalPlanner::doGoal2: start");
+  }
+
+  Sdestination best_person_dest=this->planner_.get_robot2()->get_best_dest();
+  Spose actual_robot=this->planner_.get_robot2()->get_current_pose();
+
+  geometry_msgs::PoseStamped start_position;
+  //start_position.header             = header_point_.header; // guardar un header de un mensaje actual
+  start_position.header.stamp    = ros::Time::now();
+  start_position.header.frame_id    =  "map";
+  start_position.pose.position.x    = this->robot_pose_.x;
+  start_position.pose.position.y    = this->robot_pose_.y;
+
+	
+
+  if(this->robot_pose_.theta<0.002){ // To avoid error:  Quaternion has length close to zero... discarding as navigation goal
+    this->robot_pose_.theta=0.002;
+  }
+  tf::Quaternion robot_quat = tf::createQuaternionFromYaw(this->robot_pose_.theta);
+  start_position.pose.orientation.x = robot_quat.x();
+  start_position.pose.orientation.y = robot_quat.y();
+  start_position.pose.orientation.z = robot_quat.z();
+  start_position.pose.orientation.w = robot_quat.w();
+  //start_position.pose.orientation.z = this->robot_pose_.theta;
+
+  geometry_msgs::PoseStamped goal_position;
+ // goal_position.header             = header_point_.header; // guardar un header de un mensaje actual
+  goal_position.header.stamp    = ros::Time::now();
+  goal_position.header.frame_id    =  "map";
+  goal_position.pose.position.x    = best_person_dest.x;
+  goal_position.pose.position.y    = best_person_dest.y;
+  double theta_goal = atan2(best_person_dest.y - this->robot_pose_.y , best_person_dest.x - this->robot_pose_.x);
+  if(theta_goal<0.002){ // To avoid error:  Quaternion has length close to zero... discarding as navigation goal
+    theta_goal=0.002;
+  }
+
+  //theta_goal = 0.5;
+  tf::Quaternion goal_quat = tf::createQuaternionFromYaw(theta_goal);
+  goal_position.pose.orientation.x = goal_quat.x();
+  goal_position.pose.orientation.y = goal_quat.y();
+  goal_position.pose.orientation.z = goal_quat.z();
+  goal_position.pose.orientation.w = goal_quat.w();
+ 
+  std::vector<geometry_msgs::PoseStamped> Generated_plan;
+  get_plan_srv_.request.start = start_position;
+  get_plan_srv_.request.goal = goal_position;
+  get_plan_srv_.request.tolerance = 1.5;
+
+  if(get_scout_results_doGoal_){
+    ROS_INFO("AkpLocalPlanner::doGoal2: get_plan_srv_.request.tolerance= %f",get_plan_srv_.request.tolerance);
+    ROS_INFO("AkpLocalPlanner::doGoal2: start x= %f ; y=%f",get_plan_srv_.request.start.pose.position.x, get_plan_srv_.request.start.pose.position.y );
+    ROS_INFO("AkpLocalPlanner::doGoal2: goal x= %f ; y=%f",get_plan_srv_.request.goal.pose.position.x, get_plan_srv_.request.goal.pose.position.y );
+  }
+
+  bool good_plan=false;
+  bool call_succed=get_plan_client_.call(get_plan_srv_); 
+
+  if(get_scout_results_doGoal_){
+    if(call_succed){
+      ROS_INFO("call_succed=true"); 
+    }else{
+      ROS_INFO("IMPORTANT!!!! IMPORTANT!!! call_succed=false"); 
+    }
+  }
+  nav_msgs::Path new_generated_path;
+	new_generated_path=get_plan_srv_.response.plan;
+
+  if(get_scout_results_doGoal_){
+    ROS_INFO("AkpLocalPlanner::doGoal: SIZE new_path=%lu",new_generated_path.poses.size());
+    ROS_INFO("AkpLocalPlanner::doGoal: SIZE et_plan_srv_.response.plan=%lu",get_plan_srv_.response.plan.poses.size());
+    long unsigned int poses_size = new_generated_path.poses.size();
+    long unsigned int poses_size2 = sizeof(get_plan_srv_.response.plan.poses.size());
+    ROS_INFO("AkpLocalPlanner::doGoal: 2 SIZE new_path=%lu",poses_size);
+    ROS_INFO("AkpLocalPlanner::doGoal: 2 SIZE et_plan_srv_.response.plan=%lu",poses_size2);
+  }
+
+  if(new_generated_path.poses.empty()){
+    good_plan=false;
+    if(get_scout_results_doGoal_){
+      ROS_INFO("IMPORTANT!!!! IMPORTANT!!! good_plan=falsee (empty poses) Not plan!"); 
+    }
+  }else{
+    good_plan=true;
+    if(get_scout_results_doGoal_){
+      ROS_INFO("AkpLocalPlanner::doGoal: new_generated_path.poses.empty()=false ");
+    }
+  }
+
+  if(get_scout_results_doGoal_){
+    ROS_INFO("AkpLocalPlanner::doGoal: robot position x=%f, y=%f",this->robot_pose_.x,this->robot_pose_.y);
+    ROS_INFO("AkpLocalPlanner::doGoal: robot position x=%f, y=%f",actual_robot.x,actual_robot.y);
+    ROS_INFO("AkpLocalPlanner::doGoal: Goal is x=%f, y=%f; theta=%f",best_person_dest.x,best_person_dest.y,theta_goal);
+   if(good_plan){ 
+      ROS_INFO("good_plan=true"); 
+    }else{ 
+       ROS_INFO("good_plan=false"); 
+    }
+	}
+
+  if(good_plan){
+    this->move_base_goal_.target_pose.pose.position.x = best_person_dest.x; //goal[0];
+    this->move_base_goal_.target_pose.pose.position.y = best_person_dest.y; //goal[1];
+
+    double theta = atan2(best_person_dest.y - this->robot_pose_.y , best_person_dest.x - this->robot_pose_.x);
+    this->move_base_goal_.target_pose.pose.orientation.x = 0;//goal.get_robot_orient_x();
+    this->move_base_goal_.target_pose.pose.orientation.y = 0;//goal.get_robot_orient_y();
+    if(theta<0.002){ // To avoid error:  Quaternion has length close to zero... discarding as navigation goal
+      theta=0.002;
+    }
+
+    this->move_base_goal_.target_pose.pose.orientation.z = theta;//goal.get_robot_orient_z();
+    this->move_base_goal_.target_pose.pose.orientation.w = 0;//goal.get_robot_orient_w();
+
+    this->move_base_goal_.target_pose.header.stamp    = ros::Time::now();
+    this->move_base_goal_.target_pose.header.frame_id = "map";// == desde que frame_id mandas el goal, cambiar si va mal!. this->config.faf_frame; (lo que habia antes)
+    this->before_good_move_base_goal_=this->move_base_goal_;
+
+    next_goal_marker_.pose.position.x = best_person_dest.x;
+    next_goal_marker_.pose.position.y = best_person_dest.y;
+ 		next_goal_marker_.pose.orientation.z = theta;
+    next_goal_marker_.id = 17;
+    
+    if(fuera_bolitas_goals_companion_markers_){
+      MarkerArray_msg_.markers.push_back( next_goal_marker_ ); 
+    }
+
+  }else{
+    this->move_base_goal_=this->before_good_move_base_goal_;
+    next_goal_marker_.pose.position.x = before_good_move_base_goal_.target_pose.pose.position.x;
+    next_goal_marker_.pose.position.y = before_good_move_base_goal_.target_pose.pose.position.y;
+    next_goal_marker_.id = 17;
+    if(fuera_bolitas_goals_companion_markers_){
+			//ROS_INFO( "enter fuera bolitas companion marker()" );
+      MarkerArray_msg_.markers.push_back( next_goal_marker_ ); 
+    }
+
+    if(get_scout_results_doGoal_){
+      ROS_INFO("IMPORTANT!!!! IMPORTANT!!! else use before good goal!!!  x=%f, y=%f!",this->before_good_move_base_goal_.target_pose.pose.position.x,this->before_good_move_base_goal_.target_pose.pose.position.y); 
+    }
+  }
+
+  if(this->move_baseMakeActionRequest())
+    return true;
+  else
+    return false;
+} 
+
+
+/* select closest person with ps3 botton */
+
+/*  subscript to PS3 and wii (comandaments) to set up or down the beta weigth of the forces formula for learning alpha and beta of the companion task */
+/*void AkpLocalPlanner::joy_callback(const sensor_msgs::Joy::ConstPtr& msg) 
+{
+ //ROS_ERROR("PlatformTeleopAlgNode::joy_callback: ENTRO EN JOY!!! ");
+
+  this->alg_.lock(); // mirar mutex...
+  static std::vector<int> last_buttons=msg->buttons;
+  std::vector<int> current_buttons = msg->buttons;
+  std::vector<float> current_axes = msg->axes;
+  
+  this->reset_joy_watchdog();
+  
+  if( (msg->axes.size()==29 && msg->buttons.size()==17) || (msg->axes.size()==27 && msg->buttons.size()==19) ) //ps3 bluetooth or usb-cable
+    this->usePs3(current_buttons, last_buttons, current_axes); 
+  //else if( msg->axes.size()==3 && msg->buttons.size()==11) //wiimote number of axes and buttons
+    //this->useWii(current_buttons, last_buttons);
+  else
+    ROS_ERROR("PlatformTeleopAlgNode::joy_callback: unrecognized joy msg (%ld axes, %ld buttons)", msg->axes.size(), msg->buttons.size());
+
+  last_buttons=current_buttons;
+  
+  this->alg_.unlock();
+}*/
+
+
+/*
+void AkpLocalPlanner::usePs3(std::vector<int> current_buttons, std::vector<int> last_buttons, std::vector<float> current_axes)
+{
+	//ROS_ERROR("PlatformTeleopAlgNode::joy_callback: ENTRO EN usePs3!!! ");
+  if(current_buttons[BUTTON_DEAD_MAN]==0)
+  {
+   this->human_is_alive_=false;
+    if(last_buttons[BUTTON_DEAD_MAN]==1)
+    {
+      ROS_INFO("Released dead man button. Stop!");
+    }
+
+    for(unsigned int i=0; i<current_buttons.size(); i++) // solo coges el boton si NO esta pulsado el dead_man_buton!
+    {
+      if(current_buttons[i]==1 && last_buttons[i]==0)
+        this->usePs3Button(i);
+    }
+  }
+  else
+  {
+    this->human_is_alive_=true;
+  }
+
+}*/
+/*
+void AkpLocalPlanner::usePs3Button(const unsigned int & index)
+{
+	//ROS_INFO("PlatformTeleopAlgNode::joy_callback: ENTRO EN usePs3Button!!! ");
+  double act_beta=planner_.get_beta_companion();
+
+
+  int case_select_near_pers_as_companion=NEAR_PERS_COMP;
+  int case_select_near_pers_as_companion_one_person=NEAR_PERS_COMP_ONEP;
+  int case_launch_goal=LAUNCH_GOAL;
+  int case_launch_goal2=LAUNCH_GOAL;
+  int case_reset_data_file=RESET_DATA_FILE;
+  int case_stop_robot_manual=STOP_ROBOT_MANUAL;
+  bool launch_goal_by_id_change=false;
+	
+	int deselect_ids = BUTTON_CANCEL_GOAL;
+
+	if(index==deselect_ids){
+		// person companion:
+		this->planner_.set_id_person_companion(0);
+		this->planner_.set_id_person_companion_Cprediction_bhmip(0);
+		id_person_companion_=0;
+		this->config_.id_person_companion=0;
+		std::cout << " DES select people id's!!!" << std::endl;
+
+	}
+
+	//ROS_INFO("PlatformTeleopAlgNode::joy_callback: antes  case_select_near_pers_as_companion!!! ");
+	bool select_near_pers_with_goal=false;
+	if(index==case_launch_goal){
+		select_near_pers_with_goal=true;
+	}
+
+  if((index==case_select_near_pers_as_companion)||(select_near_pers_with_goal)){
+	  launch_goal_by_id_change=true;
+ 		change_ps3_config_=true;
+ 		ROS_ERROR("PlatformTeleopAlgNode::joy_callback: (two) ENTRO EN case_select_near_pers_as_companion!!! ");
+		unsigned int id_min_dist_per;	     
+		if(!this->obs.empty()){
+			Spoint actual_robot_pose;   //observation[i].id 
+			actual_robot_pose.x=this->robot_pose_.x;
+			actual_robot_pose.y=this->robot_pose_.y;
+			actual_robot_pose.time_stamp=this->robot_pose_.time_stamp;
+			std::vector<double> distances;  // vector distancias.
+			std::vector<Spoint> actual_person; // vector Spoints.
+			std::vector<unsigned int> ids_people;
+	          
+			for(unsigned int t=0; t<this->obs.size(); t++){
+				actual_person.push_back(this->obs[t]);
+				distances.push_back(actual_person[t].distance(actual_robot_pose));
+				ids_people.push_back(this->obs[t].id);	
+			}
+
+ 			double min_distance=distances[0];
+			id_min_dist_per=this->obs[0].id;
+			unsigned int min_t=0;
+			for(unsigned int t=0; t<distances.size(); t++){
+				// calculate near person!
+				if(distances[t]<min_distance){
+					min_distance=distances[t];
+					id_min_dist_per=ids_people[t];
+ 					min_t=t;
+				}
+ 			}
+	
+
+
+		// person companion:
+		this->planner_.set_id_person_companion(id_min_dist_per);
+		this->planner_.set_id_person_companion_Cprediction_bhmip(id_min_dist_per);
+	 	id_person_companion_=id_min_dist_per;
+		this->config_.id_person_companion=id_min_dist_per;
+		this->vis_mode_ = 2.0;
+		this->config_.vis_mode = 2.0;
+
+		
+	}
+	
+
+
+	/// Fin Selec closes person as companion!!!
+  }
+
+
+ if(index==case_select_near_pers_as_companion_one_person){ //||(index==case_select_near_pers2)
+
+	  	launch_goal_by_id_change=true;
+ 		change_ps3_config_=true;
+ 		ROS_ERROR("PlatformTeleopAlgNode::joy_callback: (one) ENTRO EN case_select_near_pers_as_companion!!! ");
+
+ 		unsigned int id_min_dist_per;
+
+		if(!this->obs.empty()){
+			Spoint actual_robot_pose;   //observation[i].id 
+			actual_robot_pose.x=this->robot_pose_.x;
+			actual_robot_pose.y=this->robot_pose_.y;
+			actual_robot_pose.time_stamp=this->robot_pose_.time_stamp;
+			std::vector<double> distances;  // vector distancias.
+			std::vector<Spoint> actual_person; // vector Spoints.
+			std::vector<unsigned int> ids_people;
+	      
+			for(unsigned int t=0; t<this->obs.size(); t++){
+				actual_person.push_back(this->obs[t]);		        
+				distances.push_back(actual_person[t].distance(actual_robot_pose));
+				ids_people.push_back(this->obs[t].id);
+			}
+
+ 			double min_distance=distances[0];
+			id_min_dist_per=this->obs[0].id;
+			unsigned int min_t=0;
+
+			for(unsigned int t=0; t<distances.size(); t++){	
+		    // calculate near person!
+		    if(distances[t]<min_distance){
+		    	min_distance=distances[t];
+		    	id_min_dist_per=ids_people[t];
+ 					min_t=t;
+		    }
+ 			}
+	
+			// person companion:
+			this->planner_.set_id_person_companion(id_min_dist_per);
+			this->planner_.set_id_person_companion_Cprediction_bhmip(id_min_dist_per);
+			id_person_companion_=id_min_dist_per;
+			this->config_.id_person_companion=id_min_dist_per;
+
+			this->vis_mode_ = 2.0;
+			this->config_.vis_mode = 2.0;
+
+
+	   }       
+
+
+
+  	}
+  	if(index==case_reset_data_file){
+	 	 ROS_ERROR("PlatformTeleopAlgNode::joy_callback: RESET DATA FILE! ");
+    	// restart real robot, to reestart experiment and save results in a new file
+    	this->planner_.set_restart_real(true);   
+    	this->planner_.set_restart_real_data_txt();
+    	this->planner_.set_save_in_file(true);
+    	this->planner_.set_results_filename(config_.results_filename);
+  	}
+
+  	if((index==case_launch_goal)||(index==case_launch_goal2)||(launch_goal_by_id_change)){
+	  	if((index==case_launch_goal)||(index==case_launch_goal2)){
+		    stop_robot_manually_=false;	// si lo desbloque con el start.
+	  	}
+
+			ROS_ERROR("PlatformTeleopAlgNode::joy_callback: ENTRO EN case_launch_goal!!! ");
+
+
+			// primer send a goal!!!(ely)= ya no computa, ya aparece en la posición que le toca.== Si se mueve de posicion inicial, descomentar esto.
+			geometry_msgs::PoseStamped target_goal_simple;
+		 	target_goal_simple.pose.position.x =this->robot_pose_.x;//config_.publish_goal_x;
+			target_goal_simple.pose.position.y = this->robot_pose_.y;//config_.publish_goal_y;
+			target_goal_simple.pose.position.z = 0;
+			target_goal_simple.pose.orientation.w = 1;
+			target_goal_simple.header.frame_id = "map";
+			this->goal_publisher_.publish(target_goal_simple);
+			// SET parameters dynamic reconfigure, provisional. (TODO: hacerlo bien y setearlos desde dentro o desde el archivo de tibi)
+			//this->planner_.set_plan_local_nav_group_go_to_interact_with_other_person(false);
+
+			// compartida con simul people, no la puedo quitar.
+			this->planner_.set_new_time_window_for_filter_velocity(4.0);
+
+			char Str[10] = "";
+			Spoint facke_point1;
+			facke_point1.itoa(id_person_companion_, Str);
+			std::string file_name_person1=Str;
+
+			char Str2[10] = "";
+			std::string file_name_person2=Str2;
+
+			this->planner_.set_k_final_goal(1.52);
+			this->planner_.set_change_k_robot(true);
+			this->planner_.set_change_k_person(false);
+			this->planner_.set_change_k_person_comp(false);
+			this->planner_.set_change_k_obst(false);
+			num_people_node_=2.0;
+		}
+
+  	if(index==case_launch_goal){
+  		first_retun_=true;
+  	}
+
+  	if(index==case_launch_goal2){
+  		no_status_=true;
+  	}
+
+}*/
+/*
+void AkpLocalPlanner::reset_joy_watchdog(void)
+{
+  //this->joy_watchdog_access.enter();
+  this->joy_watchdog_duration=ros::Duration(this->config_.joy_watchdog_time);
+ // this->joy_watchdog_access.exit();
+}
+
+bool AkpLocalPlanner::joy_watchdog_active(void)
+{
+ // this->joy_watchdog_access.enter();
+  if(this->joy_watchdog_duration.toSec()<=0.0)
+  {
+   // this->joy_watchdog_access.exit();
+    return true;
+  }
+  else
+  {
+  //  this->joy_watchdog_access.exit();
+    return false;
+  }
+}*/
+/*
+void AkpLocalPlanner::update_joy_watchdog(void)
+{
+  static ros::Time start_time=ros::Time::now();
+  ros::Time current_time=ros::Time::now();
+
+  //this->joy_watchdog_access.enter();
+  this->joy_watchdog_duration-=(current_time-start_time);
+  start_time=current_time;
+ // this->joy_watchdog_access.exit();
+}
+
+void AkpLocalPlanner::function_joy_teleop_mainNodeThread(void)
+{
+  this->alg_.lock();
+  this->update_joy_watchdog();
+  if(this->human_is_alive_)
+  {
+    if(this->joy_watchdog_active())
+    {
+      this->human_is_alive_ = false;
+      ROS_ERROR("PlatformTeleopAlgNode::mainNodeThread: joy_watchdog timeout!");
+    }
+    else{
+    }
+  }
+  this->alg_.unlock();
+
+}*/
+

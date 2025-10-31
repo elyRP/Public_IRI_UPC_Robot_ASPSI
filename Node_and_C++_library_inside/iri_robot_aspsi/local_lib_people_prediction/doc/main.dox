@@ -1,0 +1,134 @@
+/*! \mainpage people_prediction
+
+  \section Introduction 
+
+  \subsection Pre-Requisites
+
+  This package requires of the following libraries and packages
+	 - <A href="http://www.cmake.org">cmake</A>, a cross-platform build system.
+	 - <A href="http://www.doxygen.org">doxygen</a> and 
+	   <A href="http://www.graphviz.org">graphviz</a> to generate the documentation.
+         - stdc++, 
+	 .
+  
+  Under linux all of these utilities are available in ready-to-use packages.
+
+  Under MacOS most of the packages are available via <a href="http://www.finkproject.org/">fink</a>. <br>
+
+  \subsection Compilation
+
+  Just download this package, uncompress it, and execute
+   - cd build
+   - cmake ..
+   .
+  to generate the makefile and then
+   - make
+   .
+  to obtain the shared library (in this case called <em>iriutils.so</em>) and
+  also all the example programs.
+
+  The <em>cmake</em> only need to be executed once (make will automatically call
+  <em>cmake</em> if you modify one of the <em>CMakeList.txt</em> files).
+
+  To generate this documentation type
+       - make doc
+       .
+
+  The files in the <em>build</em> directory are genetated by <em>cmake</em>
+  and <em>make</em> and can be safely removed.
+  After doing so you will need to call cmake manually again.
+
+  \subsection Configuration
+
+  The default build mode is DEBUG. That is, objects and executables 
+  include debug information.
+
+  The RELEASE build mode optimizes for speed. To build in this mode
+  execute
+      - cmake .. -DCMAKE_BUILD_TYPE=RELEASE
+      .
+  The release mode will be kept until next time cmake is executed.
+
+  \subsection Installation
+
+  In order to be able to use the library, it it necessary to copy it into the system.
+  To do that, execute
+
+      - make install
+      .
+
+  as root and the shared libraries will be copied to <em>/usr/local/lib/iriutils</em> directory
+  and the header files will be copied to <em>/usr/local/include/iriutils</em> dierctory. At 
+  this point, the library may be used by any user.
+
+  To remove the library from the system, exceute
+      - make uninstall
+      .
+  as root, and all the associated files will be removed from the system.
+
+  \section Customization
+
+  To build a new application using these library, first it is necessary to locate if the library
+  has been installed or not using the following command
+
+      - FIND_PACKAGE(people_prediction REQUIRED)
+
+  In the case that the package is present, it is necessary to add the header files directory to
+  the include directory path by using
+
+      - INCLUDE_DIRECTORIES(${people_prediction_INCLUDE_DIR})
+
+  Finally, it is also nevessary to link with the desired libraries by using the following command
+
+      - TARGET_LINK_LIBRARIES(<executable name> ${people_prediction_LIBRARY})
+      .
+
+  \section License
+
+  This package is licensed under a  
+  <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/deed.en">
+    CC BY-NC-ND 4.0 (Attribution-NonCommercial-NoDerivatives 4.0 International) License</a>.
+
+  \section Disclaimer
+
+    Created on: Dec 22, 2013 by Gonzalo Ferrer. 
+    Last Modified by Ely Repiso on 2025 (migration to ros-Noetic and in the middle of ros2-humble migration)
+       Author: Initial code of the Robot alone AKP navigation is from Gonzalo Ferrer (2013).
+       Author: Additions and new codes of ASPSI for people accompaniment code of Ely Repiso (from 2015 and currently).
+       license (for other authors that will not be the original ones): CC BY-NC-ND 4.0 
+               (Attribution-NonCommercial-NoDerivatives 4.0 International)
+               https://creativecommons.org/licenses/by-nc-nd/4.0/deed.en
+       This license does not allow other authors to modify or to take profit from these works. 
+       Then, for modifications or derivative works, please contact ely.repiso@upc.edu to try to agree on 
+    collaborations (for journals with other researchers, formal collaborations between UPC and companies, and so on).
+ 
+   Redistribution and use in source and binary forms, without
+   modification, are permitted provided that the following conditions
+   are met:
+ 
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+    * Neither the name of the Willow Garage nor the names of its
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission. 
+    * Additionally, remember that the derivatives without collaboration 
+      Of the original authors are prohibited
+ 
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+   FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+   COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+   INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+   BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+   CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+   LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+   ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+   POSSIBILITY OF SUCH DAMAGE.
+
+ */

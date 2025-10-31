@@ -1,0 +1,59 @@
+# footprint parameters
+#footprint: [[0.35, 0.35], [0.35, -0.35], [-0.35,-0.35 ], [-0.35, 0.35]]
+robot_radius: 0.5
+footprint_padding: 0.01
+footprint_topic: /dabo/move_base/local_costmap/footprint
+published_footprint_topic: false
+
+robot_base_frame: dabo/base_footprint
+track_unknown_space: false
+always_send_full_costmap: false
+transform_tolerance: 1.0
+width: 10.0
+height: 10.0
+resolution: 0.1
+origin_x: 0.0
+origin_y: 0.0
+
+obstacle_layer:
+  enabled: true
+  track_unknown_space: true
+  transform_tolerance: 0.2
+  max_obstacle_height: 1.0
+  footprint_clearing_enabled: false
+  combination_method: 1
+  observation_sources: front_laser rear_laser
+  front_laser:  {
+    sensor_frame: dabo/front_hokuyo_scan_frame,
+    data_type: LaserScan,
+    topic: /dabo/sensors/front_scan,
+    observation_persistence: 0.0,
+    marking: true,
+    clearing: true,
+    min_obstacle_height: 0.05,
+    max_obstacle_height: 1.8,
+    expected_update_rate: 10,
+    obstacle_range: 30.0,
+    raytrace_range: 40.0
+  }
+  
+  rear_laser:  {
+    sensor_frame: dabo/rear_hokuyo_scan_frame,
+    data_type: LaserScan,
+    topic: /dabo/sensors/rear_scan,
+    observation_persistence: 0.0,
+    marking: true,
+    clearing: true,
+    min_obstacle_height: 0.05,
+    max_obstacle_height: 1.8,
+    expected_update_rate: 10,
+    obstacle_range: 30.0,
+    raytrace_range: 40.0
+  }
+
+inflation_layer:
+  enabled: true
+  inflate_unknown: false
+  inflation_radius: 2.0
+  cost_scaling_factor:  5.0
+  inflation_radius:     0.5

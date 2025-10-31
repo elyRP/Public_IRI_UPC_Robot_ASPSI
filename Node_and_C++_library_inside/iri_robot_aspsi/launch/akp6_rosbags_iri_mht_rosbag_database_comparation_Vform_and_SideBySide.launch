@@ -1,0 +1,528 @@
+<!-- -->
+<launch>
+
+  <!-- <param name="use_sim_time" value="true"/>  usar tiempo simulacion en vez de la maquina para ros_time -->
+
+
+  <arg name="filename1" default="29_11_2018_teo/2018-11-29-12-05-07.bag"/>
+  <arg name="filename2" default="29_11_2018_tibi/subset_2018-11-29-15-08-37.bag"/>
+  <arg name="delay"     default="0.7"/>
+  <arg name="path"     default="results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/29_11_2018/"/>
+  <arg name="rate"     default="0.5"/>
+
+<!-- $(find iri_akp_local_planner_companion)/rosbags_akp_learning_parametros_fuerzas/rosbags_database/8_junio -->
+<!-- rosbags_akp_learning_parametros_fuerzas/rosbags_database/9_junio-->
+  <param name="use_sim_time" value="false"/>
+
+  <!-- <node pkg="rosbag"
+        type="play"
+        name="rosbag1"
+        args="$(env DATASET_PATH)/$(arg path)/$(arg filename1).bag -r $(arg rate)"
+        output="screen">
+  </node> 
+  
+ <node pkg="rosbag"
+        type="play"
+        name="rosbag2"
+        args="$(env DATASET_PATH)/$(arg path)/$(arg filename2).bag -r $(arg rate) -d $(arg delay)"
+        output="screen">
+  </node>   -->
+        
+ <!-- tibi_tibi urdf model -->
+   <!-- <param name="robot_description" command="cat $(find tibi_dabo_base)/model/tibi_base.urdf" />  -->
+  <!--   <include file="$(find tibi_dabo_rosnav)/launch/tibi_dabo_map_server.launch">
+    <arg name="map" value="real_scen_final9"/>
+  </include>  -->
+
+     <!-- -s (segundos inicio) -->   
+     
+    <!--  
+      rosbags => results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/29_11_2018/
+rviz => $(find tibi_dabo_apps)/rviz/teo_tibi.rviz
+
+     
+     Folder:  $results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/29_11_2018/
+   rosbags database 29/11/2018:  tarde_buenos: MAPA, para ellos: 
+   
+      G1 (15:00):
+        V1, IDA, V-form-Central (SOLO IDA) => V-form poco marcada. No me la dejaron hacer mejor. == V
+                tibi: subset_2018-11-29-15-08-37.bag
+                teo:  2018-11-29-12-05-07.bag
+	V1, IDA parte2, V-form-Central +  Vuelta, Side-by-side-Lateral (ok)
+                tibi: subset_2018-11-29-15-12-02.bag
+                teo:  2018-11-29-15-12-01.bag
+
+      G2 (15:15):
+  	V2,  IDA, V-form-lateral (hasta el final no se consigue poner a Tibi en la "V"==V) + Vuelta, Side-by-side-central (si, pero cerraban un poco a Tibi y es un poco V==V)
+                tibi: subset_2018-11-29-15-21-21.bag
+                teo:  2018-11-29-15-21-20.bag
+
+      G3 (15:30):
+  	V1,  IDA, V-form-Central (al principio es más side-by-side que V-form ya que si me separaba, se parban =side) + Vuelta, Side-by-side-Lateral (OK)
+                tibi: subset_2018-11-29-15-31-02.bag
+                teo:  2018-11-29-15-31-00.bag
+
+      G4 (15:45):
+  	V2,  IDA, NO V-form-lateral (ES MAS SIDE-by-SIDE, al ser tibi lenta, no se consigue bien=side) + Vuelta, Side-by-side-central (se parece a V-form porque no dejan a Tibi adelantarse=V-form)
+                tibi: subset_2018-11-29-15-44-04.bag
+                teo:  2018-11-29-15-44-04.bag
+
+      G5 (16:00): ****
+  	V1,  IDA, V-form-Central (V poco marcada al principio=Vform) + Vuelta, Side-by-side-Lateral (OK)
+                tibi: subset_2018-11-29-15-54-33.bag 
+                teo:  2018-11-29-15-54-32.bag
+
+
+      G6 (16:15):
+  	V2,  IDA, V-form-lateral (Tibi hace V-form, pero la gente hace side-by-side) + Vuelta, Side-by-side-central (ok)
+                tibi: subset_2018-11-29-16-15-05.bag
+                teo:  2018-11-29-16-15-04.bag
+
+
+      G7 (16:30):
+  	V1,  IDA (SOLO), V-form-Central  (ok)                        + Vuelta, Side-by-side-Lateral 
+                tibi: subset_2018-11-29-16-28-57.bag
+                teo:  2018-11-29-16-28-56.bag
+
+      G7 (16:30):
+  	V1,   Vuelta (SOLO), Side-by-side-Lateral (ok)
+                tibi: subset_2018-11-29-16-35-19.bag
+                teo:  2018-11-29-16-35-18.bag
+
+   Folder:  $results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/03_12_2018/
+   rosbags database 03/12/2018:  tarde_buenos: MAPA, para ellos: 
+   
+      G8 (11:30):
+        V1, IDA, Side-by-side-Central (Ok) => V-form - Lateral (ok).
+		tibi: subset_2018-12-03-11-22-13.bag
+		Teo:  2018-12-03-12-59-51.bag (parte 1 rosbag. Habrá que arreglarlos)
+      G9 (11:45):
+	V1, IDA, Side-by-side-Central (Ok) => V-form - Lateral (es más bien side-by-side).
+		tibi: subset_2018-12-03-11-41-05.bag
+		Teo:  2018-12-03-12-59-51.bag (parte 2 rosbag. Habrá que arreglarlos)
+      G10 (13:00):
+	V1, IDA, Side-by-side-Central (Ok) => V-form - Lateral (ok).
+		tibi: subset_2018-12-03-13-02-37.bag
+		Teo:  2018-12-03-13-02-33.bag
+
+
+   Folder:  $results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/03_12_2018/
+   rosbags database 04/12/2018:  tarde_buenos: MAPA, para ellos: 
+   
+      G11 (11:00):
+        V1, IDA, Side-by-side-Central (Ok), vuelta => V-form - Lateral (ok).
+		tibi: subset_2018-12-04-11-11-04.bag
+		Teo: 2018-12-04-11-11-01.bag 
+      G12 (11:15): [SOLO Ida]
+	V1, IDA, Side-by-side-Central (Ok)
+		tibi: subset_2018-12-04-11-27-34.bag (solo IDA)
+		Teo:  2018-12-04-11-27-30.bag  (Ida y vuelta, creo k largo)
+      G12 (11:15): [SOLO vuelta]
+	V1, => V-form - Lateral (ok)
+		tibi: subset_2018-12-04-11-31-49.bag (solo vuelta)
+		Teo:    2018-12-04-11-27-30.bag  (Ida y vuelta, creo k largo)
+      G13 (11:30):
+	V1, IDA, Side-by-side-Central (Ok) => V-form - Lateral (es más side-by-side que V-form).
+		tibi: subset_2018-12-04-11-43-51.bag
+		Teo:  2018-12-04-11-43-48.bag  (Ida y vuelta, creo k largo)
+
+  Folder:  $results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/05_12_2018/
+   rosbags database 05/12/2018:  tarde_buenos: MAPA, para ellos: 
+
+      G14 (12:20):
+        V1, IDA, V-form-Central (Ok), vuelta => V-form - Lateral (ok).
+		tibi: subset_2018-12-05-12-23-25.bag
+		Teo: 2018-12-05-12-23-31.bag 
+
+      G15 (12:30):
+        V1, IDA, V-form-Central (Ok),
+		tibi: subset_2018-12-05-12-30-12.bag 
+		Teo:  2018-12-05-12-30-19.bag
+      G15 (12:30):
+        V1, vuelta => V-form - Lateral (ok).
+		tibi: subset_2018-12-05-12-35-47.bag
+		Teo:  2018-12-05-12-35-52.bag
+
+     G16 (16:15):
+        V1, IDA, Side-by-Side-Central (Ok), vuelta => V-form - Lateral (ok).
+		tibi: subset_2018-12-05-16-19-24.bag
+		Teo:  2018-12-05-16-19-29.bag
+     G17 (16:30):
+        V1, IDA, V-form-Central (Ok), vuelta => Side-by-Side - Lateral (ok).
+		tibi: subset_2018-12-05-16-35-04.bag
+		Teo:  2018-12-05-16-35-05.bag
+
+     G18 (16:55):
+        V1, IDA, V-form-Central (Ok), vuelta => Side-by-Side - Lateral (ok).
+		tibi: subset_2018-12-05-16-51-27.bag
+		Teo:  2018-12-05-16-51-43.bag
+
+
+     G19 (17:00):
+        V1, IDA, Side-by-side- central (Ok), vuelta => V.form - Lateral (ok).
+		tibi: subset_2018-12-05-17-10-38.bag
+		Teo:  2018-12-05-17-10-46.bag
+
+
+      G20 (17:15):
+        V1, IDA, Side-by-side-Central (Ok), (Intente V, pero es tan poco marcada k es más side-by-side
+		tibi: subset_2018-12-05-17-16-24.bag
+		Teo:  2018-12-05-17-16-29.bag
+      G20 (17:15):
+        V1, vuelta => Side-by-side - Lateral (ok).
+		tibi: subset_2018-12-05-17-22-01.bag
+		Teo: 2018-12-05-17-22-07.bag  
+
+   Folder:  $results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/17_12_2018/
+   rosbags database 17/12/2018:  tarde_buenos: MAPA, para ellos: 
+
+	G21 (15:30): (ok)  Rosbags TIbi MAL localizado
+        V1, Ida => V-form - central (ok).
+		tibi: subset_2018-12-17-15-35-47.bag (IDA) == Rosbag mal localizado. Ya veré como arreglarlo.
+		Teo: 2018-12-17-15-35-50.bag (este esta ok. Se podrían sacar de aquí las posiciones)
+       	V1, vuelta => V-form - lateral (ok).
+		tibi: subset_2018-12-17-15-38-08.bag (vuelta) == Rosbag mal localizado. Ya veré como
+		Teo: 2018-12-17-15-38-07.bag (este esta ok. Se podrían sacar de aquí las posiciones)
+
+	G22 (15:45): (OK) Rosbags TIbi MAL localizado
+        V1, Ida => side-by-side - central (ok) == SIDE-by-SIde, parece más eso.
+		tibi: subset_2018-12-17-15-49-03.bag (IDA) == Rosbag mal localizado. Ya veré como arreglarlo.
+		Teo: 2018-12-17-15-49-01.bag (este esta ok. Se podrían sacar de aquí las posiciones)
+       	V1, vuelta => V-form - lateral (ok).
+		tibi: subset_2018-12-17-15-54-21.bag (vuelta)  == Rosbag mal localizado. Ya veré como
+		Teo: 2018-12-17-15-54-19.bag (este esta ok. Se podrían sacar de aquí las posiciones)
+
+
+	G23 (16:15): (ok)
+        V1, (parte1-IDA) =>V-form - central (ok) == SIDE-by-SIde, parece más eso.
+		tibi: subset_2018-12-17-16-10-25.bag (parte1-IDA) == Rosbag mal localizado. Ya veré como arreglarlo.
+		Teo: 2018-12-17-16-10-23.bag (este esta ok. Se podrían sacar de aquí las posiciones)
+       	V1, (parte2-IDA)  =>V-form - central  (ok).
+		tibi: subset_2018-12-17-16-12-36.bag (vuelta)  == Rosbag OK.
+		Teo: 2018-12-17-16-12-34.bag 
+       	V1, (vuelta)  =>V-form - lateral  (ok).
+		tibi: subset_2018-12-17-16-15-33.bag (vuelta)  == Rosbag OK.
+		Teo: 2018-12-17-16-15-31.bag
+
+	G24 (16:30): (ok) (ver si considero side-by-side o V-form)
+        V1, (IDA y vuelta) =>Side-by-side - central (ok) == Vuelta - V-form-lateral
+		tibi: subset_2018-12-17-16-17-48.bag  == Rosbag OK. arreglarlo.
+		Teo: 2018-12-17-16-17-46.bag 
+       
+	G25 (16:45): (OK
+        V1, (IDA y vuelta) =>Side-by-side - central (ok) == Vuelta - Side-by-side -lateral
+		tibi:  subset_2018-12-17-16-47-55.bag  == Rosbag OK. arreglarlo.
+		Teo: 2018-12-17-16-47-53.bag
+
+	G26 (16:45): (OK)
+        V1, (IDA y vuelta) =>inicial V-form (ok) == Vuelta - Side-by-side -lateral  [I!!!! La ida se podría considerar V-form.]
+		tibi:  subset_2018-12-17-16-59-15.bag  == Rosbag OK. arreglarlo.
+		Teo:  2018-12-17-16-59-13.bag
+     -->
+    
+
+  <!-- People Tracking MHT (remap) -->
+    <!-- published topics:  /$(env ROBOT)/mht/tracks -->
+    <!-- subscribed topics: /$(env ROBOT)/detections -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers:         output="screen" -->
+ <node pkg ="iri_people_tracking_mht"
+        type="iri_people_tracking_mht"
+        name="mht_2"> 
+      <remap from="/mht_2/detections"
+               to="/lpmf2/peopleMapFiltered" />
+      <remap from="/mht_2/odom"
+               to="/tibi/segway/odom" />
+       <remap from="/mht_2/odom_for_medium_velocity"
+              to="/tibi/segway/odom" />
+      <remap from="/mht_2/tracks"
+              to="/mhtf/tracks" /> 
+              
+       <param name="~/frame_id"               type="string" value="/map" />
+      <param name="local_tracker"            type="bool"   value="true"/>
+      <param name="~/association_threshold"  type="double" value="1.0" />
+      <param name="~/confirmation_threshold" type="double" value="0.7" />
+      <param name="~/deletion_threshold"     type="double" value="0.5" />
+      <param name="~/laser_probability"      type="double" value="0.99" />
+      <param name="~/laser_false_alarm"      type="double" value="0.1" />
+      <param name="~/laser_new_track"        type="double" value="0.11" />
+      <param name="~/laser_no_detection"     type="double" value="0.99" />
+      <param name="~/laser_no_confirmed"     type="double" value="0.02" />
+      <param name="~/laser_no_confirmed_iteration" type="double" value="0.01" />
+      <param name="~/augment_covariance_track"     type="double" value="0.1" />
+      <param name="~/id_markers"       type="bool" value="True" />
+      <param name="~/vel_markers"      type="bool" value="True" />
+      <param name="~/cov_markers"      type="bool" value="True" />
+      <param name="~/covdet_markers"   type="bool" value="False" />
+      <param name="~/covpred_markers"  type="bool" value="False" />
+      <param name="~/clust_markers"    type="bool" value="False" />
+      <param name="~/cov_markers_head" type="bool" value="False" />
+      <param name="~/cov_markers_arm1" type="bool" value="False" />
+      <param name="~/cov_markers_arm2" type="bool" value="False" /> -->
+    <param name="~/fuse_tibi_and_teo_tracks" type="bool" value="True" /> 
+      <param name="~/generate_database_companion" type="bool" value="False" /> 
+    </node>
+
+<!-- detectors -->
+    <!-- Front Laser People Detector -->
+      <!-- published topics:  /$(env ROBOT)/people -->
+      <!-- subscribed topics: /$(env ROBOT)/sensors/front_laser_scan -->
+      <!-- service clients: -->
+      <!-- service servers: -->
+      <!-- action clients: -->
+      <!-- action servers: -->
+   <!-- <node pkg ="iri_laser_people_detection"
+          type="iri_laser_people_detection"
+          name="lpd_front2"
+          machine="nav">
+      <param name="~rangeThreshold"     type="double" value="0.0" />
+      <param name="~detectionThreshold" type="double" value="-1.0" />
+      <param name="~jumpDistance"       type="double" value="0.1" /> 
+      <param name="~personRadius"  type="double" value="0.45" />
+      <param name="~boostFilePath"      type="string" value="/usr/local/include/iridrivers/boostData/boostFile.txt" />
+      <param name="~boostFilePath2"     type="string" value="/usr/local/include/iridrivers/boostData/boostFile2.txt" />
+      <param name="~selectPosesFrame"   type="bool"   value="True" />
+      <param name="~posesFrame"         type="string" value="/map" />
+      <param name="~selectScanFrame"    type="bool"   value="False" />
+      <param name="~scanFrame"          type="string" value="/$(env ROBOT)/front_laser" />
+      <param name="~markerWidth"        type="double" value="0.7" />
+      <param name="~markerHeight"       type="double" value="0.5" />
+      <param name="~markerR"            type="double" value="1.0" />
+      <param name="~markerG"            type="double" value="0.0" />
+      <param name="~markerB"            type="double" value="0.0" />
+      <param name="~markerA"            type="double" value="0.5" />
+      <param name="~filterPosesMode"    type="bool"   value="False" />
+      <param name="~filterR"            type="double" value="0.0" />
+      <param name="~filterX"            type="double" value="0.0" />
+      <param name="~filterY"            type="double" value="0.0" />
+      <remap from="~scan"
+               to="/$(env ROBOT)/sensors/front_laser_scan" />
+      <remap from="~people"
+               to="/lpd/people" />
+    </node>-->
+
+    <!-- Rear Laser People Detector -->
+      <!-- published topics:  /$(env ROBOT)/people -->
+      <!-- subscribed topics: /$(env ROBOT)/sensors/rear_laser_scan -->
+      <!-- service clients: -->
+      <!-- service servers: -->
+      <!-- action clients: -->
+      <!-- action servers: -->
+   <!-- <node pkg ="iri_laser_people_detection"
+          type="iri_laser_people_detection"
+          name="lpd_rear2"
+          machine="nav">
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-1.0" />-->
+      <!-- <param name="~/jumpDistance"       type="double" value="0.1" />-->
+     <!-- <param name="~personRadius"        type="double" value="0.45" />
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iridrivers/boostData/boostFile.txt" />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iridrivers/boostData/boostFile2.txt" />
+      <param name="~/selectPosesFrame"   type="bool"   value="True" />
+      <param name="~/posesFrame"         type="string" value="/map" />
+      <param name="~/selectScanFrame"    type="bool"   value="False" />
+      <param name="~/scanFrame"          type="string" value="/$(env ROBOT)/rear_laser" />
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.5" />
+      <param name="~/markerR"            type="double" value="1.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.0" />
+      <param name="~/markerA"            type="double" value="0.5" />
+      <param name="~/filterPosesMode"    type="bool"   value="False" />
+      <param name="~/filterR"            type="double" value="0.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+      <remap from="~scan"
+               to="/$(env ROBOT)/sensors/rear_laser_scan" />
+      <remap from="~people"
+               to="/lpd/people" />
+    </node>-->
+
+<!-- detectors filter -->
+  <!-- Laser People map Filter -->
+    <!-- published topics:  /$(env ROBOT)/peopleFiltered -->
+    <!-- subscribed topics: /$(env ROBOT)/people -->
+    <!--                    /$(env ROBOT)map -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <!--  <node pkg ="iri_laser_people_map_filter"
+          type="iri_laser_people_map_filter"
+          name="lpmf2"
+          machine="nav">
+      <param name="~/neighborRadius"   type="double" value="0.25" />
+      <param name="~/markerWidth"      type="double" value="0.7" />
+      <param name="~/markerHeight"     type="double" value="1.5" />
+      <param name="~/markerR"          type="double" value="1.0" />
+      <param name="~/markerG"          type="double" value="1.0" />
+      <param name="~/markerB"          type="double" value="0.0" />
+      <param name="~/markerA"          type="double" value="0.5" />
+      <param name="~/markerLifeTime"   type="double" value="0.1" />
+      <remap from="~people"
+               to="/lpd/people" />
+      <remap from="~peopleFiltered"
+               to="/lpmf2/peopleMapFiltered" />
+      <remap from="~map"
+               to="/$(env ROBOT)/map" />
+    </node> -->
+
+
+<!-- TEO!!! -->
+
+<!-- detectors -->
+    <!-- Front Laser People Detector -->
+      <!-- published topics:  /$(env ROBOT)/people -->
+      <!-- subscribed topics: /$(env ROBOT)/sensors/front_laser_scan -->
+      <!-- service clients: -->
+      <!-- service servers: -->
+      <!-- action clients: -->
+      <!-- action servers: -->
+   <!-- <node pkg ="iri_laser_people_detection"
+          type="iri_laser_people_detection"
+          name="lpd_front3"
+          machine="nav">
+      <param name="~rangeThreshold"     type="double" value="0.0" />
+      <param name="~detectionThreshold" type="double" value="-1.0" />
+       <param name="~personRadius"      type="double" value="0.45" /> -->
+     <!-- <param name="~jumpDistance"       type="double" value="0.1" />-->
+    <!--  <param name="~boostFilePath"      type="string" value="/usr/local/include/iridrivers/boostData/boostFile.txt" />
+      <param name="~boostFilePath2"     type="string" value="/usr/local/include/iridrivers/boostData/boostFile2.txt" />
+      <param name="~selectPosesFrame"   type="bool"   value="True" />
+      <param name="~posesFrame"         type="string" value="/map" />
+      <param name="~selectScanFrame"    type="bool"   value="False" />
+      <param name="~scanFrame"          type="string" value="/$(env ROBOT)/front_laser" />
+      <param name="~markerWidth"        type="double" value="0.7" />
+      <param name="~markerHeight"       type="double" value="0.5" />
+      <param name="~markerR"            type="double" value="1.0" />
+      <param name="~markerG"            type="double" value="0.0" />
+      <param name="~markerB"            type="double" value="0.0" />
+      <param name="~markerA"            type="double" value="0.5" />
+      <param name="~filterPosesMode"    type="bool"   value="False" />
+      <param name="~filterR"            type="double" value="0.0" />
+      <param name="~filterX"            type="double" value="0.0" />
+      <param name="~filterY"            type="double" value="0.0" />
+      <remap from="~scan"
+               to="/teo/sensors/front_laser" />
+      <remap from="~people"
+               to="/lpd3/people" />
+    </node> -->
+
+
+
+  <!--<node pkg ="iri_laser_people_map_filter"
+          type="iri_laser_people_map_filter"
+          name="lpmf3"
+          machine="nav">
+      <param name="~/neighborRadius"   type="double" value="0.25" />
+      <param name="~/markerWidth"      type="double" value="0.7" />
+      <param name="~/markerHeight"     type="double" value="1.5" />
+      <param name="~/markerR"          type="double" value="1.0" />
+      <param name="~/markerG"          type="double" value="1.0" />
+      <param name="~/markerB"          type="double" value="0.0" />
+      <param name="~/markerA"          type="double" value="0.5" />
+      <param name="~/markerLifeTime"   type="double" value="0.1" />
+      <remap from="~people"
+               to="/lpd3/people" />
+      <remap from="~peopleFiltered"
+               to="/lpmf3/peopleMapFiltered" /> -->
+ <!-- ojo!!! esto era /lpmf3/peopleMapFiltered -->
+   <!--   <remap from="~map"
+               to="/$(env ROBOT)/map" />
+    </node>
+
+
+  <node pkg ="iri_people_tracking_mht"
+        type="iri_people_tracking_mht"
+        name="mht_3"> 
+      <remap from="/mht_3/detections"
+               to="/lpmf2/peopleMapFiltered" />
+      <remap from="/mht_3/odom"
+               to="/teo/odom" />
+       <remap from="/mht_3/odom_for_medium_velocity"
+              to="/teo/odom" />
+      <remap from="/mht_3/tracks"
+              to="/mhtf/tracks" />        -->
+ <!--  output="screen" -->
+              
+  <!--     <param name="~/frame_id"               type="string" value="/map" />
+      <param name="local_tracker"            type="bool"   value="true"/>
+      <param name="~/association_threshold"  type="double" value="2.0" />
+      <param name="~/confirmation_threshold" type="double" value="0.8" />
+      <param name="~/deletion_threshold"     type="double" value="0.5" />
+      <param name="~/laser_probability"      type="double" value="0.9" />
+      <param name="~/laser_false_alarm"      type="double" value="0.1" />
+      <param name="~/laser_new_track"        type="double" value="0.11" />
+      <param name="~/laser_no_detection"     type="double" value="0.75" />
+      <param name="~/laser_no_confirmed"     type="double" value="0.02" />
+      <param name="~/laser_no_confirmed_iteration" type="double" value="0.01" />
+      <param name="~/augment_covariance_track"     type="double" value="0.1" />
+      <param name="~/id_markers"       type="bool" value="True" />
+      <param name="~/vel_markers"      type="bool" value="True" />
+      <param name="~/cov_markers"      type="bool" value="True" />
+      <param name="~/covdet_markers"   type="bool" value="False" />
+      <param name="~/covpred_markers"  type="bool" value="False" />
+      <param name="~/clust_markers"    type="bool" value="False" />
+      <param name="~/cov_markers_head" type="bool" value="False" />
+      <param name="~/cov_markers_arm1" type="bool" value="False" />
+      <param name="~/cov_markers_arm2" type="bool" value="False" /> 
+    </node>-->
+
+
+ <!-- Tracker que fusiona tracks tratandolos como detecciones a la entrada.-->
+<!--<node pkg ="iri_people_tracking_mht"
+        type="iri_people_tracking_mht"
+        name="mht_4"
+	output="screen"> 
+      <remap from="/mht_4/detections"
+               to="/lpmf2/peopleMapFiltered" />-->
+ <!-- para tracks: /mhtf/tracks-->
+
+    <!--  <remap from="/mht_4/odom"
+               to="/tibi/odom" />
+       <remap from="/mht_4/odom_for_medium_velocity"
+              to="/tibi/odom" />-->
+     <!-- <remap from="/mht_3/tracks"
+              to="/mht/tracks" />           output="screen" -->
+              
+   <!--   <param name="~/frame_id"               type="string" value="/map" />
+      <param name="local_tracker"            type="bool"   value="false"/>
+      <param name="~/association_threshold"  type="double" value="0.3" />
+      <param name="~/confirmation_threshold" type="double" value="0.6" />
+      <param name="~/deletion_threshold"     type="double" value="0.5" />
+      <param name="~/laser_probability"      type="double" value="0.99" />
+      <param name="~/laser_false_alarm"      type="double" value="0.1" />
+      <param name="~/laser_new_track"        type="double" value="0.11" />
+      <param name="~/laser_no_detection"     type="double" value="0.99" />
+      <param name="~/laser_no_confirmed"     type="double" value="0.02" />
+      <param name="~/laser_no_confirmed_iteration" type="double" value="0.01" />
+      <param name="~/augment_covariance_track"     type="double" value="0.1" />
+      <param name="~/id_markers"       type="bool" value="True" />
+      <param name="~/vel_markers"      type="bool" value="True" />
+      <param name="~/cov_markers"      type="bool" value="True" />
+      <param name="~/covdet_markers"   type="bool" value="False" />
+      <param name="~/covpred_markers"  type="bool" value="False" />
+      <param name="~/clust_markers"    type="bool" value="False" />
+      <param name="~/cov_markers_head" type="bool" value="False" />
+      <param name="~/cov_markers_arm1" type="bool" value="False" />
+      <param name="~/cov_markers_arm2" type="bool" value="False" /> 
+      <param name="~/generate_database_companion" type="bool" value="True" /> 
+      <param name="~/fuse_tibi_and_teo_tracks" type="bool" value="True" /> 
+      <param name="~/debug_fuse_tibi_and_teo_tracks" type="bool" value="False" /> 
+    </node>-->
+
+
+
+
+  <node name="rviz"
+        pkg ="rviz"
+        type="rviz"
+        args="-d $(find tibi_dabo_apps)/rviz/tibi_change_id_tracks.rviz" />/>
+<!-- tibi_local.vcg => TODO: volver a poner reconfigure, para la base de datos me estorbaba-->
+ <!-- <node name="reconfigure_gui"
+        pkg ="rqt_reconfigure"
+        type="rqt_reconfigure" />-->
+
+</launch>

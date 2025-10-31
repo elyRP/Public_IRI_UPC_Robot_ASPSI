@@ -1,0 +1,1382 @@
+/*
+ * plan_local_nav.h
+ *
+ *  Created on: Dec 22, 2013 Last Modified on 2020
+ *      Author: Initial code of the AKP Gonzalo Ferrer.
+ *      Author: Addition of ASSAOP and ASSAGP for people accompaniment code of Ely Repiso.
+ */
+
+#ifndef PLAN_LOCAL_NAV_H_
+#define PLAN_LOCAL_NAV_H_
+
+#include "prediction_behavior.h"
+#include "scene_elements/person_abstract.h"
+#include "prediction_bhmip.h"
+#include "nav/force_reactive_robot_companion.h"
+
+#include <fstream>      // std::ofstream
+#include <random>
+#include <iostream>
+#include <string>
+#include <stdio.h>
+#include <math.h>
+
+#include<bits/stdc++.h>
+
+using namespace std;
+/**
+ *	\brief Sedge_tree Struct
+ *
+ *	data struct describing a tree edge containing the index to the parent vertex
+ *	and the command inputs (v.w) or forces required to get from that vertex state
+ */
+
+
+class Sedge_tree
+{
+  public:
+	Sedge_tree(	unsigned int parent, Sforce f_=Sforce(), Sforce f_goal_=Sforce(),
+			Sforce f_people_=Sforce(),Sforce f_obs_=Sforce(), Sforce f_persongoal_=Sforce());
+	unsigned int parent;
+	Sforce f;
+	Sforce f_goal;
+	Sforce f_people;
+	Sforce f_obs;
+	Sforce f_persongoal;
+	double cost(Sedge_tree parent)const;
+	void print();
+};
+
+/**
+ *	\brief Smulticost Struct
+ *
+ *	data struct for containing multiciple costs and compare them in a fast and clean way
+ *	specially to determine dominance relations between solutions.
+ */
+class Smulticost
+{
+  public:
+	Smulticost( unsigned int id_ = 0, unsigned int n = 1 );
+	std::vector<double> cost;
+	unsigned int id;
+	bool operator< ( const Smulticost& m2) const;
+	bool operator==( const Smulticost& m2) const;
+	bool operator!=( const Smulticost& m2) const;
+	void print() const;
+	void print_ml() const;
+};
+
+/**
+ *	\brief Cplan_local_nal
+ *
+ * Basic local planner using social forces
+ *
+ */
+class Cplan_local_nav : public Cprediction_behavior
+{
+  public:
+    enum plan_mode{  F_RRT_Uniform=0,  F_RRT_Gauss_Circle, F_RRT_GC_alpha};
+    enum distance_mode{  Euclidean=0,  Cost2go_erf, Cost2go_norm , Cost2go_raw};
+    enum global_mode{ Scalarization=0, Weighted_sum_erf, Weighted_sum_norm, MO_erf, MO_norm}; // uso MO_erf (global_mode=3)
+    enum action_mode{START=0,ITER}; //STOP
+    enum simulation_case{case0=0,case1,case2} ;
+    enum calculate_complete_group_path_{akp_planner=0,person_prediction,prediction_total_time_with_collisions};
+
+    /**
+     * \brief Initial algorithm parameters in the constructor of the
+     * algorithm
+     */
+    Cplan_local_nav(double horizon_time = 3.0, unsigned int max_iter = 1000,
+    		plan_mode mode= Cplan_local_nav::F_RRT_Uniform, bool robot_or_person=false);
+    virtual ~Cplan_local_nav(); // false == robot= id_0; true == person_companion =id_1
+
+    /**
+         * \brief this is the public interface to calculate the robot plan
+         * according to the observed scene and the algorithm parameters.[only go to the goal, without person, companion]
+         */
+   bool init_robot_plan2_return_initial_position();
+   bool robot_plan_companion_return_initial_pose(Spose& pose_command, Cperson_abstract::companion_reactive& reactive,double dt);
+
+
+    /**
+     * \brief this is the public interface to calculate the robot plan
+     * according to the observed scene and the algorithm parameters.
+     */
+    bool robot_plan_companion2(Spose& pose_command, Cperson_abstract::companion_reactive& reactive,double dt=0.0);
+    /**
+     * \brief this function does an akp_planner for the person_companion
+     *  is for the Cscene_sim (generates simulated persons.
+     */
+    bool robot_plan_companion3(Spose& pose_command, Cperson_abstract::companion_reactive& reactive,double dt=0.0);
+
+    double get_distance_to_goal() { return robot_->get_current_pointV().distance( goal_ );}
+    /**
+     * Configuration methods
+     */
+    void set_planning_mode( plan_mode mode ) {plan_mode_ = mode;}
+    plan_mode get_planning_mode(){ return plan_mode_; }
+    void set_distance_mode( distance_mode mode )
+    	{distance_mode_ = mode; nondominated_plan_vertex_index_.clear(); nondominated_end_of_plan_vertex_index_.clear();}
+    distance_mode get_distance_mode(){ return distance_mode_;}
+    void set_global_mode( global_mode mode )
+    	{global_mode_ = mode; nondominated_plan_vertex_index_.clear();nondominated_end_of_plan_vertex_index_.clear();}
+    global_mode get_global_mode(){ return global_mode_;}
+    void set_ppl_collision_mode( int ppl_col ) {ppl_collision_mode_ =  ppl_col; }
+    void set_pr_force_mode( int pr_force_mode ) { pr_force_mode_ = pr_force_mode;}
+    /**
+     * \brief set_robot_goal() function sets the value of the goal position to
+     * which the planning aims to. It is assumed that a global planner, above this
+     * implementation, provides these goals
+     */
+
+    void set_horizon_time(double in_horizon_time){
+    	horizon_time_=in_horizon_time;
+    }
+
+
+
+    void set_robot_goal(const  Spoint& goal );
+    void set_robot_goal_person_companion_akp( const Spoint& goal );
+    void set_robot_goal_person_goal_global_plan( const Spoint& goal );
+    void set_robot_goal_person_goal_global_plan_IN_robot_VERSION( const Spoint& goal );
+    void set_robot_external_goal( const Spoint& goal ); // comapnion => obtain a external goal, not infered from the person comapnion
+    void set_robot_external_goal_fix( const Spoint& goal );
+
+    Spoint get_robot_goal() { return goal_;}
+    Spoint get_external_robot_goal(){ return Spoint(extern_robot_goal_.x,extern_robot_goal_.y,extern_robot_goal_.time_stamp);}
+    Spoint get_robot_local_goal() { return local_goal_;}
+    void set_plan_cost_parameters( double c_dist, double c_orientation, double c_w_robot,
+    		double c_w_people, double c_time, double c_w_obstacles, double c_old_path, double c_l_minima);
+    const std::vector<double>* get_plan_cost_parameters() const { return &cost_parameters_;}
+    void set_number_of_vertex( unsigned int n );
+    unsigned int get_number_of_vertex(  ) { return max_iter_;}
+    void set_robot_params( double v, double w, double av, double av_break,double aw, double platform_radii, double av_neg, double av_Vrobotzero, double lim_to_consider_robotZero);
+    void set_xy_2_goal_tolerance( double tol) { xy_2_goal_tolerance_ = tol; }
+    void set_v_goal_tolerance( double tol) { v_goal_tolerance_ = tol; }
+    void set_distance_to_stop( double d ){ distance_to_stop_ = d; }
+    double get_distance_to_stop( ) { return distance_to_stop_;}
+
+    void set_debug_all_IVO( bool in_debug_all_IVO ){ in_debug_all_IVO_ = in_debug_all_IVO; }
+    void set_debug_few_IVO( bool in_debug_few_IVO ){ in_debug_few_IVO_ = in_debug_few_IVO; }
+
+
+    /**
+     * Return info methods
+     */
+    const std::vector<unsigned int>* get_robot_plan_index() const {
+    	//std::cout <<" best_plan_vertex_index_.size()="<<best_plan_vertex_index_.size()<< std::endl;
+    	return &best_plan_vertex_index_;}
+    const std::vector<unsigned int>* get_robot_nondominated_plan_index() const {
+    	//std::cout <<" nondominated_plan_vertex_index_.size()="<<nondominated_plan_vertex_index_.size()<< std::endl;
+    	return &nondominated_plan_vertex_index_;
+    }
+    const std::vector<unsigned int>* get_robot_nondominated_end_of_plan_index() const {
+    	//std::cout <<" nondominated_end_of_plan_vertex_index_.size()="<<nondominated_end_of_plan_vertex_index_.size()<< std::endl;
+    	return &nondominated_end_of_plan_vertex_index_;
+    }
+    const std::vector<Sedge_tree>* get_plan_edges() const { return &edge_;}
+    const std::vector<Spoint>* get_random_goals() const { return &random_goals_;}
+    double get_workspace_radii() { return workspace_radii_;}
+    Spose get_best_planned_pose(double dt=0.0, Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning);
+
+    void get_navigation_instant_work( double& work_robot, double& work_persons );
+    void get_navigation_cost_values(  std::vector<double>& costs )//returns the vector of bests costs, calculated in the global_cost routine
+    	{ costs = best_costs_;}
+    void get_navigation_mean_cost_values(  std::vector<double>& costs ) { costs = mean_costs_;}
+    void get_navigation_std_cost_values(  std::vector<double>& costs ) { costs = std_costs_;}
+	/**
+	 * \brief calculate scene cost
+	 *
+	 * This function calculates the costs due to robot navigation and
+	 * nearby moving people. It is used only as an observation of the scene,
+	 * no calculations are done, is just for evaluating purposes.
+	 */
+    void calculate_navigation_cost_values( std::vector<double>& costs );
+
+    // people companion ely functions
+    double get_actual_companion_angle() { return min_next_companion_angle_; }
+    double get_actual_companion_cost() { return min_next_companion_cost_; }
+    SpointV_cov get_companion_person_position() {return companion_person_position_;}
+    Sdestination get_person_destination() {return person_companion_goal_;}
+
+    //*** companion dynamic reconfigure (ini) ***//
+    unsigned int get_id_person_companion(){
+       	return id_person_companion_;
+    }
+
+    void set_id_person_companion(unsigned int in_id_person_companion){
+    	change_id_person_companion_=in_id_person_companion;
+    }
+
+    void set_id_person_companion_people_simulator(unsigned int in_id_person_companion){
+    	change_id_person_companion_=in_id_person_companion;
+    	change_set_id_person_companion();
+    }
+
+    void change_set_id_person_companion(){
+    	id_person_companion_=change_id_person_companion_;
+    	this->Cprediction_behavior::set_Cprediction_behavior_id_person_companion(change_id_person_companion_);
+        this->Cprediction_bhmip::set_id_person_companion_Cprediction_bhmip(change_id_person_companion_);
+        Cperson_abstract* person_obj1;
+        bool finded_person=find_person(id_person_companion_ , &person_obj1);
+        if(finded_person){
+        	person_obj1->set_person_type(Cperson_abstract::Person_companion);
+        }
+    }
+
+    void set_robot_person_proximity_distance(double in_proximity_distance_between_robot_and_person){
+    	robot_person_proximity_distance_=in_proximity_distance_between_robot_and_person;
+    }
+
+    void set_real_companion_angle(double in_real_companion_angle){
+    	angle_companion_=in_real_companion_angle;
+    	before_initial_angle_=in_real_companion_angle;
+    	min_next_companion_angle_=in_real_companion_angle;
+    }
+
+    void set_side_by_side_companion_angle(double in_side_by_side_companion_angle){
+    	side_by_side_companion_angle_=in_side_by_side_companion_angle;
+    }
+
+    double side_by_side_companion_angle_;
+
+    double get_robot_person_proximity_distance(){
+    	return robot_person_proximity_distance_;
+     }
+
+    Sdestination get_person_companion_goal_out(){
+        return person_companion_goal_out_;
+    }
+
+    void set_companion_same_person_goal(bool act_companion_same_person_goal){
+    	companion_same_person_goal_=act_companion_same_person_goal;
+    	std::cout << "companion_same_person_goal_="<<companion_same_person_goal_<< std::endl;
+    }
+
+    void set_max_d_to_detect_laser_obs(double in_max_d_to_detect_laser_obs){
+    	Cprediction_behaviour_set_max_d_to_detect_laser_obs(in_max_d_to_detect_laser_obs);
+    	max_distance_to_obstacles_detected_=in_max_d_to_detect_laser_obs;
+    	std::cout << "set_max_d_to_detect_laser_obs-> in_max_d_to_detect_laser_obs="<<in_max_d_to_detect_laser_obs<< std::endl;
+    }
+
+    void set_save_results_in_file(bool in_save_results_in_file){
+    	save_results_in_file_=in_save_results_in_file;
+     }
+
+    void set_results_filename(std::string in_results_file){
+    	results_file_=in_results_file;
+    	results_file_real_=in_results_file;
+    	std::cout << " (changed) results_file_="<<results_file_<< std::endl;
+    }
+
+    void set_debug_filename(std::string in_debug_file){
+    	debug_file_=in_debug_file;
+    }
+
+    void set_mode_debug_file(bool in_debug_file_robot){
+    	debug_file_robot_=in_debug_file_robot;
+    }
+
+    void only_comp_people_vel_and_robot_poses(int in_only_comp_people_vel_and_robot_poses){
+    	only_comp_people_vel_and_robot_poses_=in_only_comp_people_vel_and_robot_poses;
+    }
+
+    double get_horizon_time(){return horizon_time_;}
+
+    void set_person_list(std::list<Cperson_abstract *> in_person_list_){
+    	person_list_=in_person_list_;
+    }
+
+    std::list<Cperson_abstract *> get_person_list(){
+     	return person_list_;
+     }
+
+    void set_alpha_companion(double in_alpha_companion){
+    	alpha_companion_=in_alpha_companion;
+    }
+
+    void set_beta_companion(double in_beta_companion){
+    	beta_companion_=in_beta_companion;
+    }
+
+    double get_alpha_companion(){
+    	return alpha_companion_;
+    }
+
+    double get_beta_companion(){
+    	return beta_companion_;
+    }
+
+    void set_evaluate_costs_filename(std::string in_evaluate_costs_file){
+    	evaluate_costs_file_=in_evaluate_costs_file;
+        std::cout << " (changed) evaluate_costs_file_="<<evaluate_costs_file_<< std::endl;
+    }
+
+
+	void set_evaluate_change_distance_and_angle_companion_filename(std::string in_evaluate_change_distance_and_angle_companion_file){
+    	evaluate_change_distance_and_angle_companion_file_=in_evaluate_change_distance_and_angle_companion_file;
+	    std::cout << " (changed) evaluate_change_distance_and_angle_companion_file__file_="<<evaluate_change_distance_and_angle_companion_file_<< std::endl;
+	}
+
+    Sdestination get_person_companion_goal(){
+        //std::cout << " person_companion_goal_.x="<<person_companion_goal_.x<<"; person_companion_goal_.y="<<person_companion_goal_.y<< std::endl;
+        return robot_goal_to_person_companion_;
+     }
+    Sdestination get_robot_path_goal(){
+        //std::cout << " robot_path_goal_.x="<<robot_path_goal_.x<<"; robot_path_goal_.y="<<robot_path_goal_.y<< std::endl;
+        return robot_path_goal_;
+     }
+    Spose get_final_combined_goal(){
+        //std::cout << " final_combined_goal_.x="<<final_combined_goal_.x<<"; final_combined_goal_.y="<<final_combined_goal_.y<< std::endl;
+        return final_combined_goal_;
+     }
+
+    action_mode get_state_Action(){
+    	//std::cout << " final_combined_goal_.x="<<final_combined_goal_.x<<"; final_combined_goal_.y="<<final_combined_goal_.y<< std::endl;
+    	return Action_;
+    }
+
+    void set_state_Action(action_mode Action_in){
+    	//std::cout << " final_combined_goal_.x="<<final_combined_goal_.x<<"; final_combined_goal_.y="<<final_combined_goal_.y<< std::endl;
+    	Action_=Action_in;
+    }
+
+    Spoint get_SIM_initial_person_companion_pose1(){
+       	//std::cout << " SIM_initial_person_companion_pose1_:"<< std::endl;
+    	//SIM_initial_person_companion_pose1_.print();
+    	return SIM_initial_person_companion_pose1_;
+     }
+    Spoint get_SIM_initial_person_companion_pose2(){
+       	//std::cout << " SIM_initial_person_companion_pose1_:"<< std::endl;
+    	//SIM_initial_person_companion_pose1_.print();
+    	return SIM_initial_person_companion_pose2_;
+     }
+
+    simulation_case get_actual_case(){
+    	//std::cout << " SIM_initial_person_companion_pose1_:"<< std::endl;
+    	//SIM_initial_person_companion_pose1_.print();
+    	return actual_case_;
+    }
+
+    void set_actual_case(simulation_case actual_case_in){
+    	//std::cout << " SIM_initial_person_companion_pose1_:"<< std::endl;
+    	//SIM_initial_person_companion_pose1_.print();
+    	actual_case_=actual_case_in;
+    }
+
+    void set_ros_time_to_sec(double ros_time_to_sec_in){
+    	ros_time_to_sec_=ros_time_to_sec_in;
+    }
+
+       void set_restart_real(bool in_restart_real){
+    	   restart_real_=in_restart_real;
+       }
+
+       void set_restart_real_data_txt(){
+    	   std::cout << " set_restart_real_data_txt c++"  << std::endl;
+    	   new_matlab_file();
+    	   iteration_=1;
+    	   experiment_=1;
+       }
+
+       void set_change_sim(bool change_sim){
+    	   sim=change_sim;
+    	   this->Cprediction_behavior::set_sim_prediction_behaviour(sim);
+    	   this->Cscene_abstract::set_sim(sim);
+       }
+
+       void set_change_sim_target_per(bool change_sim_target_per){
+    	   sim_target_per=change_sim_target_per;
+         }
+
+       /*void set_change_external_to_stop_case(bool in_change_external_to_stop_case){
+    	   if(in_change_external_to_stop_case){
+    		   Action_=Cplan_local_nav::STOP;
+    	   }
+       }*/
+
+       // set values of performance approaching
+       void set_value_distance_global_path(double in_value_distance_global_path){
+    	   value_distance_global_path_=in_value_distance_global_path;
+       }
+
+       void set_global_path_ini_orientation(double in_global_path_ini_orientation){
+    	   global_path_ini_orientation_=in_global_path_ini_orientation;
+        }
+       void set_global_path_final_orientation(double in_global_path_final_orientation){
+    	   global_path_final_orientation_=in_global_path_final_orientation;
+        }
+
+       SpointV_cov get_robot_pose(){
+    	   return robot_->get_current_pointV();
+       }
+
+       void set_robot_pose_for_person_companion_simulation(Spose in_robot_pose){
+    	   robot_->set_current_pose(in_robot_pose);
+    	   //std::cout << " (planner in, set_robot_pose_for_person_companion_simulation) in_robot_pose.x="<<in_robot_pose.x<<"; in_robot_pose.y="<<in_robot_pose.y<< std::endl;
+    	   //std::cout << " (planner in, set_robot_pose_for_person_companion_simulation) robot_.get.x="<<robot_->get_current_pose().x<<"; robot_.get.y="<<robot_->get_current_pose().y<< std::endl;
+       }
+
+
+   	void set_final_goal_reached_in_node(bool in_final_goal_reached_in_node){
+   		final_goal_reached_in_node_=in_final_goal_reached_in_node;
+   	}
+
+
+    void new_matlab_file();
+
+    void do_scene_prediction_from_outside(std::vector<Sdestination>* person_best_dest){
+    	bool person_or_robot=true; //case, person_companion
+    	person_companion_->get_best_dest().print();
+    	this->Cprediction_behavior::scene_prediction(person_or_robot,person_best_dest); // scene prediction, needed, pero sin la person cmpanion y hará falta el robot en colisiones.
+
+    }
+
+    Spoint get_before_next_goal_of_robot(){
+    	return before_next_goal_of_robot_;
+    }
+
+	void set_high_vel_dampening_parameter_planner(double in_dampening_parameter){
+		robot_->set_high_vel_dampening_parameter(in_dampening_parameter);
+	}
+
+	void set_normal_vel_dampening_parameter_planner(double in_dampening_parameter){
+		robot_->set_normal_vel_dampening_parameter(in_dampening_parameter);
+	}
+	void set_slow_vel_dampening_parameter_planner(double in_dampening_parameter){
+		robot_->set_slow_vel_dampening_parameter(in_dampening_parameter);
+	}
+
+	void set_limit_linear_vel_for_dampening_parameter_planner(double in_limit_linear_vel){
+		robot_->set_limit_linear_vel_for_dampening_parameter(in_limit_linear_vel);
+	}
+	void set_limit_angular_vel_for_dampening_parameter_planner(double in_limit_angular_vel){
+		robot_->set_limit_angular_vel_for_dampening_parameter(in_limit_angular_vel);
+	}
+
+	void set_number_of_group_people(unsigned int in_number_of_group_people){
+		number_of_group_people_=in_number_of_group_people;
+	}
+
+	 Spoint get_SIM_initial_person_goal_pose_actual(){  // compartida con simul_people (no la puedo eliminar)
+	      //std::cout << " SIM_initial_person_goal_pose_actual_:"<< std::endl;
+	     //SIM_initial_person_goal_pose_actual_.print();
+	      return SIM_initial_person_goal_pose_actual_;
+	 }
+	 Spoint SIM_initial_person_goal_pose_actual_;
+
+	void set_new_time_window_for_filter_velocity(double in_new_time_window){
+		this->Cprediction_behavior::change_time_window_for_filter_velocity(in_new_time_window);
+	}
+
+	void set_change_first(bool in_first){
+		first_=in_first;
+	}
+
+	void set_gamma_companion(double in_gamma_companion){
+		gamma_companion_=in_gamma_companion;
+		}
+	void set_delta_companion(double in_delta_companion){
+		delta_companion_=in_delta_companion;
+		}
+
+	void set_k_final_goal(double in_set_k_final_goal){
+
+		 std::vector<double> params_robot=new_get_sfm_params(robot_);
+		 params_robot.at(0)=in_set_k_final_goal;
+		 if(change_k_robot_){
+			 set_sfm_to_robot( params_robot );
+		 }
+		 if(change_k_person_){
+			 set_sfm_to_person(params_robot);
+		 }
+		 if(change_k_person_comp_){
+			 set_sfm_to_person_companion( params_robot );
+		 }
+
+		 if(change_k_obst_){
+			 set_sfm_to_obstacle( params_robot );
+		 }
+
+	}
+
+	void set_change_k_robot(bool in_change_k_robot){
+		change_k_robot_=in_change_k_robot;
+	}
+
+	void set_change_k_person(bool in_change_k_person){
+		change_k_person_=in_change_k_person;
+	}
+
+	void set_change_k_person_comp(bool in_change_k_person_comp){
+		change_k_person_comp_=in_change_k_person_comp;
+	}
+
+	void set_change_k_obst(bool in_change_k_obst){
+		change_k_obst_=in_change_k_obst;
+	}
+
+	void set_final_max_v(double in_final_max_v){
+		final_max_v_=in_final_max_v;
+	}
+
+	double calc_person_companion_orientation_from_outside(SpointV actual_p1_point, Sdestination person_dest, Spose in_robot);
+
+	void set_current_pose_robot_akp(Spose in_current_pose_robot){
+		  robot_->set_current_pose(in_current_pose_robot);
+		  robot_->set_current_pointV(SpointV(in_current_pose_robot.x,in_current_pose_robot.y,in_current_pose_robot.time_stamp,in_current_pose_robot.v*cos(in_current_pose_robot.theta),in_current_pose_robot.v*sin(in_current_pose_robot.theta)));
+		  robot_->get_current_pose().print();
+	}
+
+	void plan_set_initial_v_robot_needed(double in_initial_v_robot_needed){
+		robot_->set_initial_v_robot_needed(in_initial_v_robot_needed);
+	}
+
+	Crobot* get_return_person_companion(){ //retorna el person_companion_ para el simulador, para hacer el restart directamente.
+		return person_companion_;
+	}
+
+	Spoint get_actual_goal_to_return_initial_position(){
+		return actual_goal_to_return_initial_position_;
+	}
+
+	  void set_metros_al_dynamic_goal_Vform(double in_metros){
+		  metros_al_dynamic_goal_Vform_=in_metros;
+		 std::cout <<";CHANGE metros_al_dynamic_goal_Vform_="<<metros_al_dynamic_goal_Vform_<< std::endl;
+	  }
+
+	  void set_save_in_file(bool in_save_in_file){
+		  save_in_file_=in_save_in_file;
+		  save_results_on_files_for_robot_=in_save_in_file;
+	  }
+
+	  void set_change_dynamic_of_final_dest(bool in_ignore_dynamically_change_finaldest){
+		  change_dynamically_finaldest_=in_ignore_dynamically_change_finaldest;
+	  }
+
+	  double get_max_v_by_system(){
+		  return max_v_by_system_;
+	  }
+
+	  Sdestination get_robot_destination(){
+		  return robot_dest_for_companion_status_;
+	  }
+
+	  bool get_obstacle_very_close_no_path(){
+		  return obstacle_very_close_no_path_;
+	  }
+
+
+	  void set_threshold_collision_dist_stop_pers_goal(double in_threshold_collision_dist_stop_pers_goal){
+		  threshold_collision_dist_stop_pers_goal_=in_threshold_collision_dist_stop_pers_goal;
+	  }
+
+
+	  bool see_std_out_velocities_;
+
+	  void set_dist_to_approach_static_people(double in_dist_to_approach_static_people){
+		  dist_to_approach_static_people_=in_dist_to_approach_static_people;
+		  std::cout <<"; dist_to_approach_static_people_="<<dist_to_approach_static_people_<< std::endl;
+	 }
+
+	  void set_change_dynamic_goal_1_person_sidebyside(bool in_change_dynamic_goal_1_person_sidebyside){ // to use change of dynamic goal in the syede-by-side one person.
+		  change_dynamic_goal_1_person_sidebyside_=in_change_dynamic_goal_1_person_sidebyside;
+	  }
+
+	  bool change_dynamic_goal_1_person_sidebyside_;
+
+
+	  bool get_case_akp_plan_por_freanado(){
+		  return case_akp_plan_por_freanado_;
+	  }
+
+
+  protected:
+
+    /**
+     * \brief this function calculates the planner path in the companion case, if no solution is
+     * found, then a false result is returned
+     */
+    bool robot_plan_anticipative_krrt_companion(Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning);
+    /**
+   	 * \brief this function initializes the planner, selecting the persons to be considered
+   	 * and other things. If setting is not possible, i.e. goal is within current goal, etc..
+   	 * a false result is returned (COMPANION CASE)
+        */
+    bool init_robot_plan2(double robot_person_distance=1.5);
+
+    /**
+     * \brief this function samples the workspace
+     */
+    Spoint sample_workspace();
+
+    void reset_scene_persons_propagation_flag();
+    unsigned int find_nearest_vertex( const Spoint& random_goal );
+
+    /**
+     * \brief this function calculates the input required
+     * for the propagation to get the sampled position
+     */
+    Sedge_tree calculate_edge(unsigned int parent_vertex_index, const Sdestination& random_goal, Cperson_abstract::companion_reactive reactive =Cperson_abstract::Akp_planning);
+   // for person companion, planning akp
+    /**
+     * \brief this function propagates the selected node,
+     * if a collision is detected returns TRUE and if propagation
+     * was not possible, false
+     */
+    bool propagate_vertex( unsigned int parent_vertex_index , const  Sedge_tree& u,  Cperson_abstract::companion_reactive reactive =Cperson_abstract::Reactive_atractive);
+    /**
+     * \brief this function checks for collision for the propagated robot
+     * state either with static obstacles as well as persons (their prediction)
+     */
+    bool check_collision( const SpointV_cov& p2,  int t = -1 , SpointV_cov centre_group=SpointV_cov() );
+    double cost_to_go( const Spoint& random_goal, unsigned int i , Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning);
+
+    Sforce force_persons_int_planning_virtual(Cperson_abstract* center , unsigned int t = 0, double min_dist2= 64.0, Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning,bool use_person_companion_force_repulsive=false); // to do the group propagation
+    Sforce force_persons_int_planning_virtual_vers2comp(Cperson_abstract* center , unsigned int t_companion, unsigned int t_other_pers , double min_dist2, Cperson_abstract::companion_reactive reactive, bool use_person_companion_force_repulsive);
+    Sforce force_persons_int_planning_virtual_robot_prediction(Cperson_abstract* center , unsigned int t, double min_dist2=64.0, Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning, unsigned int id_pers_comp_rob=0);
+
+    Sforce force_persons_int_planning_virtual_robot_companion_propagation(Cperson_abstract* center , unsigned int t= 0, double min_dist2= 64.0, Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning); // the function is for akp planer companion. To do the robot propagation
+    // for person_companion that use the akp planning.
+
+    Sforce force_persons_int_planning_virtual_companion_person_akp_person_prediction(Cperson_abstract* center , unsigned int t=0, double min_dist2= 64.0, Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning);
+
+    Sforce force_persons_int_robot_prediction_virtual(const SpointV& center , unsigned int t = 0, double min_dist2 = 16.0); // no tengo claro si se usa aun.
+    Sforce force_objects_laser_int_planning_virtual( Cperson_abstract* person, unsigned int planning_index = 0, double min_dist2=25.0, bool robot_collision_check_flag=false);
+    Sforce force_objects_laser_int_planning_virtual_robot_propagation( Cperson_abstract* person, unsigned int planning_index=0, double min_dist2=25.0, bool robot_collision_check_flag=false);
+
+    //Sforce force_objects_laser_int_planning_virtual_side_by_side2( Cperson_abstract* person, unsigned int planning_index=0, double min_dist2=25.0, bool robot_collision_check_flag=false);
+
+    void calculate_navigation_instant_work(  );
+
+    void calculate_cost( unsigned int parent_index , Sedge_tree u , Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning);
+
+    //preprocess different solutions to calculate the best or bests solutions
+    unsigned int global_min_cost_index(   Crobot* robot_act, Cperson_abstract::companion_reactive reactive=Cperson_abstract::Akp_planning );
+    void preprocess_global_parameters(Crobot* robot_act);
+    void calculate_normalization_cost_functions_parameters_erf();
+    void calculate_normalization_cost_functions_parameters_norm(Crobot* robot_act);
+    void calculate_non_dominated_solutions();
+
+
+    //planning paramters
+    plan_mode plan_mode_;
+    distance_mode distance_mode_;
+    global_mode global_mode_;
+    unsigned int max_iter_;  // numero de nodos por path. de normal hay 40 nodos por path.
+    std::vector<double> cost_parameters_;
+    Spoint goal_,local_goal_, goal2_;
+    bool reaching_goal_;
+	//list of person to be considered in by the planner
+	std::list<Cperson_abstract*> nearby_person_list_;
+	std::vector<Spoint> nearby_obstacle_list_; //lista de obstaculos estaticos, solo para robot.
+	std::vector<Spoint> nearby_obstacle_list2_; // lista de obstaculos estaticos para companion (ely)
+	double workspace_radii_, std_goal_workspace_;
+	double max_v_by_system_, cost_angular_;
+	double xy_2_goal_tolerance_, v_goal_tolerance_, local_v_goal_tolerance_, distance_to_stop_;
+
+    // alpha and sum_ratio paramter to scape local minima
+    double alpha_,gamma_,delta_;
+    std::vector<double> v_alpha_,v_gamma_,v_delta_;
+
+    //random generator
+	std::default_random_engine generator_;
+
+    //tree structure data structures
+    std::vector<Sedge_tree> edge_;
+    std::vector<double> cost_int_forces_;
+    std::vector<double> cost_robot_;
+    std::vector<double> cost_obstacles_;
+    std::vector<double> cost_past_traj_;
+    std::vector<double> nodes_in_branch_;
+    std::vector<double> cost_distance_;
+    std::vector<double> cost_orientation_;
+    std::vector<Spoint> random_goals_;
+    std::vector<bool> collision_detected_;
+    double work_persons_, work_robot_;
+
+
+    //results data structures
+    std::vector<unsigned int> best_plan_vertex_index_, end_of_branches_index_, nondominated_plan_vertex_index_, nondominated_end_of_plan_vertex_index_;
+    std::vector<Spose> best_planning_trajectory_;
+    std::vector<double> best_costs_, mean_costs_, std_costs_;
+
+    //cost-to-go function values to measure real performance for testing
+    std::vector<double> cost_values_;
+
+    Spose last_pose_command_;//comand of the last velocity command send to the robot platform
+
+
+    //Multi-Objective optimization: normalization terms
+    double mean_cost_int_forces_,
+		mean_cost_robot_,
+		mean_cost_obstacles_,
+		mean_cost_past_traj_,
+		mean_cost_distance_,
+		mean_cost_orientation_,
+		mean_cost_companion_; // mean companion cost, add by ely.
+
+    double std_cost_int_forces_,
+		std_cost_robot_,
+		std_cost_obstacles_,
+		std_cost_past_traj_,
+		std_cost_distance_,
+		std_cost_orientation_,
+		std_cost_companion_; // std companion cost, add by ely.
+
+    //Multi-objective vector structure to find non-dominated sets
+    std::vector<Smulticost> multicosts_;
+    std::list<Smulticost> nondominated_multicosts_;
+
+    //to calculate probability of collision
+    double gaussian_constant_;
+    int ppl_collision_mode_,pr_force_mode_;
+
+
+    // ely functions
+    /**
+     * \brief this function calculates the companion cost for each node of the path.
+     */
+    void calculate_companion_cost_node(unsigned int parent_index, Crobot* robot_act); // function to calculate one node companion cost
+
+    bool check_collision_final( const Spoint& p ,  int t); // caso robot, moverse dentro de la burbuja!
+    /**
+     * \brief this function checks for collision for the propagated robot+person=couple
+     * state either with static obstacles as well as persons (their prediction).
+     */
+    bool check_collision_companion_reactive_atractive_goal( const SpointV_cov& p2 ,  int t); // return if have collision and the  minimum distance of the collision
+
+    /**
+     * \brief this function calculates the initial_increment_angle to move the robot around the person
+     * when they have to avoid obstacles in a joint way.
+     */
+    void ini_increment_angle();
+
+    void calculate_companion_path_angle_and_cost(unsigned int parent_index, double actual_angle);
+    /**
+     * \brief this function calculates the needed angle between person-and-robot
+     * for all the nodes of the best path, to obtain a progressive angle
+     *  to positioned the robot around the person. (case, go robot in front of the person)
+     */
+    /**
+     * \brief this function calculates the needed angle between person-and-robot
+     * for all the nodes of the best path, to obtain a progressive angle
+     *  to positioned the robot around the person. (case, go robot at the rear of the person)
+     */
+    void go_behind_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost3(unsigned int i);
+
+    void go_in_front_robot_only_angle_in_final_tree_calculate_companion_path_angle_and_cost3(unsigned int i);
+
+    /**
+     * \brief this function is for see the best path with the companion angles and the companion cost.
+     */
+    void see_companion_path_angle_and_cost_of_min_cost_paths(double parent_index);
+    /**
+     * \brief this function modifies the distance between the person and robot couple to smooth the turns
+     * to put the robot in front or rear the person.
+     */
+    double calc_robot_person_companion_distance();
+    /**
+     * \brief this function replan the propagated positions of the robot for all
+     * the nodes of the best path, taking into account in the propagation the two goals for the robot:
+     * follow the path and goes to a concrete position respect to the person.
+     */
+
+    /**
+     * \brief this function replan the propagated position of the robot for the next step
+     * of the robot in the best path, taking into account in the propagation the two goals for the robot:
+     * follow the path and goes to a concrete position respect to the person.
+     */
+    Spose replan_last_step(unsigned int index,Spose robot_pose_ini, SpointV robot_Spoint_ini, Sdestination robot_goal, double dt);
+    /**
+     * \brief these function perform a different collision functions for the goal in the atractive or repulsive cases.
+     */
+    double check_collision_companion_goal(const Spoint& p ,  int t);
+
+    /**
+     * \brief this function set the actual max_velocity_ for the robot.
+     * this is the initial function only taking into account the planning for the robot.
+     */
+    void vel_robot_normal(double d_min);
+    /**
+     * \brief this function set the actual max_velocity_ for the robot.
+     * this function takes into account the planning for the robot-and-person=couple.
+     */
+    void vel_robot_companion(double d_min , double robot_person_distance, Spoint before_next_goal_of_robot=Sdestination(), Cperson_abstract::companion_reactive reactive=Cperson_abstract::Reactiva_repulsive, unsigned int parent_vertex=0);
+
+    //void calculate_actual_angle_person_robot(unsigned int index);
+    double calculate_actual_angle_person_robot(Spoint person, Spoint robot);
+    /**
+     * \brief this function returns the actual max_velocity_ to the max velocity of the robot.
+     *  this is to calculate the akp path with the max velocity. Then, in the recalculation of
+     *  the position for the best path, the velocity of the robot is modified taking into account
+     *  also the goal of remain in a exact position respect to the companion person.
+     */
+    void return_max_velocity_systemRobot_to_max_value();
+
+    /**
+     * \brief this function calculate the anisotropy for the group to do not take into account
+     * the collisions with obstacles at the rear of the group, for the robot positioning around the person.
+     * (now is set, anisotropy_limit=0, any anisotropy is take into account, we take into account rear collisions)
+     */
+    double calculate_anisotropy(const SpointV_cov& center_person, const Spoint& interacting_person , double lambda=0.2);
+    /**
+     * \brief this function calculates the distance between the person-and-robot in the moments where the robot
+     * moves around the person to avoid obstacles (put in front or behind). This function is to smooth the
+     * turns of the robot, facilitate the navigation and remove the misalignments with the person in orientation
+     * that provoke "s" movements for the robot.
+     */
+    double calculate_modif_person_robot_distance( double ite );
+    double calc_robot_person_companion_distance_companion_person_akp(); // case person companion planning akp
+    /**
+     * \brief this function print the results in a matlab file.
+     */
+    void printToMatlab();
+    void evaluate_costs_printToMatlab(Crobot* actual_robot);
+    void new_matlab_file_To_evaluate_costs();
+    void new_debug_file();
+    void new_matlab_file_To_evaluate_change_distance_and_angle();
+    void evaluate_change_distance_and_angle_companion_with_beta_change();
+
+	double calc_person_companion_orientation(); // return theta person companion in radians!
+	Sdestination calculate_companion_goal_stable_if_person_stop(double in_act_min_companion_angle);
+
+	Sdestination before_person_intersection_destination_;
+    // variables companion (ely)
+    bool debug_companion_;
+    double robot_person_companion_distance_;
+    double min_distance_collision_; // variables to calculate the companion cost and angle! => min_distance_collision_ and bool_collision_companion_
+    // min_distance_collision is the maximun group distance to pass throught obstacles without change the group side-by-side formation.
+    bool bool_collision_companion_; // variables to calculate the companion cost and angle!
+    double next_robot_pose_min_distance_collision_;
+    std::vector<double> orientation_person_robot_angles_; // angles to calculate the companion goal using the computed path of the group
+
+
+    std::vector<double> orientation_person_robot_angles_with_prediction_of_person_companion_; // angles to calculate the companion goal using the prediction of the companion person.
+    bool calc_goal_companion_with_group_path_; // if true == calc the angle of the goal companion with the group path, else calc the angle of the goal companion with the prediction of the person.
+	void fix_angles_to_use_person_prediction_for_the_companion_goal(); //function to fix the companion angles obtained with the person prediction.
+
+
+    // new costs (companion-ely)
+    std::vector<double> cost_companion_;
+    std::vector<unsigned int> parent_index_vector_;
+    std::vector<double> min_distance_collision_vector_;
+    std::vector<double> min_distance_collision_vector_from_pred_;
+    double min_next_companion_angle_; // esta en grados
+    double min_next_companion_angle_for_final_dest_;
+    double min_next_companion_cost_;
+    double angle_increment_of_increment_distance_;
+    double angle_increment_of_increment_distance_vuelta_al_reves_;
+
+    double before_initial_angle_;
+    double before_initial_cost_;
+    std::vector<unsigned int> BEST_path_parent_index_vector_;
+
+    unsigned int id_person_companion_;
+    unsigned int change_id_person_companion_;
+    Sdestination person_destination_;
+
+    SpointV_cov companion_person_position_; // posicion inicial de la persona a la que acompañamos.
+
+    Sdestination person_companion_goal_;
+    double robot_person_distance_;
+
+    double robot_person_proximity_distance_;  // distancia a la que esta robot y persona para que se olvide del goal el robot y se acerque a la persona.
+    double robot_person_proximity_tolerance_; // increment of distance around the proximity_distance to generate a distance margin. This is for do not always omit the planning and aproximate to the person.
+    double robot_person_proximity_goals_x_; // distancia entre goal de la persona que acompaña y goal al que se dirige el robot.
+    double robot_person_proximity_goals_y_;
+    double initial_angle_;
+    Spose robot_initial_pose_;
+    SpointV_cov initial_robot_spoint_;
+    SpointV_cov initial_person_companion_point_;
+
+    Cperson_abstract* pointer_to_person_companion_;
+    bool we_have_pointer_to_first_person_; // if true, we can use the pointer!!!
+
+    std::vector<Spoint> random_goals2_;
+    unsigned int min_branch_index_save_;
+
+    bool debug_antes_subgoals_entre_AKP_goals_;
+
+    bool final_collision_check_;
+
+    bool actual_debug_;
+    bool actual_debug2_;
+    double offset_atractive_;
+
+    double time_act_;
+
+    double robot_adition_complete_esphere_companion_distance_;
+
+    double f_obst_max_x_; // =0.1
+    double f_obst_max_y_; //=0.1
+
+    bool companion_same_person_goal_;
+    Sdestination extern_robot_goal_;
+    Sdestination extern_robot_goal_fix_;
+
+    double angle_companion_;
+    double person_goal_percent_;
+    double marge_angle_companion_;
+    Sdestination person_companion_goal_out_;
+
+    double dmin_global_;
+   bool robot_orient_;
+   double person_orient_;
+
+   double vel_per_max_caso_robot_a_0_o_180_grados_;
+
+   bool debug_real_test_companion_;
+   bool debug_real_test_companion2_;
+   bool debug_real_test_companion3_;
+   bool debug_real_test_companion4_;
+
+   double marge_in_distance_; // margen en distancia para seguir a una persona.
+   bool overpas_obstacles_behind_person_;
+   bool we_have_cost_companion_;
+
+   double anisotropy_threshold_;
+
+   Cperson_abstract::companion_reactive robot_companion_case_;
+   bool check_execution_times_;
+
+   double person_robot_actual_real_distance_;
+   double little_augmented_collision_margin_;
+   double person_radi_;
+   double person_radi2_;
+   double person_radi_amp_;
+   double max_distance_to_obstacles_detected_;
+   bool see_forces_;
+  double obstacle_radi_;
+  double obstacle_radi2_;
+  double obstacle_radi_amp_;
+
+  Sedge_tree u_forces_robot_actual_; // solo para visualizacion en Rviz
+  Cperson_abstract::vel_per_ok vel_per_ok_; //boolean, true= robot navigate with the person velocity, else = robot navigate with the maximun velocity.
+
+
+  // Variables to save in matlab file!
+  double real_distance_person_robot_;
+  double ideal_distance_person_robot_;
+  double real_angle_person_robot_;
+  double ideal_angle_person_robot_;
+  double before_ideal_angle_person_robot_;
+  bool first_ideal_angle_;
+  double actual_time_;
+  double robot_distance_cost_;
+  double robot_orientation_cost_;
+  double robot_control_cost_;
+  double robot_other_person_cost_;
+  double robot_obstacles_cost_;
+  double robot_companion_cost_;
+  double robot_total_cost_;
+  double robot_ant_traj_cost_;
+  double person_distance_to_goal_;
+  double robot_distance_to_goal_;
+
+    double last_step_robot_other_person_cost_; // coste respecto a fuerzas de otras personas que se ejercen en el robot.
+    double last_step_robot_obstacles_cost_;  // coste respecto a fuerzas de obstaculos que se ejercen en el robot.
+    double last_step_robot_companion_cost_; // coste respecto a fuerzas de la companion person que se ejercen en el robot.
+    double last_step_robot_control_cost_mix_;
+    double last_step_robot_control_cost_goal_traj_;
+    double last_step_robot_control_cost_goal_person_;
+    double last_step_robot_orientation_cost_local_;
+    double last_step_robot_orientation_cost_global_;
+    double last_step_robot_distance_cost_;
+
+    double other_people_due_to_robot_cost_;
+    double companion_person_due_to_robot_cost_;
+
+    bool sim;
+    bool sim_target_per;
+    bool first_time_;
+    unsigned int iteration_;
+    unsigned int experiment_;
+
+    SpointV_cov before_initial_robot_spoint_;
+    double inc_distance_ant_;
+    double acum_time_;
+    double time_ant_;
+
+    bool save_results_in_file_;
+    double meters_goal_to_save_results_in_file_;
+
+    std::string results_file_,results_file_real_;
+    double reduce_max_vel_dist_;
+
+    bool go_with_vel_per_;
+
+    bool debug_file_robot_;
+
+
+
+    std::string debug_file_;
+
+    bool case_dynamic_;
+    double externa_force_k_near_goal_akp_;
+    double externa_force_k_far_goal_akp_;
+    double max_dist_to_near_goal_force_akp_;
+    bool mode_step_near_;
+
+    unsigned int out_index_step_final_dest_goal_;
+	unsigned int out_index_step_companion_goal_;
+
+    bool only_comp_people_vel_and_robot_poses_;
+    std::vector<bool> vector_of_companion_collisions_;
+    bool debug_angles_;
+
+
+    bool debug_person_companion_general_;
+    bool debug_person_companion_increment_angle_;
+    bool debug_init_robot_plan2_person_companion_;
+    bool debug_robot_plan_anticipative_krrt_companion_person_companion_;
+    bool debug_calculate_edge_person_companion_akp_;
+    bool debug_get_best_planned_pose_person_companion_akp_;
+    bool debug_correct_angle_person_init_robot2_;
+    bool debug_correct_angle_person_replan_min_cost_branch_;
+    bool debug_correct_angle_person_replan_last_step_;
+    bool debug_correct_angle_person_calculate_edge_;
+    bool debug_correct_angle_person_get_best_planned_pose_;
+    bool debug_correct_angle_person_vel_robot_companion_;
+    bool debug_correct_angle_person_calculate_actual_angle_person_robot_;
+    bool debug_correct_angle_person_print_to_matlab_;
+
+    bool bool_case_person_companion_;
+
+    int number_of_obstacles_;
+    int number_obstacles_big_force_;
+	unsigned int num_steps_orientation_;
+
+
+	double alpha_companion_; // (weight FINAL_GOAL) alpha to replan the last step for the companion task ( 0.4 ) anterior 0.1.
+	double beta_companion_;  // (weight COMPANION_GOAL) beta to replan the last step for the companion task ( 0.6 )
+	double gamma_companion_; //  (weight repulsive force other people) gamma to replan the last step for the companion task (0.5) anterior 5.0
+	double delta_companion_; //  (weight repulsive force static obstacles) delta to replan the last step for the companion task (0.5)
+
+	double threshold_dintace_select_person_side_to_go_; // al principio esta distancia minimo ha de ser 0.5 metros al lado de la persona.
+	bool debug_select_person_side_to_go_with_more_free_space_;
+
+	bool chose_better_side_to_acompani_person_;
+
+	SsavePath_multiple_paths_and_best_path iter_act_multiple_paths_and_best_path_;
+	int planner_iterations_;
+
+    std::string evaluate_costs_file_;
+    std::string evaluate_change_distance_and_angle_companion_file_;
+
+    double orientacion_persona_actual_;
+	double person_x_ant_;
+	double person_y_ant_;
+
+	bool debug_file_evaluate_costs_;
+
+	// to visualice goals:
+	Sdestination robot_goal_to_person_companion_; // guardar estos en el archivo por cada iteracion.
+	Sdestination robot_path_goal_;
+	Spose final_combined_goal_;
+
+	double save_distance_between_person_and_robot_;
+	double save_angle_between_person_and_robot_;
+	unsigned int iter_d_;
+
+	Spoint person_position_t_4_;
+	double next_companion_angle_save_;
+	double before_act_companion_angle_;
+
+	calculate_complete_group_path_ calculate_complete_group_path_var_;
+
+	bool first_;
+
+	action_mode Action_;
+	simulation_case actual_case_;
+	Spoint actual_goal_to_return_initial_position_;
+
+	// To have several iterative experiments to simulate.
+	Spose SIM_initial_robot_pose1_;
+	Spose SIM_initial_robot_pose2_;
+	Spose SIM_initial_robot_pose3_;
+	Spose SIM_initial_robot_pose4_;
+
+	Spose SIM_initial_person_companion_pose1_;
+	Spose SIM_initial_person_companion_pose2_;
+
+	unsigned int global_iter_to_change_simulation_case_;
+
+	bool first_in_itter_;
+	double ros_time_to_sec_;
+	bool first_time_case1_;
+	bool first_time_case2_;
+
+	unsigned int goal1_;// goal number to do.
+
+	Spose center_of_the_group_;
+
+	double save_computational_time_value_;
+	double clocks_start, clocks_end;
+	clock_t robot_plan_companion2_start_ITER, robot_plan_companion2_end_ITER,robot_plan_companion3_start_ITER, robot_plan_companion3_end_ITER;
+
+	bool go_behid_comp_person_;
+
+    double last_true_person_companion_orientation_;
+
+    bool restart_real_;
+
+
+	Cperson_abstract *actual_person_Companion_pointer_;
+
+	SpointV_cov actual_person_Companion_SpointV_;
+	Sdestination actual_person_Companion_destination_;
+	double max_desired_person_Companion_velocity_; // todo: add initial bucle: max_desired_person_Companion_velocity_=iit->get_desired_velocity();
+
+	double d_min_global_;
+	double radii_person_list_include_person_companion_;
+
+	// variable save results on files or not! OJO!!! cuando quiera los datos hay que activarla!!!
+	bool save_results_on_files_for_person_companion_;
+	bool save_results_on_files_for_robot_; // only do not save the results on files for the robot
+	bool save_in_file_; // disable also the iterations!!! not only save the results on files. (only for robot)
+
+	// for performance:
+	double value_distance_global_path_;
+	double global_path_ini_orientation_;
+	double global_path_final_orientation_;
+
+	double multiply_person_companion_force_to_persons_;
+	double threshold_min_vel_person_to_obtain_destination_;  // threshold_min_vel_person_to_obtain_destination_=0.2
+
+	double last_good_theta_person_;
+	bool firts_iter_obtain_angle_person_companion_;
+
+	double saved_actual_theta_person_;
+
+	bool debug_gazebo_journal_;
+	bool debug_gazebo_journal2_;
+
+	Sdestination ideal_companion_goal_in_the_next_instant_of_time_; // serve to stop robot when person stop and the robot is in the best companion point for this stop person. (para esta persona parada)
+	Sdestination before_companion_person_destination_;
+
+	double clocks_per_sec_my_var_; // clocks_per_sec_my_var_=1000000
+
+	double test_distance_to_goal_;
+
+	bool final_goal_reached_in_node_;
+	bool change_final_robot_orientation_; //
+	bool is_case_akp_true_;
+	bool enter_on_cero_;
+	bool enter_on_cero2_;
+	bool result_;
+
+	double dist_to_goal_test_;
+	double v_to_goal_test_;
+	bool use_persoon_companion_to_calculate_plan_;
+
+	Spoint before_next_goal_of_robot_; // (is the next immediate final goal to accompany the person) new variable to adjust well the robot velocity to accompany the person. (pure companion, do not takes into account the final goal for the velocity)
+
+	unsigned int number_of_group_people_;
+
+	std::vector<double> person1_repulsive_force_fx_;
+	std::vector<double> person1_repulsive_force_fy_;
+
+	std::vector<double> person1_companion_force_fx_;
+	std::vector<double> person1_companion_force_fy_;
+
+	double person1_repulsive_force_fx_act_;
+	double person1_repulsive_force_fy_act_;
+
+	double person1_companion_force_fx_act_;
+	double person1_companion_force_fy_act_;
+
+	double ori_pers_x_;
+	double ori_pers_y_;
+
+	double final_compt_time_;
+	Spose final_pose_robot_;
+
+	clock_t group_force_start, group_force_end, rrt_start_ITER,rrt_end_ITER,initial_part_start,initial_part_end,last_part_start,last_part_end;
+
+	SpointV center_of_the_group_Zanlungo_; // hacen falta. Se usan tambien para 1 person companion.
+	SpointV mean_people_Zalungo_;  // hacen falta. Se usan tambien para 1 person companion.
+	double theta_of_the_group_Zanlungo_;  // hacen falta. Se usan tambien para 1 person companion.
+
+	double mean(std::vector<double> arr, int n);   // Function to find mean.
+	double variance(std::vector<double> a, int n); // Function to find variance.
+	double covariance(std::vector<double> arr1, std::vector<double> arr2, int n); // Function to find covariance.
+
+	double a_,b_; // parameters y=a+bx of the linear regression to find the preferred velocity of the robot from the actual person companion velocity. For the group is the mean of the velocity of the two people.
+
+	double treshold_distance_between_steps_;
+	double real_vel_per;
+	bool change_k_robot_,change_k_person_,change_k_person_comp_,change_k_obst_;
+	bool initial_goal_case_bool_;
+
+	Sdestination last_people_dest_;
+	Spoint las_people_dest_spoint_;
+	bool initial_not_set_last_people_dest_;
+
+	double minimun_velocity_case_stop_initial_;
+	double final_max_v_;
+
+	bool bool_out_init_pose_robot_;
+
+	Sdestination before_person_comp_goal_;
+
+	Spoint SIM_initial_person_goal_pose1_,SIM_initial_person_goal_pose2_,SIM_initial_person_goal_pose3_;
+
+	double metros_al_dynamic_goal_Vform_;  // distance from the goal of the environment to tup the external dynamic goal.
+
+	// Nuevas funciones y variables cambio modelo side-by-side:
+	SpointV calculate_centre_of_the_group(SpointV robot, std::vector<SpointV> people);  // std::vector<double> people; => pose 0 => P1, pose 1 => P2
+	Spoint calculate_goal_translated_of_group_element(SpointV group_centre, SpointV group_element, Spoint group_goal, Spoint distRP, double theta_robot, unsigned int parent_vertex);
+	SpointV_cov calculate_element_position_translated_in_group(SpointV_cov robot_plan_act, SpointV_cov person_propagation_act);
+	    // quizas las de translate goal las uso tambien con la person companion de 1 persona sola. No borrar.
+
+	    // funcion que calcula la desred velocity del robot para el goal actual. person_propagation==goal al que quiero llegar.
+	    // robot== mi posicion actual. vel_desired_robot_max== es la velocidad del robot maxima.
+	    // vel_person_companion es la velocidad de la persona que acompaña el robot (en principio es la velocidad media, pero no descarto que necesite usar
+	    // la velocidad puntual.
+	double calc_desired_robot_velocity_act(SpointV robot, SpointV person_propagation, double vel_person_companion);
+	void calculate_initial_companion_angle_case_side_by_side_one_person(double theta, double angle2);
+	void calculate_correct_initial_angle(Cperson_abstract* person_obj1, SpointV_cov person1, Spose robot, double &theta);
+	void set_robot_velocity_using_obstacles(double vel_per, double near_obst, double actual_V_Robot, double distance_PR7, double robot_person_distance, double d_min, double min_dist_colli_act_global2, double circunferencia_tope, double margen_angle_colision, double angle_colision); // funcion que setea la velocidad del robot a la deseada actual + alguna variable global relacionada con la velocidad que necesita el robot.
+
+	double metros_reduce_vel_; //update velocity robot to be adjusted to person companion
+
+	Spose robot_saved_to_time_v2_;
+
+	// variables para performances (guardar por seguridad, la distancia de colision actual y la distancia actual entre robotypersona para calcular la distancia del grupo.
+	// que con estas dos obtenemos el angulo ideal de acompañamiento.
+	std::vector<double> final_min_collision_distance_vector_;
+	std::vector<double> real_robot_person_distance2_vector_;
+
+	double save_matlab_final_min_collision_distance_vector_;
+	double save_matlab_real_robot_person_distance2_vector_;
+
+	double calc_person_companion_orientation_v2( Cperson_abstract* person_obj); // Calcula la orientacion de cualquier persona.
+	// variables globales relacionadas con la orientacion de P1 y P2, las dos personas que acompaña el robot.
+	double last_good_theta_person_p1_,ori_pers_x_p1_,ori_pers_y_p1_; // last_good_theta_person_p2_,ori_pers_x_p2_, ori_pers_y_p2_ last_good_theta_person_p1_ esta en radianes.
+	Sdestination before_person_comp_goal_p1_;//,before_person_comp_goal_p2_;
+	SpointV last_robot_pose_to_stop_;
+
+	double no_save_cost_and_dist_; // para no salvar esos datos y solo salvar los datos de performaces y etc.
+	double before_vp1_module_;
+
+	bool case_akp_plan_por_freanado_;//,scout_minimos_out_;
+	bool debug_sideBySide2019_;
+
+	double distance_frenar_sideBySide_when_person_is_stop_;
+
+	bool init_plan_approach_side_;
+
+	bool change_dynamically_finaldest_;
+
+	// these next variables are for companion status.
+	bool obstacle_very_close_no_path_;
+	double min_obstacle_dist_obst_static_,min_obstacle_dist_obst_dynamic_, threshold_collision_dist_stop_pers_goal_;
+	Sdestination robot_dest_for_companion_status_;
+
+	double litlle_augment_vel_desired_adapted_by_ve_per_for_robot_; // this augment is to compensate the delay that the robot has from little errors and delais.
+
+	double dist_to_approach_static_people_, mean_people_velocity_;//,threshold_min_dist_needed_to_robot_can_stay_at_central_position_;
+
+	bool see_save_in_file_;
+	bool output_screen_messages_;
+	bool in_debug_few_IVO_, in_debug_all_IVO_;
+
+	SpointV calcular_goal_frenado(){
+		//  INI calcular goal final caso frenado.
+		if(output_screen_messages_){
+		std::cout << "Entro en calcular frenado."<< std::endl;
+		}
+		// Paso 1: propagar el goal actual de la persona, encima suyo a un metro hacia delante del robot para frenar suave.
+		// We want to stop slowly, using one meter of distance.
+		double dt_stop=2;//1/robot_->get_current_pointV().v(); //(tiempo para V=0, parando dentro de 1m )
+		SpointV robot_act=robot_->get_current_pointV();
+
+		Sforce force_to_stop=Sforce(max_v_by_system_/dt_stop,max_v_by_system_/dt_stop);
+		SpointV new_prop_p1_to_goal=pointer_to_person_companion_->get_current_pointV(); //TODO: probar de guardar el Spoint del robot, cuando la persona paro y usar ese para propagar...!? Aunque a la que sera Vr=0,
+
+
+		double vxn = max_v_by_system_*cos(last_good_theta_person_p1_) + force_to_stop.fx*dt_stop;
+		double vyn = max_v_by_system_*sin(last_good_theta_person_p1_) + force_to_stop.fy*dt_stop;
+		double dx = new_prop_p1_to_goal.x + max_v_by_system_*cos(last_good_theta_person_p1_)*dt_stop + force_to_stop.fx*dt_stop*dt_stop*0.5;
+		double dy = new_prop_p1_to_goal.y + max_v_by_system_*sin(last_good_theta_person_p1_)*dt_stop + force_to_stop.fy*dt_stop*dt_stop*0.5;
+
+
+		//std::cout << "(FRENADO) robot_act.vx=" << robot_act.vx << "robot_act.vy=" << robot_act.vy<<"; force_to_stop.fx="<<force_to_stop.fx<<"; force_to_stop.fy="<<force_to_stop.fy <<"; robot_act.x="<<robot_act.x<<"; robot_act.y="<<robot_act.y << std::endl;
+
+		//apply constrains:
+		double v = sqrt( vxn*vxn + vyn*vyn );
+		if ( v > max_v_by_system_)
+		{
+			vxn *= max_v_by_system_ /v;
+			vyn *= max_v_by_system_ /v;
+			dx = vxn*dt_stop;
+			dy = vyn*dt_stop;
+			//std::cout << "( v > desired_velocity) "<< std::endl;
+
+		}
+		//std::cout << "( v > desired_velocity) vxn="<<vxn<<"; vyn"<<vyn<<"; x="<<x<<"; y="<<y<<"; x+dx="<<x+dx<<"; y+dy="<<y+dy<<"; time_stamp+dt="<<time_stamp+dt<<"; desired_velocity="<<desired_velocity<< std::endl;
+
+
+		new_prop_p1_to_goal=SpointV( pointer_to_person_companion_->get_current_pointV().x+dx,pointer_to_person_companion_->get_current_pointV().y+dy, last_robot_pose_to_stop_.time_stamp+dt_stop, vxn, vyn);
+
+		if((new_prop_p1_to_goal.distance(pointer_to_person_companion_->get_current_pointV())<0.3)&&(robot_->get_current_pointV().distance(pointer_to_person_companion_->get_current_pointV())<3)&&(pointer_to_person_companion_->get_current_pointV().v()<0.2)){ //
+			std::cout <<"pose robot: (FRENADO) dt_stop="<<dt_stop<< " new_prop_p1_to_goal.x="<<new_prop_p1_to_goal.x<<"; new_prop_p1_to_goal.y="<<new_prop_p1_to_goal.y<<"; person.x="<<pointer_to_person_companion_->get_current_pointV().x<<"; person.y="<<pointer_to_person_companion_->get_current_pointV().y<< std::endl;
+			std::cout <<"pose robot: (FRENADO) dist<0.3="<<new_prop_p1_to_goal.distance(pointer_to_person_companion_->get_current_pointV())<< " dist2<3m="<<robot_->get_current_pointV().distance(pointer_to_person_companion_->get_current_pointV())<<"; vp<0.2="<<pointer_to_person_companion_->get_current_pointV().v()<< std::endl;
+
+			new_prop_p1_to_goal=robot_->get_current_pointV();
+		}
+
+		// Ahora deberia entrar siempre en este.
+		if(we_have_pointer_to_first_person_){ /// &&(number_of_group_people_<2) CASO 1 persona en side-by-side (lo otro es para 2 personas.
+				// TODO: no funciona bien!!! pesar si lo puedo arreglar para el caso de 1 persona, pero con calma.
+			double angle=atan2(robot_act.y-new_prop_p1_to_goal.y , robot_act.x-new_prop_p1_to_goal.x);
+				double new_angle_now;
+				if( diffangle(last_good_theta_person_p1_, angle) < 0 ){  // se corresponde con los dos laterales del robot, respecto a las personas.
+
+					 new_angle_now=last_good_theta_person_p1_-90*3.14/180;
+					if(new_angle_now>(3.14*2)){
+						new_angle_now=new_angle_now-(3.14*2);
+					}
+					if(new_angle_now<0){
+						new_angle_now=new_angle_now+(3.14*2);
+					}
+					//goal_robot=Spoint(person_companion_goal.x+robot_person_proximity_goals_x_*cos(new_angle_now),person_companion_goal.y+robot_person_proximity_goals_y_*sin(new_angle_now),person_companion_goal.time_stamp);
+
+
+				}else{  //fin if diff-angle.
+
+					 new_angle_now=last_good_theta_person_p1_+90*3.14/180;
+					 if(new_angle_now>(3.14*2)){
+						 new_angle_now=new_angle_now-(3.14*2);
+					 }
+					 if(new_angle_now<0){
+						 new_angle_now=new_angle_now+(3.14*2);
+					 }
+					//goal_robot=Spoint(person_companion_goal.x+robot_person_proximity_goals_x_*cos(new_angle_now),person_companion_goal.y+robot_person_proximity_goals_y_*sin(new_angle_now),person_companion_goal.time_stamp);
+
+				} // fin-if diff angle.
+				//new_prop_p1_to_goal=SpointV( robot_act.x+dx,robot_act.y+dy, robot_act.time_stamp+dt_stop, vxn, vyn);
+				dx = new_prop_p1_to_goal.x + max_v_by_system_*cos(new_angle_now)*dt_stop;// + force_to_stop.fx*dt_stop*dt_stop*0.5;
+				dy = new_prop_p1_to_goal.y + max_v_by_system_*sin(new_angle_now)*dt_stop;// + force_to_stop.fy*dt_stop*dt_stop*0.5;
+				if(output_screen_messages_){
+				std::cout << "(FRENADO) last_good_theta_person_p1_=" << last_good_theta_person_p1_<<"; new_angle_now="<<new_angle_now<< std::endl;
+				}
+				new_prop_p1_to_goal=SpointV(dx,dy, last_robot_pose_to_stop_.time_stamp+dt_stop, vxn, vyn);
+
+		}
+
+
+
+		return new_prop_p1_to_goal;
+
+		//  FIN calcular goal final caso frenado.
+	}
+
+
+
+};
+
+
+#endif /* PLANN_LOCAL_NAV_H_ */
+

@@ -1,0 +1,433 @@
+/*
+ * scene_sim.h
+ *
+ *  Created on: Mar 27, 2013. Modified on 2016 (Final review on 2020)
+ *      Author: Initial AKP code Gonzalo Ferrer, addition of code and maintenance of companion Ely Repiso (ASSAOP and ASSAGP)
+ */
+
+#ifndef SCENE_SIM_H_
+#define SCENE_SIM_H_
+
+#include "scene_abstract.h"
+//#include "scene_elements/person_abstract.h"
+#include "scene_elements/person_bhmip.h"
+#include "iri_geometry.h"
+#include "nav/plan_local_nav_person_companion.h"
+
+/**
+ *
+ * \brief Cscene_simulated Class
+ *
+ * The scene class provides a set of methods to store, manage,
+ * get and set information of a simulated scene.
+ *
+ */
+class Cscene_sim : public Cscene_abstract
+{
+	public:
+
+	/*void set_id_person_goal(unsigned int in_id_person_goal){
+		id_person_goal_=in_id_person_goal;
+	}*/
+
+	void set_person_goal_init_poin(Spoint person_goal_init_point_in){
+		person_goal_init_point_=person_goal_init_point_in;
+	}
+    void set_CsceneSim_group_go_to_interact_with_other_person(bool in_group_go_to_interact_with_other_person){
+    	akp_for_person_companion_.set_plan_local_nav_group_go_to_interact_with_other_person(in_group_go_to_interact_with_other_person);
+    	//group_go_to_interact_with_other_person_=in_group_go_to_interact_with_other_person;
+    }
+
+    void set_ramdom_people_velocity(double in_ramdom_people_vel){
+    	std::cout << " set random people velocity="<<in_ramdom_people_vel<< std::endl;
+    	ramdom_people_vel_=in_ramdom_people_vel;
+    }
+
+    double ramdom_people_vel_;
+
+		Cscene_sim();
+		virtual ~Cscene_sim();
+		//needs a void observation for timestamp
+		virtual void update_scene(const std::vector<SdetectionObservation>& observation, bool& we_have_person_companion, bool person_or_robot=false );
+		void update_scene_companion_simulation(const std::vector<SdetectionObservation>& observation ,bool ini_case); // companion (ely)
+		bool update_scene_companion_simulation_akp_person_companion(const std::vector<SdetectionObservation>& observation , bool ini_case, double ini_theta_person_companion, Spose& pose_command);
+		void set_number_virtual_people( int number_people ) { number_virtual_people_ = number_people; }
+		void set_remove_targets( bool remove_targets){remove_targets_=remove_targets;}
+		virtual void clear_scene();
+		virtual Cperson_abstract* add_person_container( unsigned int id,
+				std::list<Cperson_abstract*>::iterator iit);
+		/*virtual Cperson_abstract* add_person_container( unsigned int id,
+				std::list<Cperson_abstract*>::iterator iit);*/
+		void set_person_companion_id(unsigned int in_id){id_person_companion_=in_id;};
+		//void set_person_companion_distance(double in_distance){person_robot_companion_distance_=in_distance;};
+		double calc_robot_person_companion_distance_sim();
+
+		/*void set_id_person_companion(int in_id_person_companion){
+			id_person_companion_=in_id_person_companion;
+		}*/
+
+	    void set_robot_person_proximity_distance(double in_proximity_distance_between_robot_and_person){
+	    	robot_person_proximity_distance_=in_proximity_distance_between_robot_and_person;
+	    	robot_person_proximity_distance_sim_=in_proximity_distance_between_robot_and_person;
+	    }
+	    void set_proximity_distance_tolerance(double in_proximity_distance_tolerance){
+	    	robot_person_proximity_tolerance_=in_proximity_distance_tolerance;
+	    	robot_person_proximity_tolerance_sim_=in_proximity_distance_tolerance;
+	    }
+
+
+	    Cplan_local_nav_person_companion* get_akp_for_person_companion(){
+	    //	std::cout << " IN get_akp_for_person_companion:"<< std::endl;
+	    //	akp_for_person_companion_.get_person_companion_akp()->get_best_dest().print();
+	   		return &akp_for_person_companion_;
+	   	}
+
+	    /*Cplan_local_nav_person_companion* get_akp_for_person_companion_2groupPers(){
+	   	    //	std::cout << " IN get_akp_for_person_companion:"<< std::endl;
+	   	    //	akp_for_person_companion_.get_person_companion_akp()->get_best_dest().print();
+	   	   		return &akp_for_person_companion_2_group_person_;
+	   	   	}*/
+
+
+	    Cperson_bhmip get_person_companion_person_abstract(){
+	    	//std::cout << " IN get_person_companion_person_abstract"<< std::endl;
+	    	//person_companion_person_abstract_.get_current_pointV().print();
+	    	//person_companion_person_abstract_.get_best_dest().print();
+
+	    	return person_companion_person_abstract_;
+	    }
+
+	    Cperson_bhmip get_person_companion_person_abstract_2group_person(){
+	    	//std::cout << " IN get_person_companion_person_abstract"<< std::endl;
+	    	//person_companion_person_abstract_.get_current_pointV().print();
+	    	//person_companion_person_abstract_.get_best_dest().print();
+	    	return person_companion_person_abstract_2group_person_;
+	    }
+
+
+
+	    int get_id_person_companion(){
+	   	    return companion_person_id_;
+	   	}
+	    void set_id_person_companion(int in_companion_person_id){
+	    	companion_person_id_=in_companion_person_id;
+	    	id_person_companion_=in_companion_person_id;
+	    }
+	   /* int get_id_person_companion_2group_person(){
+	   	    return id_person_companion_2group_pers_;
+	   	}*/
+
+		void update_pose_person_companion(Spose person_companion_act_pose);
+		void update_scene_for_person_companion_planning_akp();
+		void set_true_robot(Spose true_robot_pose){
+			true_robot_pose_=true_robot_pose;
+		}
+
+		Spose return_new_person_companion_pose(){
+			return new_person_companion_pose_;
+		}
+
+		bool return_person_companion_plan_succed(){
+			return person_companion_plan_succed_;
+		}
+
+
+		void set_initial_companion_person_robot_point(SpointV_cov in_initial_companion_person_robot_point){
+			initial_companion_person_robot_point_=in_initial_companion_person_robot_point;
+		}
+		void set_initial_companion_person_robot_point_2personGroup(SpointV_cov in_initial_companion_person_robot_point_2group_person){
+			initial_companion_person_robot_point_2group_person_=in_initial_companion_person_robot_point_2group_person;
+		}
+
+		void set_initial_companion_person_robot_Spose(Spose in_initial_companion_person_robot_Spose){
+			initial_companion_person_robot_Spose_=in_initial_companion_person_robot_Spose;
+		}
+
+		void set_initial_companion_person_robot_Spose_2personGroup(Spose in_initial_companion_person_robot_Spose_2personGroup){
+			initial_companion_person_robot_point_2group_person_Spose_=in_initial_companion_person_robot_Spose_2personGroup;
+		}
+
+
+
+	    void set_actual_goal_to_return_person_comp1( Spoint actual_goal_to_return_person_comp_in){
+	       	//std::cout << " final_combined_goal_.x="<<final_combined_goal_.x<<"; final_combined_goal_.y="<<final_combined_goal_.y<< std::endl;
+	    	actual_goal_to_return_person_comp1_=actual_goal_to_return_person_comp_in;
+	    }
+
+	    void set_actual_goal_to_return_person_comp2( Spoint actual_goal_to_return_person_comp_in){
+	       	//std::cout << " final_combined_goal_.x="<<final_combined_goal_.x<<"; final_combined_goal_.y="<<final_combined_goal_.y<< std::endl;
+	    	actual_goal_to_return_person_comp2_=actual_goal_to_return_person_comp_in;
+	    }
+
+	    Spoint get_actual_goal_to_return_person_comp( ){
+	       	//std::cout << " final_combined_goal_.x="<<final_combined_goal_.x<<"; final_combined_goal_.y="<<final_combined_goal_.y<< std::endl;
+	    	return actual_goal_to_return_person_comp_;
+	    }
+
+	    void set_state_Action_person_companion(Cplan_local_nav_person_companion::action_mode Action_in){
+	    	state_act_=Action_in;
+	    	std::cout << " (set_state_Action_person_companion) state_act_="<<state_act_<< std::endl;
+	       }
+
+
+	    void set_actual_simulation_case(Cplan_local_nav_person_companion::simulation_case  actual_sim_case_in){
+	   	       	//std::cout << " final_combined_goal_.x="<<final_combined_goal_.x<<"; final_combined_goal_.y="<<final_combined_goal_.y<< std::endl;
+	    	 actual_sim_case_= actual_sim_case_in;
+	   	}
+
+	    void insert_more_random_people(const std::vector<SdetectionObservation>& observation);
+
+	    // simulation of group of 2 person and robot.
+	    /*void set_other_companion_person_id(unsigned int in_other_companion_person_id){
+	    	std::cout << "CHANGE CHANGE !!! set_other_companion_person_id; ID="<<in_other_companion_person_id<< std::endl;
+
+	    	other_companion_person_id_=in_other_companion_person_id;
+	    	akp_for_person_companion_.set_id_SECOND_person_companion_people_simulator(other_companion_person_id_);
+	    }*/
+	    void set_other_companion_person_out_odometry_spoint(SpointV_cov in_other_companion_person_out_odometry_spoint){
+	    	other_companion_person_out_odometry_spoint_=in_other_companion_person_out_odometry_spoint;
+	    }
+
+
+	    // function for group of 2 people companion and one robot simulation:
+	    void set_tracks_other_person_companion_of_group(std::vector<SdetectionObservation> in_obs_other_person_companion){
+	    	obs_other_person_companion_=in_obs_other_person_companion;
+	    }
+
+	    void set_destinationsOFtracks_other_person_companion_of_group(std::vector<Sdestination> in_destinations_other_person_companion){
+	    	destinations_other_person_companion_=in_destinations_other_person_companion;
+	    	/*for(unsigned int d=0; d<destinations_other_person_companion_.size(); d++){
+	    	  	std::cout << " destinations_other_person_companion_[d].id="<<destinations_other_person_companion_[d].id<<"; destinations_other_person_companion_[d].x="<<destinations_other_person_companion_[d].x<<"; destinations_other_person_companion_[d].y="<<destinations_other_person_companion_[d].y<< std::endl;
+	    	}*/
+	    }
+
+
+	    void set_other_companion_person_out_odometry_spose(Spose in_other_companion_person_out_odometry_spose){
+	    	other_companion_person_out_odometry_spose_=in_other_companion_person_out_odometry_spose;
+	    }
+
+
+	    Sdestination CsceneSim_get_goal_path(){ // for visualization del simulador personas.
+	    	Sdestination actual_akp_out_path_goal=akp_for_person_companion_.akp_get_goal_path(); // ojo, ha de ser el akp_person_comp.
+	    	return actual_akp_out_path_goal;
+	    }
+
+	    Sdestination CsceneSim_get_goal_companion(){// for visualization del simulador personas.
+	    	Sdestination actual_akp_out_companion_goal=akp_for_person_companion_.akp_get_goal_companion();
+	    	return actual_akp_out_companion_goal;
+	    }
+
+	    void set_less_companion_velocity(double in_less_companion_velocity){
+	    	less_companion_velocity_=in_less_companion_velocity; //is the velocity of the person companion!
+	    }
+
+	    void set_horitzon_time_CsceneSim(double in_horitzon_time){
+	    	akp_for_person_companion_.set_horizon_time(in_horitzon_time);
+	    }
+
+	    void set_number_of_companion_people(unsigned int in_number_of_companion_people){
+	    	//akp_for_person_companion_.set_number_of_group_people(in_number_of_companion_people);
+	    	// in the Csim, this number now is the number of simulated people.
+	    	number_of_companion_people_=in_number_of_companion_people;
+	    }
+
+	    void set_id_second_companion(unsigned int in_id_second_companion){
+	    	//akp_for_person_companion_.set_number_of_group_people(in_number_of_companion_people);
+	    	// in the Csim, this number now is the number of simulated people.
+	    	id_second_companion_=in_id_second_companion;
+	    }
+
+	    void set_current_pose_robot(Spose in_current_pose_robot){
+	    	//std::cout<<" IIIIIINNNNN set_current_pose_robot(  ) "<< std::endl;
+	    	robot_->set_current_pose(in_current_pose_robot);
+	    	robot_->set_current_pointV(SpointV(in_current_pose_robot.x,in_current_pose_robot.y,in_current_pose_robot.time_stamp,in_current_pose_robot.v*cos(in_current_pose_robot.theta),in_current_pose_robot.v*sin(in_current_pose_robot.theta)));
+
+	    	//std::cout<<" 2 IIIIIINNNNN set_current_pose_robot(  ) "<< std::endl;
+	    	robot_->get_current_pose().print();
+	    	//std::cout<<" 3 IIIIIINNNNN set_current_pose_robot(  ) "<< std::endl;
+	    	akp_for_person_companion_.set_current_pose_robot_akp(in_current_pose_robot);
+
+
+
+	    	//std::cout<<" ouuuuuttt set_current_pose_robot(  ) "<< std::endl;
+	    }
+
+	    /*void set_Scene_create_fake_fixed_second_person_companion(bool in_Scene_create_fake_fixed_second_person_companion){
+	    	Scene_create_fake_fixed_second_person_companion_=in_Scene_create_fake_fixed_second_person_companion;
+	    	akp_for_person_companion_.set_plan_create_fake_fixed_second_person_companion(in_Scene_create_fake_fixed_second_person_companion);
+	    }*/
+
+	    SpointV_cov get_fake_second_person_companion(){
+	    	return SpointV_cov_fake_second_person_companion;
+	    }
+
+	    SpointV_cov SpointV_cov_fake_second_person_companion;
+
+	    unsigned int get_id_fake_second_person_companion(){
+	    	std::cout<<" get_id_fake_second_person_companion=> id_second_companion_= "<<id_second_companion_<< std::endl;
+	    	return id_second_companion_;
+	    }
+
+	    void set_p2_back_p1_with_static_obst(bool in_p2_back_p1_with_static_obst){
+	    	p2_back_p1_with_static_obst_=in_p2_back_p1_with_static_obst;
+	    }
+
+
+	protected:
+
+	    unsigned int number_virtual_people_, virtual_person_id_counter_;
+		bool remove_targets_;
+		unsigned int id_person_companion_; // (is my id, the id of the person that actually I'm acting as a robot )
+		unsigned int id_second_companion_;
+
+	    double group_velocity1_1_;
+		//std::vector<Sdestination> destinations2p4_;
+
+
+
+		// variables adder by ely to do groups of simulated persons.
+		std::vector<Sdestination> destinations1_, destinations2_;//, destinations2_, destinations1p1_, destinations1p2_;//, destinations2p3_, destinations2p4_; //ely variables to make companion groups.
+		//std::vector<Sdestination> destinations2_p4_;
+		//std::vector<Sdestination> destinations1p1_; //ely variables to make companion groups.
+		//std::vector<Sdestination> destinations1p2_; //ely variables to make companion groups.
+		//std::vector<Sdestination> destinations2p3_;
+		//std::vector<Sdestination> destinations2p4_;
+		std::vector<int> ids_of_persons_in_group1_,ids_of_persons_in_group2_;
+		//bool only_companion_person_;
+		//std::vector<Sdestination> destinations1p2_, destinations2p4_;
+
+		double person_robot_companion_distance_;
+		double robot_person_proximity_distance_sim_,robot_person_proximity_tolerance_sim_;
+		bool debug_person_obst_forces_;
+
+		double robot_person_proximity_distance_; // puede que no vayan en el simulador sino en el predictor. TODO: MIRAR!!!
+		double robot_person_proximity_tolerance_;
+
+		//bool debug_real_test_companion_;
+		//robot_ = new Crobot(0,Crobot::Differential,scene_force_type_);
+		//Crobot* person_companion_; //person_companion is in a different list than normal persons, and additionally we have its pointer for specific perosn_companion methods.
+		//This person is a person that plans a akp, to navigate in a more intelligent way and can made turns does not brusc.
+		Cplan_local_nav_person_companion akp_for_person_companion_; // object of the nav class to make the akp of the person_companion_
+		//Cplan_local_nav_person_companion akp_for_person_companion_2_group_person_; // se hace de otra forma y al final esto no se usa!
+
+
+
+		double scene_time_window_;
+		Spose new_person_companion_pose_;
+		unsigned int companion_person_id_;
+
+		Sdestination person_actual_best_dest_;
+		Cperson_bhmip person_companion_person_abstract_;
+		Cperson_bhmip person_companion_person_abstract_2group_person_;
+
+		std::vector<SpointV_cov> new_points_person_sim_;
+		std::vector<unsigned int> persons_ids_;
+		std::vector<Sdestination> person_best_dest_; // person_best_dest_[0]== best dest person 1,
+		std::vector<Sdestination> ant_person_dest_; // person_best_dest_[1]== best dest person 2, etc
+
+		std::vector<Sdestination> dest_person1_;
+		std::vector<Sdestination> dest_person2_3_;
+		std::vector<Sdestination> dest_person4_5_;
+
+		bool debug_init_scene_sim_; // debug for simulation person companion.
+		bool debug_general_scene_sim_; // debug for simulation person companion.
+		bool debug_other_persons_scene_sim_; // debug for simulation person companion.
+		bool debug_companion_person_scene_sim_; // debug for simulation person companion.
+		bool debug_update_scene_for_person_companion_planning_akp_; // debug for simulation person companion.
+
+		bool person_companion_plan_succed_;
+		bool person_companion_plan_succed2_;
+
+		SpointV_cov initial_companion_person_robot_point_;
+		SpointV_cov initial_companion_person_robot_point_2group_person_;
+		Spose initial_companion_person_robot_Spose_;
+		Spose initial_companion_person_robot_point_2group_person_Spose_;
+
+		bool first_;
+		Spoint before_group_position_;
+
+		bool stop_;   // el parar es ahora la unica que falta en el robot
+
+
+		double distance_to_stop_goal_person_; ///// ?????????????????
+
+
+		Cplan_local_nav_person_companion::action_mode state_act_;
+		Cplan_local_nav_person_companion::simulation_case actual_sim_case_;
+
+		Spoint actual_goal_to_return_person_comp1_;
+		Spoint actual_goal_to_return_person_comp2_;
+		Spoint actual_goal_to_return_person_comp_;
+		Spoint person_goal_init_point_; // es de la target person, pero no la puedo eliminar por el nodo compartido.
+
+		unsigned int goal1_;
+
+		Spoint ini_person_goal3_;
+		Spoint ini_person_goal4_;
+		bool caso_reinicio__grupos_personas_simulaciones_iguales_;
+
+		Spoint person3_goal_init_point_;
+		Spoint person4_goal_init_point_;
+		Spoint person5_goal_init_point_;
+		bool group_sincron_;
+
+		bool part1, part2;
+		unsigned int contatore_;
+
+		bool bool_select_rando_dest_person_companion_;
+		std::vector<Sdestination> destinations_ini_security_copy;
+		bool go_rear_ini_; // calculate goal to go rear the person companion to separate its position from the target person.
+		// save velocities to use the same vel for all the expeiment.
+		double less_companion_velocity_;
+		double group_velocity1_;
+		double group_velocity2_;
+		double group_velocity2_2_;
+
+		bool same_velocity_for_all_the_iteration_;
+		bool random_initia_pose_people_;
+		bool random_final_dest_people_;
+		bool all_complete_random_final_dest_people_;
+
+		double multiply_robot_force_to_persons_;
+		Spose true_robot_pose_;
+
+		bool debug_approach_people_random_;
+
+		// simulation of group of 3 people: (2 dabo robots + 1 tibi)
+		bool group_simulation_;
+		//unsigned int other_companion_person_id_; // TODO: este hay que setearlo desde el cfg. (second person of the group)
+		SpointV_cov other_companion_person_out_odometry_spoint_; // todo: hay que cambiar este. desde fuera hay que setearlo con la ultima odometria del robot!
+		Spose other_companion_person_out_odometry_spose_;
+		std::vector<SdetectionObservation> obs_other_person_companion_;
+		std::vector<peopleOtherPersonCompanionInGroup> people_ids_correspondence_OTHER_person_companion_;
+		bool firsTimeINTracksOtherPersonCompanion_; // initial true, if !obs_other_person_companion_.empty()=> first time of tracks.
+
+		std::vector<Sdestination> destinations_other_person_companion_;
+
+		bool people_sim_stop_;
+
+		unsigned int number_of_companion_people_; // is is 2, we generate a new person in X position from the first companion person.
+			// first aproximation of the companion for the group of three people.
+		Spose Spose_person_companion2_;
+		Spose Spose_before_person_companion_;
+
+
+		// nuevos goals, companion V-form con 2 robots.
+
+		Spoint actual_goal_to_return_person_comp1_id_1_;
+		Spoint actual_goal_to_return_person_comp1_id_3_;
+		Spoint actual_goal_to_return_person_comp2_id_1_;
+		Spoint actual_goal_to_return_person_comp2_id_3_;
+
+
+		bool Scene_create_fake_fixed_second_person_companion_;
+
+		Spoint SIM_initial_person_goal_pose1_,SIM_initial_person_goal_pose2_,SIM_initial_person_goal_pose3_;
+		double d_min_;
+		bool p2_back_p1_with_static_obst_;
+
+};
+
+
+
+#endif /* SCENE_SIM_H_ */

@@ -1,0 +1,78 @@
+<!-- -->
+<launch>
+
+
+
+
+    <!-- Ini Navigation Companion Nodes -->
+   <!--launch-prefix="xterm -e ddd -args"  -->
+
+ <group ns="dabo"> 
+  <rosparam command="delete" ns="/dabo/move_base" />
+
+   <node pkg ="move_base"
+          type="move_base"
+          name="move_base"      
+          output="screen">
+      <remap from="/dabo/move_base/cmd_vel"
+              to="/dabo/navigation/cmd_vel" />
+      <remap from="/dabo/cmd_vel"
+              to="/dabo/cmd_vel_unsafe" />
+      <remap from="/dabo/move_base/odom"
+              to="/dabo/odom" />
+       <remap from="/dabo/cost_map"
+             to="/dabo/move_base/global_costmap/costmap" />
+      <remap from="/dabo/front_scan"
+              to="/dabo/sensors/front_scan" />
+      <remap from="/dabo/rear_scan"
+              to="/dabo/sensors/rear_scan" />
+     <remap from="/dabo/tracks"
+               to="/mht_2/tracks" />
+      <remap from="/dabo/tracked_humans"
+               to="/tracked_humans" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/move_base_params.yaml"      command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/local_costmap_params.yaml"  command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana/global_costmap_params.yaml" command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/akp_local_planner_params.yaml" command="load" />
+      <rosparam file="$(find iri_dabo_rosnav)/params/amcl_companion_test_ely2021_mapFME.yaml" command="load" />
+ <!--<rosparam file="$(find iri_dabo_rosnav)/params/global_planner/global_planner_params.yaml" command="load" />
+ <rosparam file="$(find iri_dabo_rosnav)/params/mux.yaml" command="load" />-->
+      <param name="AkpLocalPlanner/destination_map_path" value="$(find iri_robot_aspsi)/maps/master_big_destinations_Gazebo_sim.txt" />
+	<param name="AkpLocalPlanner/results_filename_Zanlungo" value="name_file.txt" /> 
+      <param name="AkpLocalPlanner/robot" value="dabo"/>
+      <param name="AkpLocalPlanner/person_goal_id"  value="200"/> 
+      <param name="AkpLocalPlanner/speed_k"  value="1"/> 
+      <param name="AkpLocalPlanner/person_radi_amp"  value="0.2"/> 
+      <param name="AkpLocalPlanner/change_treshold_distance_between_steps"  value="0.3"/> 
+	<!-- for SIM-->
+ 	<param name="AkpLocalPlanner/change_sim"  value="False"/> 
+ 	<param name="AkpLocalPlanner/change_sim_target_per"  value="False"/> 
+        <param name="AkpLocalPlanner/frame_robot_footprint"  value="dabo/base_link"/> 
+    </node>
+
+ </group>
+
+  <arg name="config_file"   default="$(find iri_safe_cmd)/param/sample.yaml" />
+<!--  <arg name="node_name"     default="iri_safe_cmd" />-->
+<!--  <arg name="output"        default="screen" />-->
+  <arg name="launch_prefix" default="" />
+<node pkg ="iri_safe_cmd"
+        type="iri_safe_cmd"
+        name="iri_safe_cmd"
+        ns="dabo"
+        output="screen"
+        launch-prefix="$(arg launch_prefix)">
+    <rosparam file="$(find iri_safe_cmd)/param/sample.yaml" command="load" />
+    <param name="base_frame" value="dabo/base_link" />
+    <remap from="~cmd_vel_safe" to="/dabo/cmd_vel"/>
+    <remap from="~cmd_vel"      to="/dabo/cmd_vel_unsafe"/>
+    <remap from="/dabo/iri_safe_cmd/rear_scan"   to="/dabo/sensors/rear_scan"/>
+    <remap from="/dabo/iri_safe_cmd/front_scan"  to="/dabo/sensors/front_scan"/>
+    <remap from="~joy"          to="/dabo/joy"/>
+  </node>
+
+  <node name="dr" pkg ="rqt_reconfigure" type="rqt_reconfigure" />
+
+</launch>

@@ -1,0 +1,79 @@
+<!-- -->
+<launch>
+
+  <arg name="map" default="empty" />
+
+  <rosparam command="delete" ns="/$(optenv ROBOT dabo)/move_base" />
+
+  <group ns="$(optenv ROBOT dabo)"> 
+
+    <!--launch-prefix="xterm -e ddd -args" -->
+  <!--output="screen"-->
+    <node pkg ="move_base"
+          type="move_base"
+          name="move_base2"
+          >
+      <param name="number_persons" value="1"/>
+      <param name="vis_mode"       value="True"/>
+      <param name="destination_map_path" value="$(find iri_simulated_person_companion_akp_local_planner)/map/fme_open_destinations.txt" />
+      <remap from="/$(optenv ROBOT dabo)/cmd_vel"
+              to="/$(optenv ROBOT dabo)/segway/cmd_vel" />
+      <remap from="/$(optenv ROBOT dabo)/odom"
+              to="/$(optenv ROBOT dabo)/segway/odom" />
+      <remap from="/$(optenv ROBOT dabo)/odom_other_person_of_group"
+              to="/$(optenv ROBOT dabo)/segway/odom" />
+      <remap from="/$(optenv ROBOT dabo)/odom_tibi"
+              to="/$(optenv ROBOT tibi)/segway/odom" />
+      <remap from="/$(optenv ROBOT dabo)/front_scan"
+              to="/$(optenv ROBOT dabo)/sensors/front_laser_scan" />
+      <remap from="/$(optenv ROBOT dabo)/rear_scan"
+              to="/$(optenv ROBOT dabo)/sensors/rear_laser_scan" />
+     <!-- <remap from="/$(optenv ROBOT dabo)/tracks"
+               to="/fusion_tracks_people_sim/dabo1_tracks" />-->
+      <remap from="/$(optenv ROBOT dabo)/tracks"
+               to="/$(optenv ROBOT tibi)/mht/tracks" />
+      <!--<remap from="~tracksMarkers" to="/$(optenv ROBOT tibi)/mht/tracksMarkers"/>-->
+      <remap from="/$(optenv ROBOT dabo)/cmd_vel_stop" 
+               to="/turtlebot_teleop_keyboard/cmd_vel2"/> 
+      <remap from="/$(optenv ROBOT dabo)/status_init" 
+               to="/tibi/status_init"/> 
+      <remap from="/$(optenv ROBOT dabo)/init_simulations" 
+               to="/tibi/init_simulations"/> 
+      <!-- remap for other person_companion tracks:-->
+    <!--  <remap from="/$(optenv ROBOT tibi)/tracks" 
+               to="/$(optenv ROBOT dabo)/tracks"/> -->
+      <remap from="/$(optenv ROBOT dabo)/other_person_destination_tracks" 
+               to="/$(optenv ROBOT dabo2)/destinations_of_tracks"/> 
+      <remap from="/$(optenv ROBOT dabo)/dabo_pose_for_sim" 
+               to="/$(optenv ROBOT dabo)/initialpose"/> 
+      <!--<remap from="/$(optenv ROBOT dabo)/mht/tracks"        to="/$(optenv ROBOT tibi)/mht/tracks"/> -->
+      <rosparam file="$(find iri_simulated_person_companion_akp_local_planner)/config/$(optenv ROBOT dabo)/move_base_params.yaml"      command="load" />
+      <rosparam file="$(find iri_simulated_person_companion_akp_local_planner)/config/$(optenv ROBOT dabo)/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find iri_simulated_person_companion_akp_local_planner)/config/$(optenv ROBOT dabo)/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find iri_simulated_person_companion_akp_local_planner)/config/$(optenv ROBOT dabo)/local_costmap_params.yaml"  command="load" />
+      <rosparam file="$(find iri_simulated_person_companion_akp_local_planner)/config/$(optenv ROBOT dabo)/global_costmap_params.yaml" command="load" />
+      <rosparam file="$(find iri_simulated_person_companion_akp_local_planner)/config/$(optenv ROBOT dabo)/akp_local_planner_params.yaml" command="load" />
+      <!--<param name="AkpLocalPlanner/force_map_path"       value="$(find iri_akp_local_planner)/maps/$(arg map)_forces.txt" />-->
+      <param name="AkpLocalPlanner/conf_bool_group_go_to_interact_with_other_person" value="False"/> 
+      <param name="AkpLocalPlanner/person_goal_id"                            value="200"/>  
+      <param name="AkpLocalPlanner/robot_sim_comp_pers_name"                            value="$(optenv ROBOT dabo)"/>  
+      <param name="AkpLocalPlanner/other_person_of_group_comp_sim_name"                 value="$(optenv ROBOT dabo2)"/> 
+      <param name="AkpLocalPlanner/id_person_companion"                            value="1"/>
+      <param name="AkpLocalPlanner/id_person_other_person_of_group_companion"      value="3"/>          
+      <param name="AkpLocalPlanner/destination_map_path" value="$(find iri_simulated_person_companion_akp_local_planner)/maps/fme_open_destinationsATR_staySIMOTHERpeople_stop.txt" />
+
+	<!-- destination maps, congres humanoids sim: fme_open_destinations_simPerson_Vform_caseSideBySide_humanoids_SIDE_left.txt; fme_open_destinations_simPerson_Vform_caseSideBySide_humanoids_SIDE_right.txt; fme_open_destinations_simPerson_Vform_caseSideBySide_humanoids_SIDE_both.txt;
+fme_open_destinations_simPerson_Vform_caseSideBySide_humanoids_SIDE_all_directions.txt; fme_open_destinations_simPerson_Vform_caseSideBySide_humanoids_SIDE_diagonals.txt-->
+	<!-- maps= fme_open_destinationsATR_staySIM.txt; fme_open_destinationsATR_staySIMOTHERpeople_stop.txt (For people stop); person_passages: (V-form) fme_open_destinationsATR_staySIM_pasage_robot.txt
+		mapa bueno, people en lateral: fme_open_destinationsATR_staySIM_pasage_robot_SIDE.txt lo iba cambiando por side_left y etc.
+
+fme_open_destinations_simPerson_Vform_caseSideBySide_humanoids_SIDE_all_directions.txt-->
+      <param name="AkpLocalPlanner/robot" value="$(optenv ROBOT dabo)"/>
+      <param name="AkpLocalPlanner/max_vel_comp_pers"  value="0.5"/>
+      <param name="AkpLocalPlanner/id_second_companion" value="3"/>
+	<!-- TODO: correr la simulacion con personas, pero con menos velocidad de estas personas Vp=0.5 -->
+    </node>
+
+  </group>
+
+</launch>

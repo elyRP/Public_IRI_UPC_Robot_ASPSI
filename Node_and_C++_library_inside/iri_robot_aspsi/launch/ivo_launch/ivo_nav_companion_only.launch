@@ -1,0 +1,135 @@
+<?xml version="1.0"?>
+<!-- -->
+<launch>
+
+
+
+   <!-- Ini Navigation Companion Nodes -->
+
+  <!--<group ns="tiago"> -->
+
+    <!--launch-prefix="xterm -e ddd -args"  machine="visio"-->
+    <node pkg ="move_base"
+          type="move_base"
+          name="move_base"      
+          output="screen">
+     <!-- <remap from="/cmd_vel"
+              to="/mobile_base_controller/cmd_vel" />-->
+      <remap from="/cmd_vel"
+              to="/navigation/cmd_vel_unsafe" />
+      <remap from="/odom"
+              to="/mobile_base_controller/odom" />
+      <remap from="/front_scan"
+              to="/scan" />
+      <remap from="/rear_scan"
+              to="/rear_scan" />
+      <remap from="/tracks"
+               to="/mht_2/tracks" />
+	<remap from="map" to="/robot/map" />
+<remap from="/tiago/sensors/joy" to="/joy" />
+<remap from="/tiago/move_base_simple/goal" to="/move_base/goal" />
+      <rosparam file="$(find iri_robot_aspsi)/config/IVO/move_base_params.yaml"      command="load" />
+      <rosparam file="$(find  iri_robot_aspsi)/config/IVO/akp_local_planner_params.yaml" command="load" />
+      <rosparam file="$(find  iri_robot_aspsi)/config/IVO/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find  iri_robot_aspsi)/config/IVO/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find  iri_robot_aspsi)/config/IVO/local_costmap_params.yaml"  command="load" />
+      <rosparam file="$(find  iri_robot_aspsi)/config/IVO/global_costmap_params.yaml" command="load" />
+
+     <!--  <rosparam file="$(find iri_ana_rosnav)/params/amcl_companion_test_ely2021_mapFME.yaml" command="load" />-->
+      <param name="AkpLocalPlanner/destination_map_path" value="$(find iri_robot_aspsi)/maps/destinaciones_ana_FME_ubuntu18_ros_melodic.txt" />
+	<!-- maps_OK: FME=destinaciones_ana_FME_ubuntu18_ros_melodic.txt
+		      FME_with_obts=destinaciones_ana_FME_ubuntu18_ros_melodic.txt
+		      master_big=destinaciones_ana_BRL_ubuntu18_ros_melodic.txt-->		
+	<param name="AkpLocalPlanner/results_filename_Zanlungo" value="/home/erepiso/iri-lab/labrobotica/restricted/algorithms/people_prediction/branches/local_lib_ATR_7_junio/1_data_results_Vform/results_person_companion_Vform.txt" /> 
+      <param name="AkpLocalPlanner/robot" value="ivo"/>
+     <!-- No existe: <param name="AkpLocalPlanner/person_goal_id"  value="200"/> -->
+      <param name="AkpLocalPlanner/person_radi_amp"  value="0.5"/> <!-- <[antes estaba a 0.2 (13/04/2021), pero prefiero probarlo a 0.5, hay más margen y si va bien, ya esta.] MUY importante: en sim, person_radi_amp=0.5 (SIDE-BY-SIDE); en robot real, (zanlungo) person_radi_amp=0.0; -->  
+      <!--NO existe: <param name="AkpLocalPlanner/change_treshold_distance_between_steps"  value="0.3"/>--> <!-- change_treshold_distance_between_steps=0.5; real creo que es change_treshold_distance_between_steps=0.1, es el error de posición respecto a una iteracion y la otra. -->
+	<!-- for SIM-->
+	<param name="AkpLocalPlanner/frame_robot_footprint"  value="base_footprint"/>
+ 	<param name="AkpLocalPlanner/change_sim"  value="False"/> 
+ 	<param name="AkpLocalPlanner/sim_target_per"  value="False"/> 
+	<param name="AkpLocalPlanner/detection_laser_obstacle_distances" value="3.5"/> 
+	<param name="AkpLocalPlanner/real_companion_angle_SideBySide" value="90.0"/>  <!-- No lo setea bien desde aquí, si hace falta, mejor cambiarlo en el dynamic reconfigure.-->
+      <param name="AkpLocalPlanner/speed_k"  value="1.0"/>  <!--MUY importante: en sim, speed_k=1.0; en robot real,  speed_k=1.5; -->  
+<param name="AkpLocalPlanner/max_real_speed_out" value="0.5"/>
+
+<param name="AkpLocalPlanner/conf_final_max_v" value="1.0"/> <!-- (estas 2 siguientes) calcular fuerzas internas, no se pueden bajar más o NO se movera el robot-->
+<param name="AkpLocalPlanner/v_max" value="1.0"/>
+<param name="AkpLocalPlanner/av_max" value="0.2"/> <!-- incremento normal es 0.4, probaremos primero con 0.2-->
+<param name="AkpLocalPlanner/av_max_VrobotZero" value="0.2"/><!-- incremento normal es 0.6, probaremos primero con 0.2. Aunque para IVO mejor 0.4 como mucho.-->
+<param name="AkpLocalPlanner/av_break" value="0.2"/><!-- incremento normal es 0.4, probaremos primero con 0.2. -->
+<param name="AkpLocalPlanner/aw_max" value="0.6"/><!-- incremento normal es 0.9, como mucho se puede reducir a 0.6, que parece que funciona en simulación con obstaculos (valores menores se CHOCA con obstaculos).-->
+
+<!-- NEW variables, maybe I need to add them-->
+ <!--      <param name="AkpLocalPlanner/speed_k_angular"  value="1.0"/> 
+ <param name="AkpLocalPlanner/max_real_angular_speed_out" value="0.4"/>
+ <param name="AkpLocalPlanner/conf_id_to_remove" value="100000"/>
+ <param name="AkpLocalPlanner/conf_low_range_scan_detect_obstacles" value="0.0"/>-->
+ 
+    </node>
+  <!--</group>-->
+
+
+
+ <!-- SAFE command vel -->
+
+   <arg name="ns"            default="tiago"/>
+  <arg name="config_file"   default="$(find iri_safe_cmd)/param/sample.yaml" />
+  <arg name="node_name"     default="iri_safe_cmd" />
+  <arg name="output"        default="screen" />
+  <arg name="launch_prefix" default="" />
+
+    <node pkg="iri_safe_cmd"
+          type="iri_safe_cmd"
+          name="$(arg node_name)"
+          output="$(arg output)"
+          launch-prefix="$(arg launch_prefix)">
+      <rosparam file="$(arg config_file)" command="load" />
+     <param name="base_frame" value="base_link" />
+     		<!--  <param name="base_frame" value="base_link" /> -->
+     <param name="collision_time" value="0.5" />
+      			<!-- <remap from="~cmd_vel_safe" to="/$(arg ns)/cmd_vel"/>
+      <remap from="~cmd_vel"      to="/$(arg ns)/cmd_vel_unsafe"/>
+      <remap from="~rear_laser"   to="/$(arg ns)/sensors/rear_laser_scan"/>
+      <remap from="~front_laser"  to="/$(arg ns)/sensors/front_laser_scan"/>
+      <remap from="~joy"          to="/$(arg ns)/joy"/>
+      <remap from="~cmd_vel_safe" to="/mobile_base_controller/cmd_vel"/> -->
+      <remap from="~cmd_vel_safe" to="/nav_vel"/> 
+      <remap from="~cmd_vel"      to="/navigation/cmd_vel_unsafe"/> 
+     
+      <remap from="~rear_laser"   to="/rear_scan"/>
+      <remap from="~front_laser"  to="/scan"/>
+      </node> 
+
+ <!-- node states companion TODO: cambiar por iri_state_machine_companion_only_one_person -->
+  <node pkg ="iri_state_machine_companion"
+          type="iri_state_machine_companion"
+          name="state_mach_comp"
+	  output="screen">
+      <remap from="/state_mach_comp/people_tracks"
+               to="/mht_2/tracks" />
+      <remap from="/state_mach_comp/odom"
+               to="/mobile_base_controller/odom" />
+      <remap from="/state_mach_comp/companionState"
+               to="/companionState" />
+	<remap from="/tibi_akp_status"
+	to="/tiago_akp_tatus"/>
+     <param name="~/threshold_max_dist_between_robot_and_person_conf"   value="5.0" />
+     <param name="~/frame_map"   value="map" />
+     <param name="~/frame_robot_footprint"   value="base_link" />
+     <param name="~/robot"   value="tiago" />
+     <param name="~/out_std_mesages_conf" value="False"/>
+
+    </node>
+
+ <node name="dr" pkg ="rqt_reconfigure" type="rqt_reconfigure" />
+
+    <!--/rosbagrecord-->
+   <include file="$(find iri_joy_rosbag_record)/launch/node.launch">
+   <arg name="default_path"            value="home/life/Escritorio/Desktop"/>
+   </include>
+   <!--/rosbagrecord-->
+   <!-- http://wiki.ros.org/joy (para botones joy)-->
+
+</launch>

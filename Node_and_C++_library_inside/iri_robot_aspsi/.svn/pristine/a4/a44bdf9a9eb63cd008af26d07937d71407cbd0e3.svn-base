@@ -1,0 +1,107 @@
+/*
+ * learninglinnearregression.cpp
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+#include "learnninglinearregression.h"
+
+
+/*
+ * learningleastsquaresregression.cpp
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#include "learningleastsquaresregression.h"
+
+learning_least_squares_regression::learning_least_squares_regression():
+learnning_rate_(0.001) // parametro a sacar fuera y modificar con el dynamic reconfigure.
+{
+	// TODO Auto-generated constructor stub
+
+}
+
+learning_least_squares_regression::~learning_least_squares_regression() {
+	// TODO Auto-generated destructor stub
+}
+
+void learning_least_squares_regression::least_squares_iteration(){
+	/* */
+	// calculate error:
+	least_squares_calc_error();
+	//double new_beta0_k=0;
+	//double new_beta1_k=0;
+
+	//new_beta0_k=beta0_k_1_-learnning_rate_*act_regression_error;
+	//new_beta1_k=beta1_k_1_-learnning_rate_*act_regression_error*real_x_value_;
+
+}
+
+void learning_least_squares_regression::least_squares_initialice(){
+	beta0_k_1_=0;
+	beta1_k_1_=0;
+
+}
+
+void learning_least_squares_regression::least_squares_calc_error(){
+	// we use the squared error.
+
+}
+/*
+ * learnningBayesianregression.cpp
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#include "learnningBayesianregression.h"
+
+learnning_Bayesian_regression::learnning_Bayesian_regression() {
+	// TODO Auto-generated constructor stub
+
+}
+
+learnning_Bayesian_regression::~learnning_Bayesian_regression() {
+	// TODO Auto-generated destructor stub
+}
+
+
+
+/*
+ * learningleastsquarespercentageregression.cpp
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#include "learningleastsquarespercentageregression.h"
+
+learning_least_squares_percentage_regression::learning_least_squares_percentage_regression() {
+	// TODO Auto-generated constructor stub
+
+}
+
+learning_least_squares_percentage_regression::~learning_least_squares_percentage_regression() {
+	// TODO Auto-generated destructor stub
+}
+
+/*
+ * learnningleastabsolutedeviationregression.cpp
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#include "learnningleastabsolutedeviationregression.h"
+
+learnning_least_absolute_deviation_regression::learnning_least_absolute_deviation_regression() {
+	// TODO Auto-generated constructor stub
+
+}
+
+learnning_least_absolute_deviation_regression::~learnning_least_absolute_deviation_regression() {
+	// TODO Auto-generated destructor stub
+}

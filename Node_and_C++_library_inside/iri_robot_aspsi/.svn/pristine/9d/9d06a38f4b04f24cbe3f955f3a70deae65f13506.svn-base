@@ -1,0 +1,1469 @@
+/*
+ * prediction_behavior.cpp
+ *
+ *  Created on: 2013.  Last Modified on 2020
+ *      Author: Initial code of the AKP Gonzalo Ferrer.
+ *      Author: Addition of ASSAOP and ASSAGP for people accompaniment code of Ely Repiso.
+ */
+
+#include "prediction_behavior.h"
+#include "scene_elements/person_behavior.h"
+//#include <math.h>
+#include <algorithm>
+#include <stdio.h>
+#include <Eigen/Dense>
+#include <iostream>
+
+
+Cprediction_behavior::Cprediction_behavior( double horizon_time , bool behavior_flag,
+		Cperson_abstract::filtering_method filter, Cperson_abstract::update_person_method update_method ) :
+			Cprediction_bhmip(filter,update_method),
+	horizon_time_(horizon_time), behavior_flag_(behavior_flag),
+	debug_antes_subgoals_entre_AKP_goals_(false),
+	debug_scene_prediction_(false),
+	debug_scene_trajectory_prediction_simulation_(false),
+	id_person_companion_(1),
+	id_second_person_companion_(2),
+	sim_prediction_behaviour(true),
+	no_increment_prediction_(false),
+	num_max_iter_constan_time_steps_pred_(100) // a eliminar es de approach person
+{
+	horizon_time_index_ =  (unsigned int) (horizon_time_/dt_) ;
+	// paramters = {k,lambda,a,b,d} according to FerrerIcra2014
+	force_params_balanced_ = {2.3, 0.56,3.13,2.91,0.2};
+	force_params_aware_ = {2.3, 0.56,4.78,6.22,0.2};
+	force_params_unaware_= {2.3, 0.56,0.98,0.16,0.2};
+
+}
+
+Cprediction_behavior::~Cprediction_behavior()
+{
+	//deletion of robot and persons is done on its parent class Cprediction_bhmip
+}
+
+
+Cperson_abstract* Cprediction_behavior::add_person_container( unsigned int id,
+		std::list<Cperson_abstract*>::iterator iit )
+{
+	//this is the implementation of the abstract interface defined in Cscene_abstract, and although it
+	// it has been defined in the father class, when calling 'update_scene()' the new container used will
+	//be the one defined here
+	Cperson_abstract::target_type person_target_type_act;
+	if((id_person_companion_==id)||(id_second_person_companion_==id)){
+		person_target_type_act=Cperson_abstract::Person_companion;
+	}else{
+		person_target_type_act=Cperson_abstract::Person;
+	}
+
+
+	Cperson_behavior* person = new Cperson_behavior(id,person_target_type_act, scene_force_type_, filtering_time_window_);
+
+	person_list_.insert( iit , person );
+	person->set_destinations(destinations_);
+
+	return (Cperson_abstract*) person;
+}
+
+/*** predice las destinaciones finales de TODAS las personas en la escena/entorno. ***/
+void Cprediction_behavior::scene_prediction(bool person_or_robot, std::vector<Sdestination>* person_best_dest)  // person_or_robot= true==person_companion. False==robot
+{
+
+	// Intentionality prediction
+	if(debug_scene_prediction_){
+		std::cout << " scene_prediction() antes scene_intentionality_prediction_bhmip(); dt="<<dt_<< std::endl;
+	}
+
+	if(!person_or_robot){ // caso robot o personas normales.
+		if(debug_scene_prediction_){
+			std::cout << " (case_robot) scene_intentionality_prediction_bhmip" << std::endl;
+		}
+		Cprediction_bhmip::scene_intentionality_prediction_bhmip();
+	}else{ // caso person companion simulada
+		// usamos person_best_dest como destinaciones para todas las personas. (caso Cscene_sim)
+		if(debug_scene_prediction_){
+			std::cout << "  Cprediction_behavior::scene_prediction (case_person_companion) usamos person_best_dest como destinaciones para todas las personas. (Simulation)"<< std::endl;
+		}
+		//std::cout << " scene_prediction(1)   person_list_.size()="<<person_list_.size()<< std::endl;
+		for( Cperson_abstract* iit: person_list_ )
+		{
+			if ( (iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion))
+			{
+				//std::cout << "iit->get_id()="<<iit->get_id()<< std::endl;
+				//std::cout << "person_best_dest.size="<<person_best_dest->size()<< std::endl;
+				const Sdestination dest=person_best_dest->at(iit->get_id()-1);
+				iit->set_best_dest(dest);
+
+				if(debug_scene_prediction_){
+					std::cout << "iit->get_id()="<<iit->get_id()<< std::endl;
+					iit->get_best_dest().print();
+				}
+			}
+		}
+	}
+	//std::cout << " scene_prediction(1)"<< std::endl;
+
+	if(debug_scene_prediction_){
+		std::cout << " scene_prediction() antes scene_behavior_estimation();   behavior_flag_= "<< behavior_flag_<< std::endl;
+	}
+	//std::cout << " scene_prediction(2); behavior_flag_="<<behavior_flag_<< std::endl;
+	if( behavior_flag_  )
+	{
+		scene_behavior_estimation();
+	}
+	//std::cout << " scene_prediction(3)"<< std::endl;
+	if(debug_scene_prediction_){
+		std::cout << " scene_prediction() antes scene_trajectory_prediction();"<< std::endl;
+	}
+	//std::cout << " scene_prediction(4)"<< std::endl;
+	//calculation of the trajectories
+	if(!person_or_robot){ // caso robot o personas normales.
+
+		//std::cout << " caso robot o personas normales."<< std::endl;
+
+		//clock_t pred_peopl_start2, pred_peopl_end2;
+		//pred_peopl_start2=clock();
+		scene_trajectory_prediction();
+		//double clocks_per_sec_my_var_=1000000;
+		//pred_peopl_end2=clock();
+		//std::cout << " (entro en esta!) EEEEEEEEEEEEEEEEEEEEEEEEE 77777777777 PRED PEOPLE TIME!!! time=pred_peopl_end-pred_peopl_start="<<((pred_peopl_end2-pred_peopl_start2)/clocks_per_sec_my_var_)*1000<< std::endl;
+
+	}else{ // caso person companion simulada
+		//std::cout << "caso person companion simulada"<< std::endl;
+
+
+		//clock_t pred_peopl_start2, pred_peopl_end2;
+		//pred_peopl_start2=clock();
+		//double clocks_per_sec_my_var_=1000000;
+		scene_trajectory_prediction_simulation();
+		//pred_peopl_end2=clock();
+		//std::cout << "part2 EEEEEEEEEEEEEEEEEEEEEEEEE 77777777777 PRED PEOPLE TIME!!! time=pred_peopl_end-pred_peopl_start="<<((pred_peopl_end2-pred_peopl_start2)/clocks_per_sec_my_var_)*1000<< std::endl;
+
+		//scene_trajectory_prediction();
+	}
+	//std::cout << " scene_prediction(5)"<< std::endl;
+	if(debug_scene_prediction_){
+		std::cout << " scene_prediction() despues scene_trajectory_prediction();"<< std::endl;
+	}
+
+
+	/*std::cout <<  " scene_prediction() despues scene_trajectory_prediction_simulation(); " << std::endl;
+	for( auto iit : person_list_)
+	{
+		if(iit->get_id()!=id_person_companion_){
+		 std::cout << " (in scene_prediction) (1) iit->get_prediction_trajectory( )->size()="<<iit->get_prediction_trajectory( )->size()<<"; iit->get_id()=" <<iit->get_id()<<"; iit->desired_vel="<<iit->get_desired_velocity()<<  std::endl;
+		}
+	}*/
+
+}
+
+void Cprediction_behavior::scene_behavior_estimation()
+{
+	Sforce obs, goal;
+	double dt;
+	for( Cperson_abstract* observed_person: person_list_ )
+	{
+		//calculate the estimation for each force, according to the observed position and velocities
+		dt = observed_person->get_diff_position().time_stamp;
+		obs = Sforce( observed_person->get_diff_position().vx /dt , observed_person->get_diff_position().vy /dt);
+		goal = observed_person->force_goal( observed_person->get_best_dest(), this->get_sfm_params( observed_person) );
+		for ( Cperson_abstract* center_person : person_list_ )
+		{
+			if( *observed_person != *center_person  &&
+					observed_person->get_current_pointV().distance( center_person->get_current_pointV() ) < 4.0 )//threshold of 4[m]
+				this->behavior_update( observed_person, center_person, obs-goal );
+		}
+		//same calculation for the robot
+		if ( robot_in_the_scene_ ){
+		if( *observed_person != *robot_ &&
+				observed_person->get_current_pointV().distance( robot_->get_current_pointV() ) < 4.0 )//threshold of 4[m]
+			this->behavior_update( observed_person, robot_, obs-goal );
+		}
+	}
+
+}
+
+
+void Cprediction_behavior::behavior_update( Cperson_abstract* observed_person, Cperson_abstract* center_person, const Sforce& observed_int)
+{
+	//calculate the expected force
+	double lh,force_mod, marginalization, norm(0.0);
+	std::vector<double> posterior_prob( 3, 0.0 );
+	Sforce expected_force;
+	//find behavior for person observed, according to center person
+	Sbehavior * behavior = center_person->find_behavior_estimation ( observed_person->get_id() );
+	assert( behavior != NULL );
+	for ( unsigned int i = 0; i< behavior->expectation.size() ; i++)
+	{
+		marginalization = 0.0;
+		for( unsigned int j = 0; j< behavior->expectation.size() ; j++)
+		{
+			marginalization += behavior->expectation[j] * ( i == j ? 0.9 : 0.05 );//transition matrix parameters hrdcoded for 3 states
+		}
+		//HMM : the observed person recalculates its interaction force according to the sfm behaviors after interacting with center person,
+		// which updates its behavior information upon these results
+		expected_force = observed_person->force( center_person->get_current_pointV()  ,
+				get_behavior_sfm_params( (Cperson_abstract::behavior_type)i  )  );
+		force_mod = ( observed_int - expected_force ).module2();
+		//std::cout << "force_mod " << force_mod << "for iteration " << i << std::endl;
+		lh = exp( -0.5 * force_mod );//std = 1 TODO
+		posterior_prob[i] = marginalization * lh;
+		norm += posterior_prob[i];
+	}
+
+	//normalize HMM
+	if ( norm <= 0 ) norm = 1e-20;
+	for ( unsigned int i = 0; i< behavior->expectation.size() ; i++ )
+		behavior->expectation[i] =  posterior_prob[i] / norm;
+
+	//behavior->print();
+
+}
+
+const std::vector<double>*
+Cprediction_behavior::get_behavior_sfm_params( Cperson_abstract::behavior_type best_behavior_type )
+{
+
+	//std::cout << " IIINNNNNNNNN Cprediction_behavior::get_behavior_sfm_params " << std::endl;
+
+	switch( best_behavior_type)
+	{
+	  case Cperson_abstract::Balanced:
+		return &force_params_balanced_;
+	  case Cperson_abstract::Aware:
+		return &force_params_aware_;
+	  case Cperson_abstract::Unaware :
+	  default :
+		return &force_params_unaware_;
+	}
+}
+
+const std::vector<double>*
+Cprediction_behavior::get_sfm_int_params( const Cperson_abstract * center_person,	const Cperson_abstract * interacting_person )
+{
+
+	//std::cout << " IIINNNNNNNNN Cprediction_behavior::get_sfm_int_params " << std::endl;
+
+
+	const std::vector<double>* result = Cscene_abstract::get_sfm_int_params(center_person, interacting_person);
+
+	//if flag enabled, certain combinations of interactions may change, we modify only those that are different
+	if ( behavior_flag_ )
+	{
+
+		//std::cout << " IIINNNNNNNNN Cprediction_behavior::get_sfm_int_params behavior_flag_=on= "<<behavior_flag_ << std::endl;
+
+		result = get_behavior_sfm_params( center_person->get_best_behavior_to_person( interacting_person->get_id() ) );
+	}
+	return result;
+}
+
+
+/*** predice las trajectorias futuras de TODAS las personas en la escena. ***/
+void Cprediction_behavior::scene_trajectory_prediction(  )
+{
+	//std::cout<<" DO scene_trajectory_prediction(  ) horizon_time_index_= "<<horizon_time_index_<< std::endl;
+
+	// horizon_time_index_=5. salen 25 iter!!! 25*0.2segs=5segs => si va a 0.8m/s => 4m (ventana de 4m al rededor)
+
+	//std::cout << " Entro en Cprediction_behavior::scene_trajectory_prediction"<< std::endl;
+	//std::cout << " horizon_time_index_="<<horizon_time_index_<<"; person_list_.size()="<<person_list_.size()<<"; read_force_map_success_="<<read_force_map_success_<< std::endl;
+	//std::cout << " read_laser_obstacle_success_="<<read_laser_obstacle_success_<<"; robot_in_the_scene_="<<robot_in_the_scene_<<"; laser_obstacle_list_.empty()="<<laser_obstacle_list_.empty()<< std::endl;
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot;
+	for( Cperson_abstract* iit: person_list_ )
+		iit->clear_prediction_trajectory();
+	//std::cout << " antes for"<< std::endl;
+	/*unsigned int t = 0;
+	for( Cperson_abstract* iit: person_list_ )
+	{
+		if(iit->get_id()!=1){
+			std::cout << "ini person. id="<< iit->get_id()<< std::endl;
+			std::cout << "(antes force goal) iit->get_best_dest()="<< std::endl;
+			virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit),
+									&(iit->get_prediction_trajectory()->at(t)) );
+			std::cout << "(antes force persons) virtual_force_goal.fx="<<virtual_force_goal.fx<<"; virtual_force_goal.fy="<<virtual_force_goal.fy<< std::endl;
+			virtual_force_int_person = force_persons_int_virtual( iit, t );
+			std::cout << "virtual_force_int_person.fx="<<virtual_force_int_person.fx<<"; virtual_force_int_person.fy="<<virtual_force_int_person.fy<< std::endl;
+		}
+	}*/
+	//std::cout << "OOOOOOOOOOOOOOOOOOOOOOO horizon_time_index_="<<horizon_time_index_<< std::endl;
+
+
+	for( unsigned int t = 0;  t < horizon_time_index_; ++t)
+	{
+		for( Cperson_abstract* iit: person_list_ )
+		{
+			if ( (iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion))
+			{
+					//1 time step propagation for all people
+					//std::cout << "ini person. id="<< iit->get_id()<< std::endl;
+					//std::cout << "(antes force goal) iit->get_best_dest()="<< std::endl;
+					//iit->get_best_dest().print();
+					//std::cout << "person traj prediction at (t)="<<t<< std::endl;
+					//std::cout<<"; iit->get_prediction_trajectory().empty()="<<iit->get_prediction_trajectory()->empty()<< std::endl;
+					//iit->get_prediction_trajectory()->at(t).print();
+					//std::cout << "person parameters="<<t<< std::endl;
+					//for(unsigned int x = 0;  x < this->get_sfm_params(iit)->size(); ++x){
+					//	std::cout << "this->get_sfm_params(iit)->at("<<x<<")="<<this->get_sfm_params(iit)->at(x)<< std::endl;
+					//}
+					//std::cout << "iit->get_prediction_trajectory()->at(t):"<< std::endl;
+					//iit->get_prediction_trajectory()->at(t).print();
+
+					virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit),
+							&(iit->get_prediction_trajectory()->at(t)) );
+					/*if(iit->get_id()==5){
+						std::cout << std::endl<<std::endl<<std::endl<< std::endl;
+						std::cout << "ini person. id="<< iit->get_id()<< std::endl;
+						std::cout << "(antes force persons) virtual_force_goal.fx="<<virtual_force_goal.fx<<"; virtual_force_goal.fy="<<virtual_force_goal.fy<< std::endl;
+
+					}*/
+					virtual_force_int_person = force_persons_int_virtual( iit, t );
+
+
+					/*if(iit->get_id()==5){
+						std::cout << "virtual_force_int_person.fx="<<virtual_force_int_person.fx<<"; virtual_force_int_person.fy="<<virtual_force_int_person.fy<< std::endl;
+
+					}*/
+
+					// force depending on map to be deprecated in real environments, but still used on simulations
+					if( read_force_map_success_ ){
+						std::cout << " Antes obstacle map"<< std::endl;
+						virtual_force_obstacle = get_force_map( iit->get_prediction_trajectory()->at(t).x,
+															iit->get_prediction_trajectory()->at(t).y ) * 0.5;
+						//std::cout << "virtual_force_obstacle.fx="<<virtual_force_obstacle.fx<<"; virtual_force_obstacle.fy="<<virtual_force_obstacle.fy<< std::endl;
+					}
+
+					if(read_laser_obstacle_success_){
+						//std::cout << " Antes obstacle laser"<< std::endl;
+						virtual_force_obstacle = force_objects_laser_int_prediction( iit , t );
+
+						/*if(iit->get_id()==5){
+						std::cout << "virtual_force_obstacle.fx="<<virtual_force_obstacle.fx<<"; virtual_force_obstacle.fy="<<virtual_force_obstacle.fy<< std::endl;
+						}*/
+					}
+					//robot stays idle, no prediction is done
+					if ( robot_in_the_scene_ )
+					{
+						//std::cout << " Antes robot force"<< std::endl;
+						virtual_force_robot =  iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_),
+							&(iit->get_prediction_trajectory()->at(t)) );
+						//std::cout << "virtual_force_robot.fx="<<virtual_force_robot.fx<<"; virtual_force_robot.fy="<<virtual_force_robot.fy<< std::endl;
+
+					}
+					else
+						virtual_force_robot = Sforce();
+
+					//std::cout << " Antes set_forces_person and prediction"<< std::endl;
+					iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+					//std::cout << "IMPORTANTE IMPORTANTE dt_="<<dt_<<"t"<<t<<"; iit->id="<<iit->get_id()<< std::endl;
+					iit->prediction_propagation(dt_, iit->get_force_person() , t);
+
+					/*if(iit->get_id()==5){
+					std::cout<<" f_tot.fx="<<iit->get_force_person().fx<<"; f_tot.fy="<<iit->get_force_person().fy<< std::endl;
+					iit->get_current_pointV().print();
+					}*/
+
+
+					//std::cout<<" (In Cprediction_behavior) id_person_companion_="<<id_person_companion_<< std::endl;
+					// START: calculate min collision to calculate companion angle of the companion goal (min collision between collision with persons or obstacles.)
+					if((iit->get_id()==id_person_companion_)&&(!calc_goal_companion_with_group_path_pred_)){
+						bool case_dynamic=false;
+						double min_final_collision_distance=100; // 100, if no collision is done!
+						if(distance_to_the_near_person_<min_final_collision_distance){
+							min_final_collision_distance=distance_to_the_near_person_;
+							case_dynamic=true;
+						}
+						if(distance_to_the_near_obsacle_<min_final_collision_distance){
+							min_final_collision_distance=distance_to_the_near_obsacle_;
+							case_dynamic=false;
+						}
+						// calculate angle of collision for the goal of companion!
+						/*bool we_have_collision=false;
+						if(min_final_collision_distance!=100){
+							we_have_collision=true;
+						}*/
+						//std::cout<<" (In Cprediction_behavior) min_final_collision_distance="<<min_final_collision_distance<<"; distance_to_the_near_obsacle_="<<distance_to_the_near_obsacle_<< std::endl;
+						//if(we_have_collision){
+							// calculate angle of collision for the goal of companion!
+							calculate_companion_angle_for_goal_companion( min_final_collision_distance, real_distance_of_companion_between_person_and_robot_, case_dynamic);
+						//}
+
+					}
+
+					// END: calculate min collision to calculate companion angle of the companion goal
+			}
+			//else //robot case: no prediction is done since it is the objective of the planning class.
+		}
+
+	//	std::cout<<" t="<<t<< std::endl;
+	}
+
+
+
+	//std::cout << "Salgo de scene_trajectory_prediction"<< std::endl;
+	/*for( Cperson_abstract* iit: person_list_ )
+	{
+		if(iit->get_id()==id_person_companion_){
+			std::cout << "iit->get_prediction_trajectory()->size() ="<<iit->get_prediction_trajectory()->size()<< std::endl;
+		}
+	}*/
+
+/*std::cout << "  1 INI orientation_person_robot_angles_with_prediction_of_person_companion_[g]: "<< std::endl;
+
+				for(unsigned int y=0;y<orientation_person_robot_angles_pred_.size();y++){
+					std::cout << "    orientation_person_robot_angles_pred_[y]="<<orientation_person_robot_angles_pred_[y]<< std::endl;
+				}
+*/
+
+
+}
+
+
+/***PARA SIMULACION ITERATIVA: predice las trajectorias futuras de TODAS las personas en la escena. ***/
+void Cprediction_behavior::scene_trajectory_prediction_simulation(  )
+{
+	//std::cout << "2222222 Entro en Cprediction_behavior::scene_trajectory_prediction_simulation"<< std::endl;
+
+	if(debug_scene_trajectory_prediction_simulation_){
+		std::cout << " Entro en Cprediction_behavior::scene_trajectory_prediction_simulation"<< std::endl;
+		std::cout << " horizon_time_index_="<<horizon_time_index_<<"; person_list_.size()="<<person_list_.size()<<"; read_force_map_success_="<<read_force_map_success_<< std::endl;
+		std::cout << " read_laser_obstacle_success_="<<read_laser_obstacle_success_<<"; robot_in_the_scene_="<<robot_in_the_scene_<<"; laser_obstacle_list_.empty()="<<laser_obstacle_list_.empty()<< std::endl;
+	}
+
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot;
+	for( Cperson_abstract* iit: person_list_ )
+		iit->clear_prediction_trajectory();
+
+	if(debug_scene_trajectory_prediction_simulation_){
+		std::cout << " antes for  person_list_.size()="<<person_list_.size()<< std::endl;
+	}
+	/*unsigned int t = 0;
+	for( Cperson_abstract* iit: person_list_ )
+	{
+		if(iit->get_id()!=1){
+			std::cout << "ini person. id="<< iit->get_id()<< std::endl;
+			std::cout << "(antes force goal) iit->get_best_dest()="<< std::endl;
+			virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit),
+									&(iit->get_prediction_trajectory()->at(t)) );
+			std::cout << "(antes force persons) virtual_force_goal.fx="<<virtual_force_goal.fx<<"; virtual_force_goal.fy="<<virtual_force_goal.fy<< std::endl;
+			virtual_force_int_person = force_persons_int_virtual( iit, t );
+			std::cout << "virtual_force_int_person.fx="<<virtual_force_int_person.fx<<"; virtual_force_int_person.fy="<<virtual_force_int_person.fy<< std::endl;
+		}
+	}*/
+
+	/*std::cout << " my_id_person_companion_="<<my_id_person_companion_<<"; person_list_.size="<<person_list_.size()<< std::endl;
+	for( Cperson_abstract* iit: person_list_ )
+			{
+			std::cout << "(num of people) ini person. id="<< iit->get_id()<< std::endl;
+			}
+	 */
+
+
+	for( unsigned int t = 0;  t < horizon_time_index_; ++t)
+	{
+		for( Cperson_abstract* iit: person_list_ )
+		{
+			//if ( (iit->get_person_type() == Cperson_abstract::Person) && (iit->get_id()!=id_person_companion_) && (iit->get_id()!=id_second_person_companion_))
+			if ( ((iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion)) && (iit->get_id()!=my_id_person_companion_) ) // Do not predict my own person prediction, as person companion.
+			{ //OJO!!! El robot tendra que entrar siempre en la otra prediccion.
+				//std::cout << "(SI!!!! PREDICTION PERSON) ini person. id="<< iit->get_id()<< std::endl;
+				//std::cout << "ini person. id="<< iit->get_id()<< std::endl;
+				//1 time step propagation for all people
+				if(debug_scene_trajectory_prediction_simulation_){
+					std::cout << "ini person. id="<< iit->get_id()<< std::endl;
+					std::cout << "(antes force goal) iit->get_best_dest()="<< std::endl;
+					iit->get_best_dest().print();
+					std::cout << "person traj prediction at (t)="<<t<< std::endl;
+					std::cout<<"; iit->get_prediction_trajectory().empty()="<<iit->get_prediction_trajectory()->empty()<< std::endl;
+					iit->get_prediction_trajectory()->at(t).print();
+					std::cout << "person parameters="<<t<< std::endl;
+					for(unsigned int x = 0;  x < this->get_sfm_params(iit)->size(); ++x){
+						std::cout << "this->get_sfm_params(iit)->at("<<x<<")="<<this->get_sfm_params(iit)->at(x)<< std::endl;
+					}
+					//std::cout << "iit->get_prediction_trajectory()->at(t):"<< std::endl;
+					iit->get_prediction_trajectory()->at(t).print();
+				}
+
+				//std::cout << "iit->get_id()="<<iit->get_id()<<"; iit->get_current_pointV().x="<<iit->get_current_pointV().x<<"; iit->get_current_pointV().y="<<iit->get_current_pointV().y<<"; iit->get_current_pointV().vx="<<iit->get_current_pointV().vx<<"; iit->get_current_pointV().vy"<<iit->get_current_pointV().vy<< std::endl;
+
+				virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit), &(iit->get_prediction_trajectory()->at(t)),t);
+
+				if(debug_scene_trajectory_prediction_simulation_){
+					std::cout << "iit->get_best_dest().x="<<iit->get_best_dest().x<<"; iit->get_best_dest().y="<<iit->get_best_dest().y<< std::endl;
+					std::cout << "(antes force persons) virtual_force_goal.fx="<<virtual_force_goal.fx<<"; virtual_force_goal.fy="<<virtual_force_goal.fy<< std::endl;
+				}
+				//virtual_force_int_person = force_persons_int_virtual( iit, t );
+
+				std::vector<int> ids_of_persons_in_group1;
+				ids_of_persons_in_group1.push_back(2);  // person with id=2,3 are in the first group
+				//ids_of_persons_in_group1.push_back(3); // puseta como comentario para caso no grupos!
+				//ids_of_persons_in_group1.push_back(6);
+				std::vector<int> ids_of_persons_in_group2;
+				ids_of_persons_in_group2.push_back(4);  // person with id=4,5 are in the first group
+				//ids_of_persons_in_group2.push_back(5);
+				if((iit->get_id()==2)||(iit->get_id()==3)){//||(iit->get_id()==6)){
+					//std::cout << " id=2 y id=3" << std::endl;
+					virtual_force_int_person = force_persons_int2( iit ,ids_of_persons_in_group1);
+				}else if((iit->get_id()==4)||(iit->get_id()==5)){
+					//std::cout << " id=4 y id=5" << std::endl;
+					virtual_force_int_person = force_persons_int2( iit ,ids_of_persons_in_group2);
+				}else if((iit->get_id()==id_person_companion_)||(iit->get_id()==id_second_person_companion_)){ // id_person_companion_==1 o otro...
+					//std::cout << " id_person_companion_="<<id_person_companion_<<"; id_second_person_companion_="<<id_second_person_companion_ << std::endl;
+					//virtual_force_int_person = force_persons_int_virtual( iit ,t);
+					virtual_force_int_person = force_persons_int_virtual_person_comp( iit ,t);
+
+				}else{
+					//std::cout << "in else antes virtual_force_int_person" << std::endl;
+					virtual_force_int_person = force_persons_int2( iit, ids_of_persons_in_group1 );
+				}
+
+				if(debug_scene_trajectory_prediction_simulation_){
+					std::cout << "virtual_force_int_person.fx="<<virtual_force_int_person.fx<<"; virtual_force_int_person.fy="<<virtual_force_int_person.fy<< std::endl;
+				}
+				// force depending on map to be deprecated in real environments, but still used on simulations
+				if( read_force_map_success_ ){
+
+					if(debug_scene_trajectory_prediction_simulation_){
+						std::cout << " Antes obstacle map"<< std::endl;
+					}
+
+					virtual_force_obstacle = get_force_map( (iit)->get_current_pointV().x, (iit)->get_current_pointV().y ) * 0.5;
+
+					if(debug_scene_trajectory_prediction_simulation_){
+						std::cout << "virtual_force_obstacle.fx="<<virtual_force_obstacle.fx<<"; virtual_force_obstacle.fy="<<virtual_force_obstacle.fy<< std::endl;
+					}
+				}
+
+				if(read_laser_obstacle_success_){ // ver si la he de cambiar como en el Scene_sim anterior.
+					if(debug_scene_trajectory_prediction_simulation_){
+						std::cout << " Antes obstacle laser"<< std::endl;
+					}
+					virtual_force_obstacle = force_objects_laser_int_prediction( iit , t );
+
+					if(debug_scene_trajectory_prediction_simulation_){
+						std::cout << " 3virtual_force_obstacle.fx="<<virtual_force_obstacle.fx<<"; virtual_force_obstacle.fy="<<virtual_force_obstacle.fy<< std::endl;
+					}
+				}
+				//robot stays idle, no prediction is done
+				if ( robot_in_the_scene_ )
+				{ // ver si la he de cambiar como en el Scene_sim anterior.
+					if(debug_scene_trajectory_prediction_simulation_){
+						std::cout << " Antes robot force"<< std::endl;
+					}
+					if((iit->get_id()!=id_person_companion_)||(iit->get_id()!=id_second_person_companion_)){
+					virtual_force_robot =  iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_),
+						&(iit->get_prediction_trajectory()->at(t)) );
+					}else{
+						virtual_force_robot =Sforce();
+					}
+
+					if(debug_scene_trajectory_prediction_simulation_){
+						std::cout << " 2 virtual_force_robot.fx="<<virtual_force_robot.fx<<"; virtual_force_robot.fy="<<virtual_force_robot.fy<< std::endl;
+					}
+				}
+				else
+					virtual_force_robot = Sforce();
+
+				if(debug_scene_trajectory_prediction_simulation_){
+					std::cout << " Antes set_forces_person and prediction; dt_="<<dt_<< std::endl;
+				}
+
+				iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+				iit->prediction_propagation(dt_, iit->get_force_person() , t);
+
+
+			}else{
+				//else //robot case: no prediction is done since it is the objective of the planning class.
+				//std::cout << "(NO PREDICTION PERSON) ini person. id="<< iit->get_id()<< std::endl;
+			}
+
+		}
+	}
+
+
+
+	if(debug_scene_trajectory_prediction_simulation_){
+		std::cout << "Salgo de scene_trajectory_prediction_simulation"<< std::endl;
+	}
+}
+
+/***incluye fuerzas de obst estaticos detectados por el laser en la prediccion. ***/
+Sforce Cprediction_behavior::force_objects_laser_int_prediction( Cperson_abstract* person, unsigned int prediction_index)
+{
+	Sforce force_res;
+	const SpointV_cov* virtual_current_point;
+	SpointV_cov actual_person_Spoint;
+	if ( prediction_index == 0)
+	{
+		virtual_current_point = &(person->get_current_pointV());
+		actual_person_Spoint=person->get_current_pointV();
+	}
+	else
+	{
+		virtual_current_point = &(person->get_prediction_trajectory()->at(prediction_index) );
+		actual_person_Spoint=person->get_prediction_trajectory()->at(prediction_index);
+	}
+	distance_to_the_near_obsacle_=100; // firt distance. If dist==100 we do not have collisions!
+
+	for( Spoint iit : laser_obstacle_list_)
+	{
+		//there is a list for persons and another for robot(s). This function is for obstacles
+
+		// START: calculate min collision to calculate companion angle of the companion goal
+		if((person->get_id()==id_person_companion_)&&(!calc_goal_companion_with_group_path_pred_)){
+			//std::cout << " IN CALC goal companion PREDICTION"  << std::endl;
+			Spoint centro_person_robot2;
+			double angle1=orientation_person_robot_angles_pred_[0];
+			centro_person_robot2.x=actual_person_Spoint.x+(real_distance_of_companion_between_person_and_robot_/2)*cos(angle1);//+ theta1);
+			centro_person_robot2.y=actual_person_Spoint.y+(real_distance_of_companion_between_person_and_robot_/2)*sin(angle1);//+ theta1);
+
+
+			//double actual_collision_distance_with_obstacle=actual_person_Spoint.distance(iit);
+			double actual_collision_distance_with_obstacle=centro_person_robot2.distance(iit);
+			//std::cout << " actual_collision_distance_with_obstacle=" <<actual_collision_distance_with_obstacle << std::endl;
+			if(actual_collision_distance_with_obstacle<threshold_distance_collision_calculate_companion_angle_){
+				//std::cout << "1 distance_to_the_near_obsacle_=" <<distance_to_the_near_obsacle_ << std::endl;
+				if(distance_to_the_near_obsacle_>actual_collision_distance_with_obstacle){
+					//std::cout << "2 distance_to_the_near_obsacle_=" <<distance_to_the_near_obsacle_ << std::endl;
+					distance_to_the_near_obsacle_=actual_collision_distance_with_obstacle;
+					//std::cout << "3 distance_to_the_near_obsacle_=" <<distance_to_the_near_obsacle_ << std::endl;
+				}
+			}
+
+		}
+		// END: calculate min collision to calculate companion angle of the companion goal
+
+		//if( person->get_current_pointV().distance2( iit ) < 25.0)//square distance 5^2
+		if( actual_person_Spoint.distance2( iit ) < 25.0)//square distance 5^2
+		{
+
+			Sforce f_act=person->force_sphe( iit , this->get_sfm_int_params(person) , virtual_current_point );
+			//if((f_act.fx>0.5)||(f_act.fy>0.5)){
+			//std::cout << " f_act.fx=" <<f_act.fx<<"; f_act.fy="<<f_act.fy<< std::endl;
+			//}
+			force_res += f_act;
+		}
+	}
+	return force_res;
+
+}
+/***incluye fuerzas de otras personas  en la prediccion. ***/
+Sforce Cprediction_behavior::force_persons_int_virtual(Cperson_abstract* center , unsigned long t)
+{
+	//std::cout << " ENTRO EN =>>>> force_persons_int_virtual="  << std::endl;
+
+	Sforce force_res;
+	SpointV_cov person_int;
+
+	distance_to_the_near_person_=100; // firt distance. If dist==100 we do not have collisions!
+
+    for( auto iit : person_list_)
+    {
+
+    	if(iit->get_id()!=my_id_person_companion_){ // TODO: ojo, puede causar problemas en real.
+    												// no causa problemas al tener por defecto my_id_person_companion_=0. En el caso del robot.
+			//std::cout << "(1)iit->get_prediction_trajectory( )->size="<<iit->get_prediction_trajectory( )->size()<<"; iit->get_id="<<iit->get_id()<<"; t="<<t << std::endl; // peta aquí en (1)
+
+			person_int = iit->get_prediction_trajectory( )->at(t);
+			//std::cout << "(2); iit->id="<<iit->get_id() <<"; center->get_id()="<<center->get_id()<< std::endl;
+			if(((iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion)) &&
+				(*center != *iit) && (center->get_prediction_trajectory()->at(t)
+				.distance( person_int ) < 15.0))
+			{
+				//std::cout << "(3)" << std::endl;
+			force_res += center->force( person_int ,  this->get_sfm_int_params(center,iit),
+					&(center->get_prediction_trajectory()->at(t)) );
+			//std::cout << "prediction, calculation of force using " << center->get_best_behavior_to_person( iit->get_id() ) << std::endl;
+
+
+			// START: calculate min collision to calculate companion angle of the companion goal
+			if(((center->get_id()==id_person_companion_)||(center->get_id()==id_second_person_companion_))&&(!calc_goal_companion_with_group_path_pred_)){
+			//	std::cout << " IN CALC goal companion PREDICTION; center->get_id()="<<center->get_id()  << std::endl;
+				Spoint centro_person_robot2;
+
+				double angle1=orientation_person_robot_angles_pred_[0];
+				//std::cout << " IN CALC goal companion PREDICTION; angle1="<<angle1  << std::endl;
+
+				centro_person_robot2.x=center->get_prediction_trajectory()->at(t).x+(real_distance_of_companion_between_person_and_robot_/2)*cos(angle1);//+ theta1);
+				centro_person_robot2.y=center->get_prediction_trajectory()->at(t).y+(real_distance_of_companion_between_person_and_robot_/2)*sin(angle1);//+ theta1);
+
+				//double actual_collision_distance_with_person=center->get_prediction_trajectory()->at(t).distance(person_int);
+				double actual_collision_distance_with_person=centro_person_robot2.distance(person_int);
+
+			//	std::cout << " actual_collision_distance_with_person=" <<actual_collision_distance_with_person << std::endl;
+				if(actual_collision_distance_with_person<threshold_distance_collision_calculate_companion_angle_){
+					if(distance_to_the_near_person_>actual_collision_distance_with_person){
+						distance_to_the_near_person_=actual_collision_distance_with_person;
+					}
+				}
+
+			}
+			// END: calculate min collision to calculate companion angle of the companion goal
+
+			}
+    	}
+
+    }
+  // std::cout << "(4)" << std::endl;
+	return force_res;
+}
+
+///
+
+
+/***incluye fuerzas respecto a la persona que acompaña el robot  en la prediccion. ***/
+Sforce Cprediction_behavior::force_persons_int_virtual_person_comp(Cperson_abstract* center , unsigned long t)
+{
+	//std::cout << " ENTRO EN =>>>> force_persons_int_virtual="  << std::endl;
+
+	Sforce force_res;
+	SpointV_cov person_int;
+
+	distance_to_the_near_person_=100; // firt distance. If dist==100 we do not have collisions!
+
+    for( auto iit : person_list_)
+    {
+
+    	if(iit->get_id()!=my_id_person_companion_){ // TODO: ojo, puede causar problemas en real.
+    												// no causa problemas al tener por defecto my_id_person_companion_=0. En el caso del robot.
+			//std::cout << "(1)iit->get_prediction_trajectory( )->size="<<iit->get_prediction_trajectory( )->size()<<"; iit->get_id="<<iit->get_id()<<"; t="<<t << std::endl; // peta aquí en (1)
+
+			person_int = iit->get_prediction_trajectory( )->at(t);
+			//std::cout << "(2); iit->id="<<iit->get_id() <<"; center->get_id()="<<center->get_id()<< std::endl;
+			if(((iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion)) &&
+				(*center != *iit) && (center->get_prediction_trajectory()->at(t)
+				.distance( person_int ) < 15.0))
+			{
+			//	std::cout << "(3)" << std::endl;
+			force_res += center->force( person_int ,  this->get_sfm_int_params(center,iit),
+					&(center->get_prediction_trajectory()->at(t)) );
+			std::cout << "prediction, calculation of force using " << center->get_best_behavior_to_person( iit->get_id() ) << std::endl;
+
+
+			// START: calculate min collision to calculate companion angle of the companion goal
+			/*if(((center->get_id()==id_person_companion_)||(center->get_id()==id_second_person_companion_))&&(!calc_goal_companion_with_group_path_pred_)){
+				std::cout << " IN CALC goal companion PREDICTION; center->get_id()="<<center->get_id()  << std::endl;
+				Spoint centro_person_robot2;
+
+				double angle1=orientation_person_robot_angles_pred_[0];
+				std::cout << " IN CALC goal companion PREDICTION; angle1="<<angle1  << std::endl;
+
+				centro_person_robot2.x=center->get_prediction_trajectory()->at(t).x+(real_distance_of_companion_between_person_and_robot_/2)*cos(angle1);//+ theta1);
+				centro_person_robot2.y=center->get_prediction_trajectory()->at(t).y+(real_distance_of_companion_between_person_and_robot_/2)*sin(angle1);//+ theta1);
+
+				//double actual_collision_distance_with_person=center->get_prediction_trajectory()->at(t).distance(person_int);
+				double actual_collision_distance_with_person=centro_person_robot2.distance(person_int);
+
+				std::cout << " actual_collision_distance_with_person=" <<actual_collision_distance_with_person << std::endl;
+				if(actual_collision_distance_with_person<threshold_distance_collision_calculate_companion_angle_){
+					if(distance_to_the_near_person_>actual_collision_distance_with_person){
+						distance_to_the_near_person_=actual_collision_distance_with_person;
+					}
+				}
+
+			}*/
+			// END: calculate min collision to calculate companion angle of the companion goal
+
+			}
+    	}
+
+    }
+   //std::cout << "(4)" << std::endl;
+	return force_res;
+}
+
+////
+
+/**** cambia el tiempo horizonte del local planner.***/
+void Cprediction_behavior::set_horizon_time( double t )
+{
+	horizon_time_ = t;
+	horizon_time_index_ =  (unsigned int) (horizon_time_/dt_) ;
+}
+
+void Cprediction_behavior::clear_scene()
+{
+
+}
+
+
+//calculates the current forces in the scene and updates each of the Cpersons and Crobot with
+//instantaneous force information according to observations (current positions)
+void Cprediction_behavior::calculate_current_forces( int pr_force_mode, Sforce companion_force_Zanlungo,Sforce goal, Sforce persons, Sforce obstacles, double alpa_comp)
+{
+
+	//std::cout << "IN calculate_current_forces="<< std::endl;
+
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot;
+
+
+	for( Cperson_abstract* iit: person_list_ )
+	{
+		if ( (iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion))
+		{
+			//1 time step propagation for all people
+			virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit) );
+			virtual_force_int_person = Cscene_abstract::force_persons_int( iit);
+			// force depending on map to be deprecated in real environments, but still used on simulations
+			if( read_force_map_success_ )
+				virtual_force_obstacle = get_force_map( iit->get_current_pointV().x,
+						iit->get_current_pointV().y ) * 0.5;
+			if(read_laser_obstacle_success_)
+				virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( iit  );
+			//robot stays idle, no prediction is done
+			if ( robot_in_the_scene_ )
+			{
+				switch( pr_force_mode )
+				{
+				case 0: //deterministic force, classical definition
+					//std::cout << "force robot 0="<< std::endl;
+					//virtual_force_robot = iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()) );
+					break;
+				case 1: //probabilistic force, sampling around the elipsoid
+					//std::cout << "force robot 1="<< std::endl;
+					virtual_force_robot = iit->force_sphe_prob( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()) );
+					break;
+				case 2: //probabilistic force, mahalanobis distance
+					//std::cout << "force robot 2="<< std::endl;
+					virtual_force_robot = iit->force_sphe_mahalanobis( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()));
+					break;
+				case 3: //probabilistic force, worst case scenario: covaraince ellipsoid nearer to the center point
+					//std::cout << "force robot 3="<< std::endl;
+					virtual_force_robot = iit->force_sphe_worst( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()));
+					break;
+				}
+			}
+			else
+				virtual_force_robot = Sforce();
+			iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+		}
+	}
+	//robot update, if any
+	if ( robot_in_the_scene_ )
+	{
+		virtual_force_goal = robot_->force_goal(  robot_->get_best_dest() , this->get_sfm_params(robot_) );
+		virtual_force_int_person = Cscene_abstract::force_persons_int( robot_ );
+		// force depending on map to be deprecated in real environments, but still used on simulations
+		if( read_force_map_success_ )
+			virtual_force_obstacle = get_force_map( robot_->get_current_pointV().x,
+					robot_->get_current_pointV().y ) * 0.5;
+		if(read_laser_obstacle_success_)
+			virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( robot_  );
+
+		double fobos_Xmod=sqrt(virtual_force_obstacle.fx*virtual_force_obstacle.fx);
+		double fobos_Ymod=sqrt(virtual_force_obstacle.fy*virtual_force_obstacle.fy);
+		double signo_x, signo_y;
+
+		double f_obst_max_x_=0.1;
+		double f_obst_max_y_=0.1;
+		if (virtual_force_obstacle.fx > 0){
+			signo_x=1;
+		}else{
+			signo_x=-1;
+		}
+		if (virtual_force_obstacle.fy > 0){
+			signo_y=1;
+		}else{
+			signo_y=-1;
+		}
+		//std::cout << " out to máx force virtual_force_obstacle.fx="<<virtual_force_obstacle.fx<<"; virtual_force_obstacle.fy="<<virtual_force_obstacle.fy<< std::endl;
+		if(fobos_Xmod>f_obst_max_x_){
+			virtual_force_obstacle.fx=signo_x*f_obst_max_x_;
+			//std::cout << " Enter to máx virtual_force_obstacle; virtual_force_obstacle.fx="<<virtual_force_obstacle.fx<< std::endl;
+		}
+
+		if(fobos_Ymod>f_obst_max_y_){
+			virtual_force_obstacle.fy=signo_y*f_obst_max_y_;
+			//std::cout << " Enter to máx force; virtual_force_obstacle.fy="<<virtual_force_obstacle.fy<< std::endl;
+		}
+		//std::cout << "(FINAL FORCE) f_obs.fx="<<f_obs.fx<<"; f_obs.fy="<<f_obs.fy<< std::endl;
+		// FIN Limitar fuerza obstaculos cuando hay muchos solapados
+		//if(debug_zanlungo_){
+		//	std::cout << " Zanlungo model after forces"<<std::endl;
+		//	std::cout << "(force_goal) f_goal.fx="<<f_goal.fx<<"; f_goal.fy="<<f_goal.fy<<std::endl;
+		//}
+
+
+
+		virtual_force_robot = Sforce();
+		robot_->set_forces_person( virtual_force_goal*alpa_comp, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+		robot_->set_forces_person_companion( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle, companion_force_Zanlungo );
+
+	}
+
+	//std::cout << "OUT calculate_current_forces="<< std::endl;
+}
+
+
+//calculates the current forces in the scene and updates each of the Cpersons and Crobot with
+//instantaneous force information according to observations (current positions)
+void Cprediction_behavior::calculate_current_forces_companion( int pr_force_mode , unsigned int id_person_companion, bool person_reactive, Cperson_abstract::companion_reactive type_rec_akp, double act_min_companion_angle)
+{
+
+	// TODO: no se si este robot tendria que ser person companion...
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot, virtual_force_companion;
+	SpointV_cov person;
+	Sdestination person_goal;
+	//double robot_person_proximity_distance=2;
+	//double robot_person_proximity_tolerance=1;
+
+	for( Cperson_abstract* iit: person_list_ )
+	{
+		if ( (iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion))
+		{
+			//1 time step propagation for all people
+			virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit) );
+			virtual_force_int_person = Cscene_abstract::force_persons_int( iit);
+			// force depending on map to be deprecated in real environments, but still used on simulations
+			if( read_force_map_success_ )
+				virtual_force_obstacle = get_force_map( iit->get_current_pointV().x,
+						iit->get_current_pointV().y ) * 0.5;
+			if(read_laser_obstacle_success_)
+				virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( iit  );
+			//robot stays idle, no prediction is done
+
+			if ( robot_in_the_scene_ )
+			{
+				if( iit->get_id()!=id_person_companion){
+					switch( pr_force_mode )
+					{
+					case 0: //deterministic force, classical definition
+						virtual_force_robot = iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()) );
+						break;
+					case 1: //probabilistic force, sampling around the elipsoid
+						virtual_force_robot = iit->force_sphe_prob( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()) );
+						break;
+					case 2: //probabilistic force, mahalanobis distance
+						virtual_force_robot = iit->force_sphe_mahalanobis( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()));
+						break;
+					case 3: //probabilistic force, worst case scenario: covaraince ellipsoid nearer to the center point
+						virtual_force_robot = iit->force_sphe_worst( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()));
+						break;
+					}
+				}else{
+					/*double distance_person_robot=robot_->get_current_pointV().distance((Spoint) iit->get_current_pointV());
+					if(distance_person_robot<(robot_person_proximity_distance-robot_person_proximity_tolerance)){
+						switch( pr_force_mode )
+						{
+						case 0: //deterministic force, classical definition
+							virtual_force_robot = iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()) );
+							break;
+						case 1: //probabilistic force, sampling around the elipsoid
+							virtual_force_robot = iit->force_sphe_prob( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()) );
+							break;
+						case 2: //probabilistic force, mahalanobis distance
+							virtual_force_robot = iit->force_sphe_mahalanobis( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()));
+							break;
+						case 3: //probabilistic force, worst case scenario: covaraince ellipsoid nearer to the center point
+							virtual_force_robot = iit->force_sphe_worst( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()));
+							break;
+						}
+					}else{
+						// no hay force rbot-perosn, companion.
+					}*/
+				}
+			}
+			else
+				virtual_force_robot = Sforce();
+			iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+
+			if(iit->get_id()==id_person_companion){
+				person = iit->get_current_pointV();//person_obj->get_planning_trajectory()->at(parent_vertex);
+				person_goal=iit->get_best_dest();
+			}
+
+		}
+	}
+	//robot update, if any
+	if ( robot_in_the_scene_ )
+	{
+		virtual_force_goal = robot_->force_goal(  robot_->get_best_dest() , this->get_sfm_params(robot_) );
+		virtual_force_int_person = Cscene_abstract::force_persons_int_companion( robot_ , id_person_companion,person_reactive, type_rec_akp);
+		// force depending on map to be deprecated in real environments, but still used on simulations
+		if( read_force_map_success_ )
+			virtual_force_obstacle = get_force_map( robot_->get_current_pointV().x,
+					robot_->get_current_pointV().y ) * 0.5;
+		if(read_laser_obstacle_success_)
+			virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( robot_  );
+		virtual_force_robot = Sforce();
+
+		//Cperson_abstract* person_obj;
+		//find_person(id_person_companion_ , &person_obj);
+		SpointV_cov robot=robot_->get_current_pointV();
+		SpointV_cov robot_center_traj_ideal_position=person;
+		double angle = atan2(robot.y-person.y,robot.x-person.x);
+		double theta = atan2(person_goal.y-person.y,person_goal.x-person.x);
+		//double act_min_companion_angle=orientation_person_robot_angles_[parent_vertex];
+		if(diffangle(theta,angle)<0){
+			robot_center_traj_ideal_position.x+=(2/2)*cos(theta+(act_min_companion_angle*(3.14/180)));
+			robot_center_traj_ideal_position.y+=(2/2)*sin(theta+(act_min_companion_angle*(3.14/180)));
+			//person_companion_goal.x+=2*cos(theta+(act_min_companion_angle*(3.14/180)));//1.5*cos(theta+(act_min_companion_angle*(3.14/180)));
+			//person_companion_goal.y+=2*sin(theta+(act_min_companion_angle*(3.14/180)));//1.5*sin(theta+(act_min_companion_angle*(3.14/180)));
+		}else{
+			robot_center_traj_ideal_position.x+=(2/2)*cos(theta-(act_min_companion_angle*(3.14/180)));
+			robot_center_traj_ideal_position.y+=(2/2)*sin(theta-(act_min_companion_angle*(3.14/180)));
+			//person_companion_goal.x+=2*cos(theta-(act_min_companion_angle*(3.14/180)));//1.5*cos(theta-(act_min_companion_angle*(3.14/180)));
+			//person_companion_goal.y+=2*sin(theta-(act_min_companion_angle*(3.14/180)));//1.5*sin(theta-(act_min_companion_angle*(3.14/180)));
+		}
+		Sdestination robot_companion_dest(0.0, robot_center_traj_ideal_position.x, robot_center_traj_ideal_position.y, 1.0);
+		virtual_force_companion=robot_->force_goal(robot_companion_dest,this->get_sfm_params(robot_));
+
+		if(debug_antes_subgoals_entre_AKP_goals_){
+			std::cout << std::endl;
+			std::cout << std::endl;
+			std::cout << "(MARKER!!!!  virtual_force_companion.fx="<<virtual_force_companion.fx<<"; virtual_force_companion.fy="<<virtual_force_companion.fy<< std::endl;
+			std::cout << "(MARKER!!!!  robot_companion_dest.x="<<robot_companion_dest.x<<"; robot_companion_dest.y="<<robot_companion_dest.y<< std::endl;
+			std::cout << std::endl;
+			std::cout << std::endl;
+		}
+		robot_->set_companion_force_goal(robot_companion_dest);
+		robot_->set_forces_person_companion( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle, virtual_force_companion );
+	}
+}
+
+
+
+//calculates the current forces in the scene and updates each of the Cpersons and Crobot with
+//instantaneous force information according to observations (current positions)
+void Cprediction_behavior::calculate_current_forces_companion2( int pr_force_mode , unsigned int id_person_companion, bool person_reactive, Cperson_abstract::companion_reactive type_rec_akp, double act_min_companion_angle, Sforce goal, Sforce persons, Sforce obstacles, Sforce companion_person_goal, double &other_people_cost_due_to_robot, double &companion_person_cost_due_to_robot)
+{
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot, virtual_force_robot_companion_person, virtual_force_companion;
+	SpointV_cov person;
+	Sdestination person_goal;
+	//double robot_person_proximity_distance=2;
+	//double robot_person_proximity_tolerance=1;
+
+	for( Cperson_abstract* iit: person_list_ )
+	{
+		if ( (iit->get_person_type() == Cperson_abstract::Person)||(iit->get_person_type() == Cperson_abstract::Person_companion))
+		{
+			//1 time step propagation for all people
+			virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit) );
+			virtual_force_int_person = Cscene_abstract::force_persons_int( iit);
+			// force depending on map to be deprecated in real environments, but still used on simulations
+			if( read_force_map_success_ )
+				virtual_force_obstacle = get_force_map( iit->get_current_pointV().x,
+						iit->get_current_pointV().y ) * 0.5;
+			if(read_laser_obstacle_success_)
+				virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( iit  );
+			//robot stays idle, no prediction is done
+
+			if ( robot_in_the_scene_ )
+			{
+				if( iit->get_id()!=id_person_companion){
+					switch( pr_force_mode )
+					{
+					case 0: //deterministic force, classical definition
+						virtual_force_robot = iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()) );
+						break;
+					case 1: //probabilistic force, sampling around the elipsoid
+						virtual_force_robot = iit->force_sphe_prob( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()) );
+						break;
+					case 2: //probabilistic force, mahalanobis distance
+						virtual_force_robot = iit->force_sphe_mahalanobis( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()));
+						break;
+					case 3: //probabilistic force, worst case scenario: covaraince ellipsoid nearer to the center point
+						virtual_force_robot = iit->force_sphe_worst( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()));
+						break;
+					}
+				}else{
+					//double distance_person_robot=robot_->get_current_pointV().distance((Spoint) iit->get_current_pointV());
+					//if(distance_person_robot<(robot_person_proximity_distance-robot_person_proximity_tolerance)){
+					switch( pr_force_mode )
+					{
+						case 0: //deterministic force, classical definition
+							virtual_force_robot_companion_person = iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()) );
+							break;
+						case 1: //probabilistic force, sampling around the elipsoid
+							virtual_force_robot_companion_person = iit->force_sphe_prob( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()) );
+							break;
+						case 2: //probabilistic force, mahalanobis distance
+							virtual_force_robot_companion_person = iit->force_sphe_mahalanobis( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()));
+							break;
+						case 3: //probabilistic force, worst case scenario: covaraince ellipsoid nearer to the center point
+							virtual_force_robot_companion_person = iit->force_sphe_worst( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()));
+							break;
+					}
+					//}else{
+					// no hay force rbot-perosn, companion.
+					//}
+				}
+			}
+			else
+				virtual_force_robot = Sforce();
+			iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+
+			if(iit->get_id()==id_person_companion){
+				person = iit->get_current_pointV();//person_obj->get_planning_trajectory()->at(parent_vertex);
+				person_goal=iit->get_best_dest();
+			}
+
+		}
+	}
+
+	other_people_cost_due_to_robot=virtual_force_robot.module2();
+	companion_person_cost_due_to_robot=virtual_force_robot_companion_person.module2();
+
+	//robot update, if any
+	if ( robot_in_the_scene_ )
+	{
+
+		if( (Cperson_abstract::Reactiva_repulsive==type_rec_akp)||(Cperson_abstract::Reactive_atractive==type_rec_akp)){
+			virtual_force_goal = robot_->force_goal(  robot_->get_best_dest() , this->get_sfm_params(robot_) );
+			virtual_force_int_person = Cscene_abstract::force_persons_int_companion( robot_ , id_person_companion,person_reactive, type_rec_akp);
+			// force depending on map to be deprecated in real environments, but still used on simulations
+			if( read_force_map_success_ )
+				virtual_force_obstacle = get_force_map( robot_->get_current_pointV().x,
+						robot_->get_current_pointV().y ) * 0.5;
+			if(read_laser_obstacle_success_)
+				virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( robot_  );
+			virtual_force_robot = Sforce();
+
+			//Cperson_abstract* person_obj;
+			//find_person(id_person_companion_ , &person_obj);
+			// Return to calculate companion_force
+			SpointV_cov robot=robot_->get_current_pointV();
+			SpointV_cov robot_center_traj_ideal_position=person;
+			double angle = atan2(robot.y-person.y,robot.x-person.x);
+			double theta = atan2(person_goal.y-person.y,person_goal.x-person.x);
+			//double act_min_companion_angle=orientation_person_robot_angles_[parent_vertex];
+			if(diffangle(theta,angle)<0){
+				robot_center_traj_ideal_position.x+=(2/2)*cos(theta+(act_min_companion_angle*(3.14/180)));
+				robot_center_traj_ideal_position.y+=(2/2)*sin(theta+(act_min_companion_angle*(3.14/180)));
+				//person_companion_goal.x+=2*cos(theta+(act_min_companion_angle*(3.14/180)));//1.5*cos(theta+(act_min_companion_angle*(3.14/180)));
+				//person_companion_goal.y+=2*sin(theta+(act_min_companion_angle*(3.14/180)));//1.5*sin(theta+(act_min_companion_angle*(3.14/180)));
+			}else{
+				robot_center_traj_ideal_position.x+=(2/2)*cos(theta-(act_min_companion_angle*(3.14/180)));
+				robot_center_traj_ideal_position.y+=(2/2)*sin(theta-(act_min_companion_angle*(3.14/180)));
+				//person_companion_goal.x+=2*cos(theta-(act_min_companion_angle*(3.14/180)));//1.5*cos(theta-(act_min_companion_angle*(3.14/180)));
+				//person_companion_goal.y+=2*sin(theta-(act_min_companion_angle*(3.14/180)));//1.5*sin(theta-(act_min_companion_angle*(3.14/180)));
+			}
+			Sdestination robot_companion_dest(0.0, robot_center_traj_ideal_position.x, robot_center_traj_ideal_position.y, 1.0);
+			virtual_force_companion=robot_->force_goal(robot_companion_dest,this->get_sfm_params(robot_));
+
+			if(debug_antes_subgoals_entre_AKP_goals_){
+				std::cout << std::endl;
+				std::cout << std::endl;
+				std::cout << "(MARKER!!!!  virtual_force_companion.fx="<<virtual_force_companion.fx<<"; virtual_force_companion.fy="<<virtual_force_companion.fy<< std::endl;
+				std::cout << "(MARKER!!!!  robot_companion_dest.x="<<robot_companion_dest.x<<"; robot_companion_dest.y="<<robot_companion_dest.y<< std::endl;
+				std::cout << std::endl;
+				std::cout << std::endl;
+			}
+			robot_->set_companion_force_goal(robot_companion_dest);
+			robot_->set_forces_person_companion( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle, virtual_force_companion );
+		}else{
+			// Sforce goal, Sforce persons, Sforce obstacles, Sforce companion_person_goal
+			virtual_force_robot = Sforce();
+			robot_->set_forces_person_companion( goal, persons, virtual_force_robot, obstacles, companion_person_goal);
+
+		}
+
+
+	}
+}
+
+/*   */
+//calculates the current forces in the scene and updates each of the Cpersons and Crobot with
+//instantaneous force information according to observations (current positions)
+void Cprediction_behavior::calculate_current_forces_companion2_for_person_companion_akp( int pr_force_mode , unsigned int id_person_companion, bool person_reactive, Cperson_abstract::companion_reactive type_rec_akp, double act_min_companion_angle, Sforce goal, Sforce persons, Sforce obstacles, Sforce companion_person_goal, double &other_people_cost_due_to_robot, double &companion_person_cost_due_to_robot)
+{
+	//std::cout << "IN (1) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+	SpointV_cov virtual_next_pose;
+	Sforce virtual_force_goal, virtual_force_int_person, virtual_force_obstacle, virtual_force_robot;
+
+	for( Cperson_abstract* iit: person_list_ )
+	{
+		//std::cout << "IN (2) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+
+		if (( iit->get_person_type() == Cperson_abstract::Person)||( iit->get_person_type() == Cperson_abstract::Person_companion))
+		{
+
+			//std::cout << "IN (3) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+			if(iit->get_id()==id_person_companion){
+				//std::cout << "IN (4) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+				//1 time step propagation for all people
+				virtual_force_goal = iit->force_goal(  iit->get_best_dest() , this->get_sfm_params(iit) );
+
+				//std::cout << "IN (5) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+				virtual_force_int_person = Cscene_abstract::force_persons_int( iit);
+				//std::cout << "IN (6) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+				// force depending on map to be deprecated in real environments, but still used on simulations
+				if( read_force_map_success_ )
+					virtual_force_obstacle = get_force_map( iit->get_current_pointV().x,
+							iit->get_current_pointV().y ) * 0.5;
+				if(read_laser_obstacle_success_)
+					virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( iit  );
+				//robot stays idle, no prediction is done
+				//std::cout << "IN (7) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+				if ( robot_in_the_scene_ ) // de momento así... luego ya veré...
+				{
+					//std::cout << "IN (8) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+					switch( pr_force_mode )
+					{
+					case 0: //deterministic force, classical definition
+						virtual_force_robot = iit->force( robot_->get_current_pointV() , this->get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()) );
+						break;
+					case 1: //probabilistic force, sampling around the elipsoid
+						virtual_force_robot = iit->force_sphe_prob( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()) );
+						break;
+					case 2: //probabilistic force, mahalanobis distance
+						virtual_force_robot = iit->force_sphe_mahalanobis( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_), &(iit->get_current_pointV()));
+						break;
+					case 3: //probabilistic force, worst case scenario: covaraince ellipsoid nearer to the center point
+						virtual_force_robot = iit->force_sphe_worst( robot_->get_current_pointV(), get_sfm_int_params(iit,robot_),&(iit->get_current_pointV()));
+						break;
+					}
+					//std::cout << "IN (9) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+				}
+				else
+					virtual_force_robot = Sforce();
+
+				//std::cout << "IN (10) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+				iit->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle );
+				//std::cout << "IN (11) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+			}
+		}
+	}
+	//std::cout << "IN (12) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+	//robot update, if any
+	if ( robot_in_the_scene_ ) // este no es necesario, pq solo quiero los de la person companion.
+	{ // cuando llame a esta siempre quiero este update!
+	//	std::cout << "IN (13) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+		virtual_force_goal = person_companion_->force_goal(  person_companion_->get_best_dest() , this->get_sfm_params(robot_) ); //robot_->force_goal(  robot_->get_best_dest() , this->get_sfm_params(robot_) );
+		//std::cout << "IN (14) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+		bool person_companion_esquip_track_person_companion=true;
+		virtual_force_int_person = Cscene_abstract::force_persons_int( person_companion_, person_companion_esquip_track_person_companion ); // mirar a ver si hay que cambiar algo de esta función o hacer otra similar.
+		// force depending on map to be deprecated in real environments, but still used on simulations
+		//std::cout << "IN (15) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+		if( read_force_map_success_ )
+			virtual_force_obstacle = get_force_map( person_companion_->get_current_pointV().x,
+					person_companion_->get_current_pointV().y ) * 0.5;
+		//std::cout << "IN (16) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+		if(read_laser_obstacle_success_)
+			virtual_force_obstacle = Cscene_abstract::force_objects_laser_int( person_companion_  ); // mirar a ver si hay que cambiar algo de esta función o hacer otra similar.
+		virtual_force_robot = Sforce(); // a cabiar cuando tenga el robot en escena!
+		//std::cout << "IN (17) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+		person_companion_->set_forces_person( virtual_force_goal, virtual_force_int_person, virtual_force_robot, virtual_force_obstacle ); // hacer una equivalente para la person companion!
+		//std::cout << "IN (18) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+	}
+
+
+
+	//std::cout << "out (1) !!! calculate_current_forces_companion2_for_person_companion_akp" << std::endl;
+}
+
+
+/*** INI calculate_companion_angle_for_goal_companion! ***/
+void Cprediction_behavior::calculate_companion_angle_for_goal_companion( double distance_of_collision , double distance_between_robot_and_person_companion, bool case_dynamic)
+{
+	if(debug_angle_of_companion_obtained_from_prediction_){
+	 std::cout << "INI Function: Cprediction_behavior::calculate_companion_angle_for_goal_companion" << std::endl;
+	}
+	// TODO (ely): add the robot companion cost!!! in this node of the tree!!! (colision con robot, que parametro es, para evaluar el path)
+	    // OJO!!! si las acumulo como el, ya no podre calcular el coste real, haciendo una ventana hacia atras del coste. Quizas mejor acumular para cada path, hacer un vector de vectores.
+		// ojo!!! aquí solo acumula/calcula el coste de un path!!!
+
+
+		if(debug_angle_of_companion_obtained_from_prediction_){
+			std::cout << "robot_person_companion_distance_="<<distance_between_robot_and_person_companion << std::endl;
+		}
+
+
+		 std::cout << "INI Function: Cprediction_behavior::calculate_companion_angle_for_goal_companion: distance_between_robot_and_person_companion="<<distance_between_robot_and_person_companion << std::endl;
+
+
+
+		// ver si hay colision en la circunferencia de radio ROBOT+Persona. Si hay algun obstaculo estatico o persona, prediccion dentro de esa circunferencia.
+		// (check_collision( const Spoint& p=robot_creo ,  int t)) => la tendré que modificar para que devuelva la distancia de colision, tambien!
+		// la check_collision ya tiene los bucles siguientes que hacian falta.
+		// collision check for static objects    (si hay alguno dentro de esa circuferencia => se cambia el bool a true y se guarda esa distancia en el vector, min_distances.
+		// collision check for dynamic persons
+
+		double final_min_colision_distance;
+
+		if(distance_of_collision!=100){
+			final_min_colision_distance=distance_of_collision;
+			min_distance_collision_vector_from_prediction_.push_back(distance_of_collision);
+			//std::cout << " Si colision !!!!!! ; final_min_colision_distance="<<final_min_colision_distance<< std::endl;
+		}else{
+			final_min_colision_distance=distance_between_robot_and_person_companion;
+			min_distance_collision_vector_from_prediction_.push_back(distance_between_robot_and_person_companion);
+			//std::cout << " NO colision !!!!!! ; final_min_colision_distance="<<final_min_colision_distance<< std::endl;
+		}
+
+		if(debug_angle_of_companion_obtained_from_prediction_){
+			std::cout << "final_min_colision_distance="<<final_min_colision_distance<<"; distance_between_robot_and_person_companion="<<distance_between_robot_and_person_companion<<"; threshold_distance_collision_calculate_companion_angle_="<<threshold_distance_collision_calculate_companion_angle_<< std::endl;
+		}
+
+		// calculate the angle between robot and person.
+		double angle=angle_companion_pred_; // in grad.
+
+		double robot_radi=robot_->get_platform_radii();
+		double real_robot_person_distance2=distance_between_robot_and_person_companion;
+		/*if(bool_case_person_companion_){
+			real_robot_person_distance2=calc_robot_person_companion_distance_companion_person_akp();
+		}else{
+			real_robot_person_distance2=calc_robot_person_companion_distance();
+		}*/
+
+
+
+		if((final_min_colision_distance==distance_between_robot_and_person_companion)||(final_min_colision_distance>distance_between_robot_and_person_companion)){
+		//if((final_min_colision_distance==(2*((real_robot_person_distance/2)+2*robot_radi)))||(final_min_colision_distance>(2*((real_robot_person_distance/2)+2*robot_radi)))){
+		//if((final_min_colision_distance==(real_robot_person_distance+4*robot_radi+little_augmented_collision_margin_))||(final_min_colision_distance>(real_robot_person_distance+4*robot_radi+little_augmented_collision_margin_))){
+			angle=angle_companion_pred_;
+
+			//std::cout << " entro en if(...) => angle=angle_companion_"<< std::endl;
+
+		}else{
+			//angle=(180/3.14)*(asin((final_min_colision_distance/2)/(robot_person_companion_distance_/2))); //asin((final_min_colision_distance/2)/((2*radio_robot)/2)) ; 2*radio_robot= robot_person_companion_distance_;
+			//angle=(180/3.14)*(asin((final_min_colision_distance)/(robot_person_companion_distance_)));
+			if(overpas_obstacles_behind_person_pred_){
+				//orientation_person_robot_angles_.push_back(180-angle);
+				//angle=(180/3.14)*(asin((final_min_colision_distance)/(robot_person_companion_distance_))); //prueba 1.
+				//double division=(2*final_min_colision_distance)/(robot_person_proximity_distance_+2*robot_radi+little_augmented_collision_margin_);
+				double division;
+				//double division2;
+				double radi_force_influence=0.91; // la A! para las personas. Que no influya la fuerza de las personas.
+				if(case_dynamic){
+					//std::cout << " entro an case dynamic"<< std::endl;
+					division=(final_min_colision_distance-robot_radi-radi_force_influence)/(real_robot_person_distance2/2); //revisar el caso dynamico!
+
+				}else{
+					//std::cout << " entro an case NO dynamic"<< std::endl;
+					// en formulacion => dw/Ri => dw=d_real_collision/2-Rr-free_space_margin/2
+					// Ri = (d_real_between_r_and_p +2Rr+Free_space_margin)/2 =>free_space_margin==little_augmented_collision_margin_
+					division=((final_min_colision_distance/2)-robot_radi-(little_augmented_collision_margin_pred_/2))/((real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_pred_)/2);
+					//division=(final_min_colision_distance)/(real_robot_person_distance2+2*robot_radi+little_augmented_collision_margin_);
+					//division=(final_min_colision_distance)/((real_robot_person_distance2/2)+robot_radi+(little_augmented_collision_margin_/2));
+					//division=(final_min_colision_distance)/((real_robot_person_distance2/2)+robot_radi+(1/2));
+					//division=(final_min_colision_distance-robot_radi)/(real_robot_person_distance2/2);
+					//division2=((final_min_colision_distance/2)-robot_radi-(little_augmented_collision_margin_pred_/2))/((ideal_distance_of_companion_between_person_and_robot_+2*robot_radi+little_augmented_collision_margin_pred_)/2);
+					//std::cout << " final_min_colision_distance="<<final_min_colision_distance<<"; robot_radi="<<robot_radi<<"real_robot_person_distance2="<<real_robot_person_distance2<<" little_augmented_collision_margin_="<<little_augmented_collision_margin_<< std::endl;
+				}
+
+				//std::cout << " entro en else (...) => division="<<division<<"; case_dynamic_="<<case_dynamic_<< std::endl;
+
+				if(division>1){
+					division=1;
+				}else if(division<(-1)){
+					division=-1;
+				}
+
+				//std::cout << " entro en case overpas_obstacles_behind_person_pred_ => division="<<division<<" division2="<<division2<< std::endl;
+
+				angle=(180/3.14)*(asin(division)); //prueba 1.
+
+				//double angle2 =(180/3.14)*(asin(division2));
+				//std::cout << "(1) angle="<<angle<<"; angle2="<<angle2<< std::endl;
+
+				if(angle>angle_companion_pred_){
+					//std::cout << "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! OJO!!!! ENTRO EN if(angle>angle_companion_)"<< std::endl;
+					//std::cout << " (if angle>angle_companion_   Caso angle=angle_companion_) angle="<<angle<<"angle_companion_="<<angle_companion_<< std::endl;
+					angle=angle_companion_pred_;
+				}
+				//std::cout << "(2) angle="<<angle<< std::endl;
+
+				//std::cout << "parent_index="<<parent_index<< std::endl;
+				//std::cout << "colision="<<colision<< std::endl;
+				//std::cout << " [PASAR POR DETRAS] !!!! (ant) (test, colision) angle="<<angle<<" final_min_colision_distance="<<final_min_colision_distance<<"; robot_person_proximity_distance_="<<robot_person_proximity_distance_<< std::endl;
+				//std::cout << " [PASAR POR DETRAS] !!!! (ant) (test, colision) angle="<<angle<<" final_min_colision_distance/2="<<final_min_colision_distance/2<<"; (robot_person_proximity_distance_/2)+2*robot_radi)="<<(robot_person_proximity_distance_/2)+2*robot_radi<< std::endl;
+
+				angle=180-angle;
+				//std::cout << "(3) angle="<<angle<< std::endl;
+
+				//std::cout << " angle2="<<angle<< std::endl;
+
+				if(angle<angle_companion_pred_){
+					angle=angle_companion_pred_;
+					//std::cout << "angle<angle_companion_=> angle=angle_companion"<< std::endl;
+				}
+				//std::cout << "(4) angle="<<angle<< std::endl;
+
+				if(angle>180){
+					angle=180;
+					//std::cout << "angle>180=> angle=180"<< std::endl;
+				}
+				//std::cout << "(5) angle="<<angle<< std::endl;
+
+				//std::cout << "[overpas_obstacles_behind_person_] angle="<<angle<<"angle_companion_="<<angle_companion_<< std::endl;
+				//std::cout << " [PASAR POR DETRAS] !!!! (despues) (test, colision) angle="<<angle<< std::endl;
+				// TODO: temporal!!! el angulo solo va de 0 a angle_companion_=90grados, para colision!!!
+				/*if(angle>angle_companion_){
+					angle=angle_companion_;
+				}*/
+			}else{
+				//std::cout << " overpas delante persona "<< std::endl;
+				//angle=(180/3.14)*(asin((final_min_colision_distance)/(robot_person_companion_distance_))); //prueba 1.
+				//std::cout << " angle="<<angle <<"; final_min_colision_distance="<<final_min_colision_distance<<"; robot_person_companion_distance_"<<robot_person_companion_distance_<< std::endl;
+				//double division=(2*final_min_colision_distance)/(robot_person_proximity_distance_+2*robot_radi+little_augmented_collision_margin_);
+				double division;
+				double radi_force_influence=0.91; // la A!
+				if(case_dynamic){
+					//std::cout << " entro an case dynamic"<< std::endl;
+					division=(final_min_colision_distance-robot_radi-radi_force_influence)/(real_robot_person_distance2/2);
+				}else{
+					//std::cout << " entro an case NO dynamic"<< std::endl;
+					division=(final_min_colision_distance-robot_radi)/(real_robot_person_distance2/2);
+				}
+				if(division>1){
+					division=1;
+				}else if(division<(-1)){
+					division=-1;
+				}
+				angle=(180/3.14)*(asin(division)); //prueba 1.
+				// TODO: temporal!!! el angulo solo va de 0 a angle_companion_=90grados, para colision!!!
+				if(angle>angle_companion_pred_){
+					angle=angle_companion_pred_;
+					//std::cout << " (angle>angle_companion_) angle="<<angle<< std::endl;
+				}
+			}
+		}
+		if(debug_angle_of_companion_obtained_from_prediction_){ // SI se choca con obstaculos habrá que arreglar esto!!!
+			std::cout << " (test, colision) angle="<<angle<< std::endl;
+			std::cout << " final_min_colision_distance="<<final_min_colision_distance<< std::endl;
+		}
+
+		// teniendo la distancia, la he de transformar en un angulo, sabiendo la robot_person_companion_distance_ (distancia maxima)
+	//	double act_companion_cost; // actual companion cost.
+		//act_companion_cost=(0.00000015242)*(pow(angle-angle_companion_pred_,4)); //act_companion_cost=(0.000000015242)*(pow(angle-angle_companion_,4));
+		//std::cout << "act_companion_cost="<<act_companion_cost<< std::endl;
+
+		// calculas si hay incremento de angulo, si lo hay, calculas el coste hacia atras y los angulos hacia atras en el path, para que no haya saltos en la orientación.
+		/*if(angle!=angle_companion_){
+			//std::cout << "calculate_companion_addition_cost_node_of_big_angle_difference"<< std::endl;
+			//aditional cost due tu angle difference between actual angle and parent_vertex_angle
+			double additional_cost=calculate_companion_addition_cost_node_of_big_angle_difference(parent_index, angle);
+			act_companion_cost=act_companion_cost+additional_cost;
+			//calculate_companion_path_angle_and_cost(parent_index, angle);
+		}*/
+		//std::cout << "n"<< std::endl;
+		//colision=false; // TODO: quitar cuando vaya lo del robot...
+		//act_companion_cost=0; // TODO: quitar cuando vaya lo del robot...
+				//angle=90; // TODO: quitar cuando vaya lo del robot...
+
+		//cost_companion_.push_back( cost_companion_.at(parent_index) + act_companion_cost );
+
+		//std::cout << "(antes push_back()) angle="<<angle<< std::endl;
+
+		orientation_person_robot_angles_pred_.push_back(angle);
+
+		//parent_index_vector_.push_back(parent_index);
+
+		/*if(colision){
+			std::cout << "(calculate_companion_cost_node) => angle="<<angle<< std::endl;
+			std::cout << "(calculate_companion_cost_node) => min_distance_collision_="<<min_distance_collision_<< std::endl;
+
+		}*/
+
+
+		if(debug_angle_of_companion_obtained_from_prediction_){
+		 std::cout << "FIN Function: calculate_companion_cost_node" << std::endl;
+		}
+}
+/*** FIN calculate_companion_cost_node! ***/
+

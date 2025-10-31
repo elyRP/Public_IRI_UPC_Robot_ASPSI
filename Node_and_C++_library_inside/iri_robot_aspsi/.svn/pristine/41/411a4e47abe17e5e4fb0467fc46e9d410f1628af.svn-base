@@ -1,0 +1,23 @@
+###iri_navigation.rosinstall
+##################################
+###navigation/
+- git:
+    local-name: src/navigation/iri_gazebo_worlds
+    uri: ssh://git@gitlab.iri.upc.edu:2202/labrobotica/ros/navigation/iri_gazebo_worlds.git
+    version: melodic_migration
+- git:
+    local-name: src/navigation/iri_maps
+    uri: ssh://git@gitlab.iri.upc.edu:2202/labrobotica/ros/navigation/iri_maps.git
+    version: master
+- git:
+    local-name: src/navigation/iri_rosnav
+    uri: ssh://git@gitlab.iri.upc.edu:2202/labrobotica/ros/navigation/iri_rosnav.git
+    version: melodic_migration
+- git:
+    local-name: src/navigation/iri_teleop_launch
+    uri: ssh://git@gitlab.iri.upc.edu:2202/labrobotica/ros/navigation/iri_teleop_launch.git
+    version: master
+##################################
+
+
+

@@ -1,0 +1,102 @@
+/*
+ * learninglinnearregression.h
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+#ifndef SRC_LEARNING_PARAMETERS_LEARNNINGLINEARREGRESSION_H_
+#define SRC_LEARNING_PARAMETERS_LEARNNINGLINEARREGRESSION_H_
+
+/*class learning_linnear_regression {
+};*/
+
+//#endif /* SRC_LEARNING_PARAMETERS_LEARNINGLINNEARREGRESSION_H_ */
+
+/*
+ * learningleastsquaresregression.h
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#ifndef SRC_LEARNING_PARAMETERS_LEARNINGLEASTSQUARESREGRESSION_H_
+//#define SRC_LEARNING_PARAMETERS_LEARNINGLEASTSQUARESREGRESSION_H_
+
+class learning_least_squares_regression {
+public:
+	// variables de la clase
+	double learnning_rate_; // alpha=0.001 parametro a sacar y modificar con el dynamic reconfigure.
+							// es el step de lo que cambia el error el valor de los parametros.
+	double beta0_k_1_;
+	double beta1_k_1_;
+	double act_regression_error;
+
+	double real_y_value_;
+	double real_x_value_;
+
+	// funciones de la clase
+	learning_least_squares_regression();
+	virtual ~learning_least_squares_regression();
+	void least_squares_iteration();
+	void least_squares_initialice();
+	void least_squares_calc_error();
+};
+
+//#endif /* SRC_LEARNING_PARAMETERS_LEARNINGLEASTSQUARESREGRESSION_H_ */
+
+
+/*
+ * learnningBayesianregression.h
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#ifndef SRC_LEARNING_PARAMETERS_LEARNNINGBAYESIANREGRESSION_H_
+//#define SRC_LEARNING_PARAMETERS_LEARNNINGBAYESIANREGRESSION_H_
+
+class learnning_Bayesian_regression {
+public:
+	learnning_Bayesian_regression();
+	virtual ~learnning_Bayesian_regression();
+};
+
+//#endif /* SRC_LEARNING_PARAMETERS_LEARNNINGBAYESIANREGRESSION_H_ */
+
+
+/*
+ * learningleastsquarespercentageregression.h
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#ifndef SRC_LEARNING_PARAMETERS_LEARNINGLEASTSQUARESPERCENTAGEREGRESSION_H_
+//#define SRC_LEARNING_PARAMETERS_LEARNINGLEASTSQUARESPERCENTAGEREGRESSION_H_
+
+class learning_least_squares_percentage_regression {
+public:
+	learning_least_squares_percentage_regression();
+	virtual ~learning_least_squares_percentage_regression();
+};
+
+//#endif /* SRC_LEARNING_PARAMETERS_LEARNINGLEASTSQUARESPERCENTAGEREGRESSION_H_ */
+
+/*
+ * learnningleastabsolutedeviationregression.h
+ *
+ *  Created on: May 19, 2017
+ *      Author: ely7787
+ */
+
+//#ifndef SRC_LEARNING_PARAMETERS_LEARNNINGLEASTABSOLUTEDEVIATIONREGRESSION_H_
+//#define SRC_LEARNING_PARAMETERS_LEARNNINGLEASTABSOLUTEDEVIATIONREGRESSION_H_
+
+class learnning_least_absolute_deviation_regression {
+public:
+	learnning_least_absolute_deviation_regression();
+	virtual ~learnning_least_absolute_deviation_regression();
+};
+
+#endif /* SRC_LEARNING_PARAMETERS_LEARNNINGLEASTABSOLUTEDEVIATIONREGRESSION_H_ */

@@ -1,0 +1,106 @@
+/*
+ * person_virtual.cpp
+ *
+ *  Created on: Jul 9, 2013.Last Modified on 2025 by Ely
+ *     Author: Initial code of the Robot alone AKP navigation is from Gonzalo Ferrer. 
+ *     Author: The Addition of ASPSI and other approaching and accompaniment modifications and codes are of Ely Repiso.
+ */
+/*
+ *
+ *  Created on: Dec 22, 2013 by Gonzalo Ferrer. 
+ *  Last Modified by Ely Repiso on 2025 (migration to ros-Noetic and in the middle of ros2-humble migration)
+ *      Author: Initial code of the Robot alone AKP navigation is from Gonzalo Ferrer (2013).
+ *      Author: Additions and new codes of ASPSI for people accompaniment code of Ely Repiso (from 2015 and currently).
+ *
+ *      License (for other authors that will not be the original ones): CC BY-NC-ND 4.0 
+ *              (Attribution-NonCommercial-NoDerivatives 4.0 International)
+ *              https://creativecommons.org/licenses/by-nc-nd/4.0/deed.en
+ *
+ *      This license does not allow other authors to modify or to take profit from these works. 
+ *      Then, for modifications or derivative works, please contact ely.repiso@upc.edu to try to agree on 
+ *   collaborations (for journals with other researchers, formal collaborations between UPC and companies, and so on).
+ *
+ *  Please to only use it cite: Repiso, Ely, Anaís Garrell, and Alberto Sanfeliu. "Adaptive social planner to accompany people in real-life dynamic environments." International Journal of Social Robotics 16.6 (2024): 1189-1221.
+ *
+ *  Redistribution and use in source and binary forms, without
+ *  modification, are permitted provided that the following conditions
+ *  are met:
+ *
+ *   * Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above
+ *     copyright notice, this list of conditions and the following
+ *     disclaimer in the documentation and/or other materials provided
+ *     with the distribution.
+ *   * Neither the name of the Willow Garage nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission. 
+ *   * Additionally, remember that the derivatives without collaboration 
+ *     Of the original authors are prohibited
+ *
+ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ *  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ *  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ *  POSSIBILITY OF SUCH DAMAGE.
+ */
+#include "scene_elements/person_virtual.h"
+
+Cperson_virtual::Cperson_virtual( unsigned int id, Cperson_abstract::target_type person_target_type,
+		Cperson_abstract::force_type person_force_type,
+		double _time_window ) :
+	//Cperson_abstract(id,person_target_type, person_force_type)
+	//Cperson_bhmip(id, person_target_type, person_force_type, _time_window)
+		Cperson_behavior(id,Cperson_abstract::Person,Cperson_abstract::Spherical,_time_window)
+{
+
+}
+
+Cperson_virtual::~Cperson_virtual()
+{
+
+}
+
+void Cperson_virtual::add_pointV( SpointV_cov point, Cperson_abstract::filtering_method filter )
+{
+	std::cout<<" (Cperson_virtual:) entro en add_pointV!"<< std::endl;
+	diff_pointV_ = point - current_pointV_ ;
+	//resets covariance to predefined values, if not,
+	//it is a growing covariance function due to feedback propagation
+	current_pointV_ = SpointV_cov();
+	current_pointV_.x = point.x;
+	current_pointV_.y = point.y;
+	current_pointV_.vx = point.vx;
+	current_pointV_.vy = point.vy;
+	current_pointV_.time_stamp = point.time_stamp;
+	now_ = current_pointV_.time_stamp;
+}
+
+void Cperson_virtual::Cperson_bhmip_add_pointV( SpointV_cov point, Cperson_abstract::filtering_method filter, bool robot_or_person)
+{
+	std::cout<<" (Cperson_virtual) entro en add_pointV!"<< std::endl;
+	Cperson_behavior::add_pointV(point,filter,robot_or_person);
+	//Cperson_bhmip::Cperson_bhmip_add_pointV(point,filter);
+	//calculate expected behavior is done in the estimation method (in scene)
+}
+
+
+void Cperson_virtual::prediction( double min_v_to_predict)
+{
+
+}
+
+void Cperson_virtual::reset()
+{
+	current_pointV_ = SpointV_cov();
+	diff_pointV_ = SpointV_cov();
+	best_destination_ = Sdestination();
+	destinations_.clear();
+}

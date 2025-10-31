@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<!-- -->
+<launch>
+
+  <arg name="ns"           default="robot"/>
+  <arg name="map_name"     default="empty"/>
+  <arg name="map_frame_id" default="map"/>
+  <arg name="map_topic"    default="$(arg ns)/map"/>
+  <arg name="map_service"  default="$(arg ns)/static_map"/>
+  <arg name="output" default="screen" />
+  <arg name="launch_prefix" default="" />
+  
+  <group ns="$(arg ns)">
+    
+    <node name="map_server" 
+          pkg ="map_server" 
+          type="map_server"
+          args="$(find iri_maps)/maps/$(arg map_name).yaml"
+          output="$(arg output)"
+          launch-prefix="$(arg launch_prefix)">
+      <param name="frame_id" value="$(arg map_frame_id)"/>
+      <remap from="~map"        to="$(arg map_topic)"/>
+      <remap from="~static_map" to="$(arg map_service)"/>
+    </node>
+  
+  </group>
+
+</launch>

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  
+  <arg name="ns"    default="ana"/>
+  <arg name="world_name" default="master_big"/>
+  <arg name="world_description" default="true"/>
+  <arg name="cmd_vel_mux_config" default="$(find iri_ana_gazebo)/config/mux.yaml"/>
+  <arg name="rviz"  default="false"/>
+  <arg name="gui"   default="true"/>
+
+  <arg name="pan_tilt_controller_config_file" default="$(find iri_ana_gazebo)/config/ana_pan_tilt_sim_config.yaml" />
+  <arg name="joint_trajectory_config_file" default="$(find iri_ana_gazebo)/config/ana_joint_trajectory_gazebo_config.yaml"/>
+  <arg name="pan_tilt_effort_controller_ns" default="effort_controller" />
+  <arg name="pan_tilt_position_controller_ns" default="position_controller" />
+
+  <include file="$(find iri_gazebo_worlds)/launch/test.launch">
+    <arg name="gui"         value="$(arg gui)"/>
+    <arg name="world_name"  value="$(arg world_name)"/> 
+    <arg name="description" value="$(arg world_description)"/> 
+    <arg name="rviz"        value="false"/> 
+  </include>
+
+ <include file="$(find iri_objects_description)/launch/spawn_person.launch">
+    <arg name="name" value="person1"/>
+    <arg name="type" value="person"/>
+    <arg name="x"     value="12.5"/> <!--changes x component of the initial person2's position in the environment (in map coord)-->
+    <arg name="y"     value="20.0"/> <!--changes y component of the initial person2's position inside the environment (in map coord)-->
+    <arg name="yaw"   value="0.0"/> <!--changes the initial person2's orientation in the environment (it is in map coordinates)-->
+  </include>
+
+  <include file="$(find iri_ana_gazebo)/launch/spawn.launch">
+    <arg name="ns"    value="$(arg ns)"/>
+    <arg name="model" value="ana"/>
+    <arg name="x"     value="12.5"/>
+    <arg name="y"     value="22.0"/>
+    <arg name="yaw"   value="0.0"/>
+    <arg name="pan_tilt_controller_config_file"    value="$(arg pan_tilt_controller_config_file)"/>
+    <arg name="joint_trajectory_config_file"       value="$(arg joint_trajectory_config_file)"/>
+    <arg name="pan_tilt_effort_controller_ns"      value="$(arg pan_tilt_effort_controller_ns)"/>
+    <arg name="pan_tilt_position_controller_ns"    value="$(arg pan_tilt_position_controller_ns)"/>
+  </include>
+
+<!--
+<include file="$(find iri_objects_description)/launch/spawn_person.launch">
+    <arg name="name" value="person2"/>
+    <arg name="type" value="person"/>
+    <arg name="x"    value="27.0"/> 
+    <arg name="y"    value="22.0"/> 
+    <arg name="yaw"   value="3.14"/> 
+</include>
+
+<include file="$(find iri_objects_description)/launch/spawn_person.launch">
+    <arg name="name" value="person3"/>
+    <arg name="type" value="person"/>
+    <arg name="x"    value="40.5"/> 
+    <arg name="y"    value="17.5"/>
+    <arg name="yaw"   value="3.14"/> 
+</include>
+
+<include file="$(find iri_objects_description)/launch/spawn_person.launch">
+    <arg name="name" value="person4"/>
+    <arg name="type" value="person"/>
+    <arg name="x"     value="40.0"/>
+    <arg name="y"     value="21.5"/>
+    <arg name="yaw"   value="3.14"/>
+  </include>
+-->
+
+  <include file="$(find iri_rosnav)/launch/include/cmd_vel_mux.launch">
+    <arg name="ns"                    value="$(arg ns)"/>
+    <arg name="nodelet_manager_name"  value="mux_nodelet_manager"/>
+    <arg name="config"                value="$(arg cmd_vel_mux_config)"/>
+    <arg name="output"                value="log" />
+    <arg name="launch_prefix"         value="" />
+  </include>
+
+  <node name="cmd_vel_relay"
+        pkg="topic_tools"
+        type="relay"
+        args="/ana/ana_odom/cmd_vel_in /ana/cmd_vel">
+  </node>
+
+  <node name="rviz"
+        pkg="rviz"
+        type="rviz"
+        if="$(arg rviz)"
+        args="-d $(find iri_ana_gazebo)/rviz/$(arg ns).rviz">
+  </node>
+
+</launch>

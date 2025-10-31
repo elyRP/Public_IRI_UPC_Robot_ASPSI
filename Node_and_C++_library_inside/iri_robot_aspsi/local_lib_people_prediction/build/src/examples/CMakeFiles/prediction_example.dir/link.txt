@@ -1,0 +1,1 @@
+/usr/bin/c++   -std=c++0x -g -Wall -D_REENTRANT  -rdynamic CMakeFiles/prediction_example.dir/prediction_example.o  -o ../../../bin/prediction_example  -Wl,-rpath,/home/noetic/ros_ws/src/AKP_WS/navigation/iri_robot_aspsi/local_lib_people_prediction/lib ../../../lib/libpeople_prediction.so 

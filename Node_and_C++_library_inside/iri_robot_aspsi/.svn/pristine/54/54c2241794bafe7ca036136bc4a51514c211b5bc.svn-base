@@ -1,0 +1,19 @@
+#footprint: [[0.5, 0.5], [0.5, -0.5], [-0.5, -0.5], [-0.5, 0.5]]
+robot_radius: 0.275
+
+obstacle_laser_layer:
+    enabled: true
+    observation_sources: base_scan
+    combination_method: 0 # can erase static layer
+
+    base_scan:
+      sensor_frame: base_laser_link
+      data_type: LaserScan
+      topic: scan
+      expected_update_rate: 0.3
+      observation_persistence: 1.0
+      inf_is_valid: true
+      marking: true
+      clearing: true
+      raytrace_range: 4.0
+      obstacle_range: 3.0

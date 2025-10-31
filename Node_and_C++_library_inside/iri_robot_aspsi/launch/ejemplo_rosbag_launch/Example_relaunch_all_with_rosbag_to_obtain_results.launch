@@ -1,0 +1,242 @@
+<!-- EXAMPLE FOR Dabo-ROBOT -->
+<!-- Note: This is just an example of what you can do to get results from the rosbags, but it may be necessary to change some topics or add something else from the robot model or map.  -->
+<launch>
+
+<param name="use_sim_time" value="true"/>
+
+    <node pkg="rosbag"
+        type="play"
+        name="rosbag"
+        args=" --clock --pause -l -r 4  /home/erepiso/results_tibi/1_rosbags_teleop_comparacion_SideBySide_Vform/17_12_2018/17_12_2018_tibi/subset_2018-12-17-16-59-15.bag"/> 
+
+<!-- Rosbags Comparación Side-by-Side y Vform !!! -->
+<!-- "Help": If you want, for comfortablenes include the launch's names here to only copy names and change in the previous node the rosbag. 
+
+Example: 29_11_2018/29_11_2018_teo/2018-11-29-15-08-39.bag ; real-video-asociated to launch: Video_NAME.mp4 // + briev description of experiment.
+ -->
+
+
+
+<!-- Launch Dabo robot model: -->
+  <include file="$(find iri_dabo_gazebo)/launch/spawn.launch">
+    <arg name="ns"    value="$(arg ns)"/>
+    <arg name="model" value="$(arg robot_model)"/>
+    <arg name="x"     value="11.0"/>
+    <arg name="y"     value="22.0"/>
+    <arg name="yaw"   value="0.0"/>
+  </include>
+
+
+ <!--re-launch Launch detector and tracker (option 2: comment these ones and change the topics to use the tracks of the recorded rosbag. -->
+
+ <!-- People Tracking MHT (remap) -->
+    <!-- published topics:  /$(env ROBOT)/mht/tracks -->
+    <!-- subscribed topics: /$(env ROBOT)/detections -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_people_tracking_mht"
+        type="iri_people_tracking_mht"
+        name="mht_2"      
+        output="screen"> 
+    <remap from="/mht_2/detections"
+              to="/lpd_2/peopleMapFiltered" />         
+    <remap from="/mht_2/odom"
+              to="/dabo/odom" /> <!-- /topic-odometry-of-the-robot -->
+    <remap from="/mht_2/odom_for_medium_velocity"
+              to="/dabo/odom" /> <!-- /topic-odometry-of-the-robot -->
+              
+ <!-- People Tracking MHT parameters for outdoor environments with few false alarms-->
+  	<param name="~/frame_id"  type="string" value="map" /> <!-- tf of the map for the tracker -->
+    <param name="local_tracker"            type="bool"   value="false"/>
+    <param name="~/association_threshold"  type="double" value="1.0" />
+    <param name="~/confirmation_threshold" type="double" value="0.9" />
+    <param name="~/deletion_threshold"     type="double" value="0.4" />
+    <param name="~/laser_probability"      type="double" value="0.9" />
+    <param name="~/laser_false_alarm"      type="double" value="0.1" />
+    <param name="~/laser_new_track"        type="double" value="0.11" />
+    <param name="~/laser_no_detection"     type="double" value="0.97" />
+    <param name="~/laser_no_confirmed"     type="double" value="0.02" />
+		<param name="~/laser_no_confirmed_iteration" type="double" value="0.01" />
+ 		<param name="~/augment_covariance_track" type="double" value="0.5" />
+    <param name="~/mht_velocity_margin" type="double" value="1.0" />
+    <param name="~/covariance_no_track" type="double" value="5.0" />
+  </node>
+
+  <!-- Laser People Detector (remap) -->
+    <!-- published topics:  /$(env ROBOT)/people -->
+    <!-- subscribed topics: /$(env ROBOT)/sensors/front_laser_scan -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_laser_people_detection"
+        type="iri_laser_people_detection"
+        name="lpd_2"
+        output="screen"
+       	>
+
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-0.07" />
+			<param name="~/personRadius"        type="double" value="0.7" />
+      <!-- load different trained detectors (to switch at rangeThreshold) -->
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile.txt"  />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile2.txt" />
+      <!-- transform detections to base_link frame -->
+      <param name="~/selectPosesFrame"   type="bool"   value="False" />
+      <param name="~/posesFrame"         type="string" value="/scan" />  <!-- frame where you want the poses -->
+      <param name="~/selectScanFrame"    type="bool"   value="False" />
+      <param name="~/scanFrame"          type="string" value="/scan" /> <!-- frame of the scan -->
+      <!-- visualization -->
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.4" />
+      <param name="~/markerR"            type="double" value="0.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.5" />
+      <param name="~/markerA"            type="double" value="0.5" />
+      <!-- filter detections by range/x/y -->
+      <param name="~/filterPosesMode"    type="bool"   value="False" />
+      <param name="~/filterR"            type="double" value="0.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+
+    <remap from="/lpd_2/scan"
+             to="/dabo/sensors/front_scan" /> <!-- topic: scan del robot -->
+    <remap from="/lpd_2/people"
+             to="/dabo/people" />
+  </node>
+  
+    <node pkg ="iri_laser_people_detection"
+        type="iri_laser_people_detection"
+        name="lpd"
+        output="screen"
+       	>
+
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-0.07" />
+			<param name="~/personRadius"        type="double" value="0.7" />
+      <!-- load different trained detectors (to switch at rangeThreshold) -->
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile.txt"  />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile2.txt" />
+      <!-- transform detections to base_link frame -->
+      <param name="~/selectPosesFrame"   type="bool"   value="False" />
+      <param name="~/posesFrame"         type="string" value="/scan" />  <!-- frame where you want the poses -->
+      <param name="~/selectScanFrame"    type="bool"   value="False" />
+      <param name="~/scanFrame"          type="string" value="/scan" /> <!-- frame of the scan -->
+      <!-- visualization -->
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.4" />
+      <param name="~/markerR"            type="double" value="0.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.5" />
+      <param name="~/markerA"            type="double" value="0.5" />
+      <!-- filter detections by range/x/y -->
+      <param name="~/filterPosesMode"    type="bool"   value="False" />
+      <param name="~/filterR"            type="double" value="0.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+
+    <remap from="/lpd/scan"
+             to="/dabo/sensors/rear_scan" /> <!-- topic: scan del robot -->
+    <remap from="/lpd/people"
+             to="/dabo/people" />
+  </node>
+  
+  
+   <!-- Laser People map Filter -->
+    <!-- published topics:  /$(env ROBOT)/peopleFiltered -->
+    <!-- subscribed topics: /$(env ROBOT)/people -->
+    <!--                    /$(env ROBOT)map -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+     <node pkg ="iri_laser_people_map_filter"
+          type="iri_laser_people_map_filter"
+          name="laser_people_map_filter">
+
+ 			<param name="~/filter"   type="bool" value="True" /> <!-- true to enable filtering when we have a map -->
+      <param name="~/neighborRadius"   type="double" value="0.3" />
+      <param name="~/markerWidth"      type="double" value="0.7" />
+      <param name="~/markerHeight"     type="double" value="1.5" />
+      <param name="~/markerR"          type="double" value="1.0" />
+      <param name="~/markerG"          type="double" value="1.0" />
+      <param name="~/markerB"          type="double" value="0.0" />
+      <param name="~/markerA"          type="double" value="0.9" />
+      <param name="~/markerLifeTime"   type="double" value="0.1" />
+      
+
+      <remap from="/laser_people_map_filter/people"
+               to="/dabo/people" />
+      <remap from="/laser_people_map_filter/people_out"
+               to="/lpd_2/peopleMapFiltered" />
+      <remap from="/laser_people_map_filter/map"
+               to="/dabo/map" /> <!-- topic of the map -->
+                          
+    </node> 
+
+
+<!-- INI nav nodes _companion-->
+ <include file="$(find iri_dabo_rosnav)/launch/nav_map_companion.launch">
+ <arg name="map_name"                value="master_big" />
+ <arg name="initial_x"               value="19.0"/>
+  <arg name="initial_y"               value="39.0"/>
+  <arg name="initial_yaw"             value="0.0"/>
+  </include>
+  
+
+<!-- Launch the companion planner: -->
+ <group ns="dabo"> 
+  <rosparam command="delete" ns="/dabo/move_base" />
+
+   <node pkg ="move_base"
+          type="move_base"
+          name="move_base2"      
+          output="screen">
+      <remap from="/dabo/move_base/cmd_vel"
+              to="/dabo/navigation/cmd_vel" />
+      <remap from="/dabo/move_base/odom"
+              to="/dabo/odom" />
+      <remap from="/dabo/front_scan"
+              to="/dabo/sensors/front_scan" />
+      <remap from="/dabo/rear_scan"
+              to="/dabo/sensors/rear_scan" />
+      <remap from="/dabo/tracks"
+               to="/mht_2/tracks" />
+         <remap from="/dabo/move_base2/goal"
+               to="/dabo/move_base/goal" /> 
+      <remap from="/dabo/planner_markers"
+               to="/dabo/planner_markers2" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/move_base_params.yaml"      command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/local_costmap_params.yaml"  command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana/global_costmap_params.yaml" command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/dabo/akp_local_planner_params.yaml" command="load" />
+      <rosparam file="$(find iri_dabo_rosnav)/params/amcl_companion_test_ely2021_mapFME.yaml" command="load" />
+ <!--<rosparam file="$(find iri_dabo_rosnav)/params/global_planner/global_planner_params.yaml" command="load" />
+ <rosparam file="$(find iri_dabo_rosnav)/params/mux.yaml" command="load" />-->
+      <param name="AkpLocalPlanner/destination_map_path" value="$(find iri_robot_aspsi)/maps/master_big_destinations_Gazebo_sim.txt" />
+	<param name="AkpLocalPlanner/results_filename_Zanlungo" value="name_file.txt" /> 
+      <param name="AkpLocalPlanner/robot" value="dabo"/>
+      <param name="AkpLocalPlanner/person_goal_id"  value="200"/> 
+      <param name="AkpLocalPlanner/speed_k"  value="1"/> 
+      <param name="AkpLocalPlanner/person_radi_amp"  value="0.2"/> 
+      <param name="AkpLocalPlanner/change_treshold_distance_between_steps"  value="0.3"/> 
+	<!-- for SIM-->
+ 	<param name="AkpLocalPlanner/change_sim"  value="False"/> 
+ 	<param name="AkpLocalPlanner/sim_target_per"  value="False"/> 
+        <param name="AkpLocalPlanner/frame_robot_footprint"  value="dabo/base_link"/> 
+    </node>
+ </group>
+
+  <node name="dr" pkg ="rqt_reconfigure" type="rqt_reconfigure" />
+
+
+
+
+ <node name="rviz" pkg="rviz" type="rviz" args="-d $(find iri_akp_local_planner_companion)/config/tibi_comparacion_Vform_sideBySide.rviz" />
+
+
+</launch>

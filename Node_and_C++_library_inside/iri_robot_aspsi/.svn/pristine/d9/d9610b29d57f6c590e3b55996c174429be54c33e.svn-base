@@ -1,0 +1,13 @@
+Copyright (C) 2009-2020 Institut de Robòtica i Informàtica Industrial, CSIC-UPC.
+Author erepiso (erepiso@iri.upc.edu)
+All rights reserved.
+
+To install and use the algorithm, enter in folder docs and enter in folder 1_Install_instructions and follow the instructions the robot that you need to use.
+
+Also, read the 2_Instructions_tracker_and_detector_used_with_the_accompaniement to know how to use the detector and tracker that uses the accompaniment.
+
+Furthermore, read the 3_Tutorials_of_capabilities_parameters_etc_valid_for_all_robots to know the capabilities and how to use all the parameters of the ASP-SI.
+
+In addition, all the functions and "important" parts of the code are comented inside to allow a better comprehension of the code.
+
+

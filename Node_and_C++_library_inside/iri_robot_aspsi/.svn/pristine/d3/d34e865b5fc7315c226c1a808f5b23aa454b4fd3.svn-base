@@ -1,0 +1,193 @@
+#! /usr/bin/env python
+#*  All rights reserved.
+#*
+#*  Redistribution and use in source and binary forms, with or without
+#*  modification, are permitted provided that the following conditions
+#*  are met:
+#*
+#*   * Redistributions of source code must retain the above copyright
+#*     notice, this list of conditions and the following disclaimer.
+#*   * Redistributions in binary form must reproduce the above
+#*     copyright notice, this list of conditions and the following
+#*     disclaimer in the documentation and/or other materials provided
+#*     with the distribution.
+#*   * Neither the name of the Willow Garage nor the names of its
+#*     contributors may be used to endorse or promote products derived
+#*     from this software without specific prior written permission.
+#*
+#*  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+#*  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+#*  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+#*  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+#*  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+#*  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+#*  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+#*  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+#*  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+#*  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+#*  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+#*  POSSIBILITY OF SUCH DAMAGE.
+#***********************************************************
+
+# Author: Ely Repiso for companion ASPSI and Gonzalo Ferrer for the AKP
+PACKAGE='iri_robot_aspsi'
+
+from dynamic_reconfigure.parameter_generator_catkin import *
+gen = ParameterGenerator()
+
+
+#### Parameters to start the simulation ####
+gen.add("Block_parameters_division1"                  , str_t,    0,  "Parameters to start the simulation:","Parameters to start the simulation:")
+# select the nearest person like accompanied person
+gen.add("select_near_pers_as_companion_one_person",      bool_t,    0,   "select the nearest person like accompanied person",   False)
+# id's people companions and number of these
+gen.add("id_person_companion", int_t,   0,   "Id of the person which is accompanied by the robot", 1,  1,  10000000)
+# num people in group, one person.
+gen.add("number_of_people_in_group", int_t,   0,   "number of people inside the group that accompanies the robot", 1,  1,  10000000)
+# to launch a goal from the dynamic-reconfigure.
+gen.add("launch_goal"   ,   bool_t,  0, "if True => send goal", False)
+
+##### stop manually the robot. ####
+gen.add("Block_parameters_division2"                  , str_t,    0,  "To Stop the robot manually: ", "To Stop the robot manually:")
+gen.add("stop_robot_manually_conf",      bool_t,    0,   " To stop the robot manually.",   False)
+
+####  Parameters to  visualize markers and output messages TODO: intentar quitar estos, no se usa. EXCEPTO vis_mode.  ####
+gen.add("Block_parameters_division3"                  , str_t,    0,  "Parameters to  visualize markers of ASPSI: ", "Parameters to  visualize markers of ASPSI: ")
+# visualization markers
+gen.add("vis_mode",         int_t,    0,   "Visualization markers: #0 no markers, #1 min, #2 normal(2d), #3 super (3d), #4 SUPER!",          4,      0,  7)
+
+gen.add("Block_parameters_division50"                  , str_t,    0,  " Iterative Simulation ", " Iterative Simulation  ")
+gen.add("change_sim"       ,   bool_t,  0, "FALSE FOR REAL; True for simulation", True)
+gen.add("change_sim_target_per"       ,   bool_t,  0, "FALSE FOR REAL; True for simulation", True)
+
+
+####  Parameters to adapt the robot the accompaniment, distance between people and angle of accompaniment ####  
+gen.add("Block_parameters_division4"                  , str_t,    0,  "Parameters to adapt the accompaniment to the robot-platform (set-up for Tibi): ","Parameters to adapt the accompaniment to the robot-platform (already set-up for Tibi): ")
+# set-up the robot radius
+gen.add("platform_radii", double_t,   0,   "robot radii",             0.5,      0.0,  5.0)
+# set-up the best accompaniment distance
+gen.add("proximity_distance_between_robot_and_person", double_t,   0,   "Is the distance between robot and person", 1.5,      0.0,  5.0)
+# set-up the best accompaniment angle
+gen.add("real_companion_angle_SideBySide",   double_t,   0,   "Is the companion angle set for the case without obstacles", 90,      0.0,  180.0)
+# set-up the maximum real robot speed
+gen.add("max_real_speed_out", double_t, 0, "maximum robot real velocity", 0.6 , 0.0, 2.0)
+# set-up the constant of the controller (if your robot velocity controller divides the velocity by 2 or something similar) => Normally, only used in the real robot.
+gen.add("max_real_angular_speed_out", double_t, 0, " limite velocidad maxima de salida del robot", 0.4 , 0.0, 2.0)
+gen.add("speed_k", double_t, 0, " constant multiplying output linear speed", 1.5 , 1.0, 2.0)  # For our real robot is needed a speed_k=1.5 
+gen.add("speed_k_angular", double_t, 0, " constant multiplying output linear speed", 1.2 , 1.0, 2.0) 
+
+
+####  Parameters to do a slow stop in the real robot, when accompanies a person and this person stops ####  
+gen.add("Block_parameters_division42"                  , str_t,    0,  "Parameters to adapt the robot stop when person stops: ","Parameters to adapt the robot stop when person stops: ")
+# for our tibi robot are good these value of parameters: step_decreace_velocity_stop_robot_ (with real robot)=0.05   limit_velocity_stop_robot_ (with real robot)=0.1 => is the limit to let the robot decrease the velocity as much as want, without the slow reduction.
+# step_decreace_velocity_stop_robot_conf is the step to reduce slowly the velocity in each iteration when the velocity is below the limit_velocity_stop_robot_conf.
+gen.add("step_decreace_velocity_stop_robot_conf", double_t, 0, " Step to decrease velocity to stop the robot slowly", 0.1 , 0.0, 2.0)
+#limit_velocity_stop_robot_conf is the limit to let the robot decrease the velocity as much as want, without the slow reduction.
+gen.add("limit_velocity_stop_robot_conf", double_t, 0, " limit of the velocity to decrease velocity to stop the robot slowly", 0.1 , 0.0, 2.0)
+
+
+
+
+
+#### Parameters to reduce the computational load of the planner of config of the planner limits. (may change in other systems. #### 
+gen.add("Block_parameters_division5"                  , str_t,    0,  "Local-planner parameters:", "Local-planner parameters:")
+# horitzon time of the local planner.
+gen.add("horizon_time",     double_t,  0,   "Horizon time in which people and obstacles are considered for planning purposes",  4.0,      0.1,  40.0)
+# number of vertex for the planned paths
+gen.add("number_vertex",    int_t,     0,   "Number of total vertexes for planning purposes",  200,      1,  10000)
+#  the dt between iterations of the planner. => set up due to the iteration time of the controller.
+gen.add("set_planner_dt", double_t, 0, " planner dt_", 0.2 , 0.0, 30.0)
+
+
+
+#### Parameters to adapt the dynamic-final-goals to the environments####
+gen.add("Block_parameters_division6"                  , str_t,    0,  "Parameters to adapt the dynamic-final-goals to the environment:", "Parameters to adapt the dynamic-final-goals to the environment:")
+# to change the final goal dynamically using the group orientation of movement. 
+gen.add("in_change_dynamically_final_dest"       ,   bool_t,  0, "if true, we change the final dest tacking into account the person orientation", True)
+# limit of distance from the static goal to change the final goal dynamically using the group orientation of movement. 
+gen.add("distance_to_dynamic_goal_Vform",          double_t,   0,   "distance from the person's actual goal to the dynamic goal. So that it does not crash into walls, but follow orientation people", 5.0,      0.0,  20.0) 
+# Depends on the environment:
+# (brl =>distance_to_dynamic_goal_Vform=6.0m) (fme=>distance_to_dynamic_goal_Vform=4.0m)
+
+
+#### Parameters to reduce the computational load due to static and dynamic obstacles ####
+gen.add("Block_parameters_division7"                  , str_t,    0,  "Parameters to reduce the computational load due to obstacles:", "Parameters to reduce the computational load due to obstacles:")
+# distance arround the robot to detect obstacles and do not saturate the node.
+gen.add("detection_laser_obstacle_distances",   double_t,   0,   " distance to detect the laser obstacles (reduce the computaional time)", 4,      0.0,  20.0)
+
+
+
+
+
+#### Parameters to adjust the robot's accelerations and velocities. Can be different for different robots.  ####
+gen.add("Block_parameters_division8"                  , str_t,    0,  "Parameters to adjust the robot's accelerations and velocities:", "Parameters to adjust the robot's accelerations and velocities:")
+
+#  set max velocities and accelerations for propagate the robot position
+gen.add("v_max",           double_t,   0,   "robot maximum velocity",             1.2,      0.0,  5.0)
+gen.add("w_max",           double_t,   0,   "robot maximum angular velocity",     1.0,      0.0,  5.0)
+gen.add("av_max",          double_t,   0,   "robot maximum acceleration",         0.4,      0.0,  5.0)
+gen.add("av_max_VrobotZero",          double_t,   0,   "robot maximum acceleration VrobotZero",         0.6,      0.0,  5.0)
+gen.add("lim_VrobotZero",          double_t,   0,   "robot lim acceleration VrobotZero",         0.1,      0.0,  5.0)
+gen.add("av_max_negativa",          double_t,   0,   "robot maximum negative acceleration",         0.2,      0.0,  5.0)
+gen.add("av_break",          double_t,   0,   "robot minimum acceleration (breaking)",  0.4,  0.0,  5.0)
+gen.add("aw_max",          double_t,   0,   "robot maximum angular acceleration", 0.9,      0.0,  5.0)
+
+
+gen.add("Block_parameters_divisionTest"                  , str_t,    0,  "Parameters to test good companion and outside velocities + frames", "Parameters to test good companion and outside velocities + frames:")
+gen.add("frame_map",                str_t,     0, "frame to transform poses to", "map")
+gen.add("frame_robot_footprint",    str_t,     0, "frame to transform poses to", "ana/base_link") 
+gen.add("fuera_bolitas_goals_companion_markers_conf",      bool_t,    0,   " Fuera bolas markers",   True)
+gen.add("conf_debug_all_IVO",      bool_t,    0,   " All mesagenes to debug IVO",   True)
+gen.add("conf_debug_few_IVO",      bool_t,    0,   " Only few velocity messages to debug IVO",   False)
+gen.add("external_goal",  bool_t,   0,   "Set a external goal or not (If you want to fix the robot goal manually in r-viz)", False) # esta puede hacerles valta
+
+#### Other needed variables that normally we do not have to change it. (TODO: ESTOS INTENTAR QUITARLOS)
+gen.add("Block_parameters_division9"                  , str_t,    0,  "Other parameters that are correctly set-up for all sistems, but I have not had time to include only internal ones or they are inherited and difficult to remove:", "Other parameters that are correctly set-up for all sistems, but I have not had time to include only internal ones or they are inherited and difficult to remove:")
+gen.add("plan_mode",        int_t,     0,   "#0-F_RRT_Uniform, #1-F_RRT_Gauss_Circle, #2-F_RRT_Gauss_Circle_alpha",  1,      0,  2)
+gen.add("distance_mode",    int_t,     0,   "#0-Euclidean, #1-cost-to-go-erf, #2-c2g-norm, #3-c2g-raw. It is recomnded not to use *erf/*norm methods and not using also *erf/*norm in the global mode, except for c2g-raw",      1,      0,  3)
+gen.add("global_mode",      int_t,     0,   "Designed to be paired with the distance_mode, although it may use a different global mode:#0-Scaliarization, #1-Weighted-sum-erf, #2-Weighted-sum-norm, #3-MO_erf, #4-MO_norm",      1,      0,  4)
+
+# end of SFM params
+gen.add("min_v_to_predict",    double_t,    0,   "Minimum estimaated velocity that the BHMIP requires in order to make aprediction. If velocity is lower than this number, then no prediction is done and the targets remains in place",          0.2,  0.0,  5.0)
+gen.add("ppl_collision_mode",           int_t,   0,   "mode to calculate ppl collisions #0 deterministic, #1 mahalanobis to std, #2 mahalanobis to std 0.5 and Euclidean distance near, #3 Mahalanobis to std 0.3+Eucl", 0,      0,  3)
+gen.add("pr_force_mode",           int_t,   0,   "probabilistic interaction robot-ppl #0 deterministic, #1 sampling, #2 mahalanobis, #3 worst distance to ellipsoid", 0,      0,  3)
+
+
+gen.add("goal_providing_mode",           int_t,   0,   "mode to provide goals to the local planner: #0 cropping or intersecting the plan with the boundary of local window; #1 Slicing the plan into a set of subgoals at salient points", 0,      0,  1)
+gen.add("slicing_diff_orientation",   double_t,   0,   "Slicing path changes in orientation to select a new subgoal. Only makes sense if the goal_providing_mode is set to #1", 20.0,      10.0,  90.0)
+
+
+### weights for the costo of the paths. It is missed here the companion cost. (Dificiles de quitar) ###
+gen.add("cost_distance", double_t,0,   "goal cost parameter, distance to goal",              1.0,      0.0,  100.0)
+gen.add("cost_orientation", double_t,0, "orientation cost parameter, distance to goal",  1.0,      0.0,  100.0)
+gen.add("cost_w_robot", double_t,0,       "robot cost paramters, work of the path",        1.0,      0.0,  100.0)
+gen.add("cost_w_people",   double_t,0,   "interacing people cost paramters, work of the pertubations generated",1.0,      0.0,  100.0)
+gen.add("cost_time", double_t,0,       "potentia time cost paramter, up to get t_horizon",        0.25,      0.0,  100.0)
+gen.add("cost_obs", double_t,0,       "obstacle cost paramter",        1.0,      0.0,  100.0)
+gen.add("cost_old_path", double_t,0,       "old path cost paramter",        0.0,      0.0,  100.0)
+gen.add("cost_l_minima", double_t,0,       "local minima scape cost paramter",        0.0,      0.0,  100.0)
+
+
+#### dificiles/largas de quitar.
+
+gen.add("in_max_asos_point_to_person",           int_t,   0,   "detector de obstaculos maximo numero de puntos associados a persona", 100,      0,  1000)
+gen.add("set_initial_v_robot_needed_for_odom", double_t, 0, " set_initial_v_robot_needed_for_odom", 0.17 , 0.0, 30.0)
+#  change time vindow to calculate the people velocity (propagations)
+gen.add("change_time_window_filter_vel_people",   double_t,   0,   "change the value of the time window for filter the medium velocity of the prediction of people",   4.0,      0.1,  40.0)
+gen.add("conf_normal_vel_dampening_parameter",   double_t,   0,   "to change the normal velocity dampening parameter of the robot, aboid S behaviour",   1.6,  -15.0,  15.0)
+gen.add("conf_limit_linear_vel_for_dampening_parameter",   double_t,   0,   "to change the limit_threshold for the linear velocity to change the dampening parameter of the robot, aboid S behaviour(not used at this moment)",   0.15,  -15.0,  15.0)
+gen.add("conf_limit_angular_vel_for_dampening_parameter",   double_t,   0,   "to change the limit_threshold for the angular velocity to change the dampening parameter of the robot, aboid S behaviour(not used at this moment)",   0.8,  -15.0,  15.0)
+gen.add("conf_final_max_v", double_t,   0,   "Is minimun velocity to change the goal of the robot to do not it first position", 1.5,      0.0,  3.0)
+
+# wii and Ps3 comandaments parameters. // seguramente se cambiaran por los que necesite yo.
+#gen.add("use_default_wii_button",  bool_t,   0,   " False to set out wii Up and down buttons", True)
+#gen.add("use_default_PS3_button",  bool_t,   0,   " False to set out PS3 Up and down buttons", True)
+#gen.add("joy_watchdog_time",          double_t, 0, "Maximum time (seconds) between joy msgs",                 1.0, 0.1, 3.0)
+
+
+###PARAMETROS A ELIMINAR
+
+
+# end of SFM companion params
+exit(gen.generate(PACKAGE, "AkpLocalPlannerAlgorithm", "AkpLocalPlanner"))
+

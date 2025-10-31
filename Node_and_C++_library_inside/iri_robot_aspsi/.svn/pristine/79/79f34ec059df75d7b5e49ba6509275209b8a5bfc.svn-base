@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<!-- -->
+<launch>
+
+  <arg name="ns"            default="robot"/>
+  <arg name="map_frame_id"  default="map"/>
+  <arg name="odom_frame_id" default="odom"/>
+  <arg name="base_frame_id" default="base_footprint"/>
+  <arg name="initial_x"     default="-1.5"/>
+  <arg name="initial_y"     default="8.0"/>
+  <arg name="initial_yaw"   default="-1.57"/>
+  <arg name="config"        default="$(find iri_rosnav)/params/amcl.yaml"/>
+  <arg name="scan_topic"    default="$/scan_raw"/>
+  <arg name="map_service"   default="$(arg ns/static_map"/>
+  <arg name="output" default="screen" />
+  <arg name="launch_prefix" default="" />
+  
+  <group ns="$(arg ns)">
+
+    <node name="amcl"
+          pkg ="amcl"
+          type="amcl"
+          output="$(arg output)"
+          launch-prefix="$(arg launch_prefix)">
+      <remap from="/$(arg ns)/scan" to="$(arg scan_topic)"/>
+      <remap from="/static_map" to="$(arg map_service)"/>
+      <rosparam file="$(arg config)" command="load"/>
+      <param name="map_frame_id"  value="$(arg map_frame_id)"/>
+      <param name="odom_frame_id" value="$(arg odom_frame_id)"/>
+      <param name="base_frame_id" value="$(arg base_frame_id)"/>
+      <param name="initial_pose_x" value="$(arg initial_x)"/>
+      <param name="initial_pose_y" value="$(arg initial_y)"/>
+      <param name="initial_pose_a" value="$(arg initial_yaw)"/>
+    </node>
+    
+  </group>
+
+</launch>

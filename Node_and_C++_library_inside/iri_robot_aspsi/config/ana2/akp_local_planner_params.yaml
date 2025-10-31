@@ -1,0 +1,171 @@
+#*  All rights reserved.
+#*/*
+# * akp_local_planner_params.yaml  (for ASPSI)
+# *
+# *  Created on: Dec 22, 2013. Last Modified by Ely Repiso on 2025 (migration to ros-Noetic and in the middle of 
+# *  ros2- humble migration)
+# *      Author: Initial code of the Robot alone AKP navigation is from Gonzalo Ferrer (2013).
+# *      Author: Additions and new codes of ASPSI for people accompaniment code of Ely Repiso (from 2015 and currently).
+# *
+# *      license (for other authors that will not be the original ones): CC BY-NC-ND 4.0 
+# *      (Attribution-NonCommercial-NoDerivatives 4.0 International)
+# *        https://creativecommons.org/licenses/by-nc-nd/4.0/deed.en
+# *
+# *      This license does not allow other authors to modify or to take profit from these works. 
+# *      Then, for modifications or derivative works, please contact ely.repiso@upc.edu to try to agree on 
+# *  collaborations (for journals with other researchers, formal collaborations between UPC and companies, and so on).
+# *
+# *  Please to only use it cite: Repiso, Ely, Anaís Garrell, and Alberto Sanfeliu. "Adaptive social planner to accompany people in real-life dynamic environments." International Journal of Social Robotics 16.6 (2024): 1189-1221.
+# */
+
+#*  Redistribution and use in source and binary forms, without
+#*  modification, are permitted provided that the following conditions
+#*  are met:
+#*
+#*   * Redistributions of source code must retain the above copyright
+#*     notice, this list of conditions and the following disclaimer.
+#*   * Redistributions in binary form must reproduce the above
+#*     copyright notice, this list of conditions and the following
+#*     disclaimer in the documentation and/or other materials provided
+#*     with the distribution.
+#*   * Neither the name of the Willow Garage nor the names of its
+#*     contributors may be used to endorse or promote products derived
+#*     from this software without specific prior written permission.
+#*   * Additionally, remember that the derivatives without collaboration 
+#*     Of the original authors are prohibited
+#*
+#*  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+#*  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+#*  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+#*  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+#*  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+#*  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+#*  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+#*  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+#*  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+#*  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+#*  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+#*  POSSIBILITY OF SUCH DAMAGE.
+#***********************************************************
+AkpLocalPlanner:
+  move_base: True
+  plan_mode: 2
+  distance_mode: 1
+  global_mode: 3
+  vis_mode:    1
+  frozen_mode: False
+  number_vertex: 200
+  horizon_time: 5.0
+  cost_distance:    0.7
+  cost_orientation: 0.5
+  cost_w_robot:     0.4
+  cost_w_people:    0.2
+  cost_time:        0.25
+  cost_obs:         0.2
+  cost_old_path:    0.4
+  cost_l_minima:    0.0
+  v_max:  1.2
+  w_max:  1.0
+  av_max: 0.3
+  av_max_neg: 0.4
+  av_Vrobotzero: 0.6
+  lim_Vrobotzero: 0.1
+  av_break: 0.4
+  aw_max: 0.9
+  platform_radii: 0.5
+  xy_goal_tolerance: 0.3
+  distance_to_stop: 2.0
+  v_goal_tolerance: 0.1
+  esfm_to_person_A: 5.05
+  esfm_to_person_B: 1.2
+  esfm_to_person_lambda: 0.25
+  esfm_to_robot_A: 5.04
+  esfm_to_robot_B: 1.2
+  esfm_to_robot_lambda: 0.25
+  esfm_to_obstacle_A: 3.5
+  esfm_to_obstacle_B: 0.68
+  esfm_to_obstacle_lambda: 1.0
+  esfm_k: 2.3
+  esfm_d: 0.2
+  min_v_to_predict : 0.2
+  ppl_collision_mode : 0
+  pr_force_mode : 0
+  goal_providing_mode : 1
+  slicing_diff_orientation : 50.0
+  esfm_to_person_companion_A: 5.0252
+  esfm_to_person_companion_B: 0.71  
+  esfm_to_person_companion_lambda: 0.25
+  esfm_companion_d: 0.1
+  genome_Cr: 0.62
+  genome_Ct: 0.08
+  genome_eta: -0.43
+  genome_r0: 1.0
+  genome_S0: 0.5
+  genome_rmax: 3
+
+#############################
+#  av_max: 0.2  (OJO!, cambiados para que vaya mejor la simulacion, pero en real son estos!)
+#  av_max_neg: 0.2
+#  av_break: 0.2
+#  aw_max: 0.7
+#############################
+### Parameters of group model Francesco
+##############
+#
+# valores buenos side-by-side
+#  esfm_to_person_companion_A: 3.0252
+#  esfm_to_person_companion_B: 0.33  
+#  esfm_to_person_companion_lambda: 1.0
+#  esfm_companion_d: 0.1
+#  esfm_to_person_companion_A: 5.0252
+#  esfm_to_person_companion_B: 0.13  
+#  esfm_to_person_companion_lambda: 1.0
+# (mejor opcion)y9= 1.5471* exp((0.4464-d) / (0.5710));
+#y9= 0.2471* exp((0.4464-d) / (0.1710)); y9= A* exp((d_0-d) / (B));
+##from launch file
+#  force_map_path: "/home/fherrero/iri-lab/ros/iri-ros-pkg/iri_navigation/iri_people_simulation_companion/map/force_map.txt"
+#  destination_map_path: "/home/fherrero/iri-lab/ros/iri-ros-pkg/iri_navigation/iri_people_simulation_companion/map/2_destinations.txt"
+#  robot: "tibi"
+# esfm_to_obstacle_A: 5.0
+# esfm_to_robot_B: 0.2 (antes)
+#  (antes) w_max:  0.8
+#  (antes) aw_max: 0.9
+# esfm_k: 2.3
+# esfm_to_robot_A: 7.05
+#  esfm_to_robot_B: 0.2
+#  esfm_to_robot_lambda: 0.05
+#  esfm_d: 0.2
+
+# parametro bueno mio, para companion y find target
+# cambiado en find target, porque no iba bien en las predicciones de personas.
+#  esfm_to_obstacle_A: 3.5
+#   esfm_to_obstacle_B: 0.5
+#  esfm_to_obstacle_lambda: 1.0
+# esfm_to_robot_A: 6.05
+#  esfm_to_robot_B: 0.45
+#  esfm_to_robot_lambda: 0.25
+# anteriores SIMULACION
+#  v_max:  0.9
+#  w_max:  0.785
+#  av_max: 0.4
+#  av_break: 0.4
+#  aw_max: 0.785
+# IDEAL para person companion
+#  esfm_to_person_companion_A: 5.0252
+#  esfm_to_person_companion_B: 0.4963 => rebajado a 0.1963 para que NO choque nunca! pero que este a su lado bien puesta.
+#  esfm_to_person_companion_lambda: 1.0
+ # esfm_companion_d: 0.1
+#  esfm_to_person_A: 5.05 
+#  esfm_to_person_B: 0.91 Ideal, =>  rebajado a 0.71 para que no se aleje tanto de las personas!==SOLO ZANLUNGO (en atr para que no oscilara tube que rebajarla a 0.10 y lambda =1, d=0.25
+#  esfm_to_person_lambda: 0.25
+
+# Parametros companion buenos:
+#   esfm_to_person_companion_A: 5.0252
+#  esfm_to_person_companion_B: 0.35  
+#  esfm_to_person_companion_lambda: 1.0
+#esfm_to_obstacle_A: 3.5
+#  esfm_to_obstacle_B: 0.65
+#
+#
+
+    

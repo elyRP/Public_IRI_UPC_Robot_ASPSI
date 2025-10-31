@@ -1,0 +1,60 @@
+
+#include<iostream>
+#include<string>
+#include<vector>
+#include <dirent.h>
+#include <stdio.h>
+
+
+std::string addPath(std::string a, std::string c){
+    std::string b = "/";
+    return a+b+c;
+}
+
+std::vector<std::string> folderStream(std::string PATH){
+    std::vector<std::string> directories;
+    DIR *dir = opendir(PATH.c_str());
+    struct dirent *entry = readdir(dir);
+    while (entry != NULL)
+    {
+        if (entry->d_type == DT_DIR){
+            std::string aux = entry->d_name;
+            if(aux.compare(".") != 0 and aux.compare("..")!=0){
+                directories.push_back(entry->d_name);
+            }
+        }
+        entry = readdir(dir);
+    }
+
+    closedir(dir);
+
+    return directories;
+}
+
+void pathGeneratoraux(std::string path, int level, std::vector<std::string> &paths){
+    std::vector<std::string> v = folderStream(path);
+    if(level == 0){
+        for(int i = 0; i<v.size();i++){
+            paths.push_back(addPath(path,v[i]));
+        }
+    }
+    else{
+        for(int i = 0; i<v.size();i++){
+            pathGeneratoraux(addPath(path,v[i]),level-1,paths);
+        }
+    }
+}
+
+std::vector<std::string> pathGenerator(std::string path){
+    std::vector<std::string> paths;
+    pathGeneratoraux(path,1,paths);
+    return paths;
+}
+
+int main(int argc,char *argv[]){
+    std::string path = "/home/aserra/Documents/IRI/Database_creation/Experiments";
+    std::vector<std::string> paths = pathGenerator(path);
+    for(int i = 0; i<paths.size(); i++){
+        std::cout<<paths[i]<<std::endl;
+    }
+}

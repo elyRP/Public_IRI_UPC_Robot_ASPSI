@@ -1,0 +1,73 @@
+<!-- -->
+<launch>
+
+
+    <!-- Ini Navigation Companion Nodes -->
+   <!--launch-prefix="xterm -e ddd -args"  -->
+
+  <group ns="$(optenv ROBOT ana)"> 
+  <rosparam command="delete" ns="/ana/move_base" />
+
+    <!--launch-prefix="xterm -e ddd -args"  machine="visio"-->
+    <node pkg ="move_base"
+          type="move_base"
+          name="move_base"      
+          output="screen">
+      <remap from="/ana/move_base_ana/cmd_vel"
+              to="/ana/navigation/cmd_vel" />
+      <remap from="/ana/move_base_ana/odom"
+              to="/ana/odom" />
+      <remap from="/ana/front_scan"
+              to="/ana/sensors/scan" />
+      <remap from="/ana/rear_scan"
+              to="/ana/sensors/scan" />
+      <remap from="/ana/tracks"
+               to="/ana/mht/tracks" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana2/move_base_params_aspsi.yaml"      command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana2/ana/costmap_common_params.yaml" command="load" ns="global_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana2/costmap_common_params.yaml" command="load" ns="local_costmap" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana2/local_costmap_params.yaml"  command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana2/ana/global_costmap_params.yaml" command="load" />
+      <rosparam file="$(find iri_robot_aspsi)/config/ana2/akp_local_planner_params.yaml" command="load" />
+<rosparam file="$(find iri_ana_rosnav)/params/amcl_companion_test_ely2021_mapFME.yaml" command="load" />
+ <!--<rosparam file="$(find iri_dabo_rosnav)/params/global_planner/global_planner_params.yaml" command="load" />
+ <rosparam file="$(find iri_dabo_rosnav)/params/mux.yaml" command="load" />-->
+      <param name="AkpLocalPlanner/destination_map_path" value="$(find iri_robot_aspsi)/maps/destinaciones_ana_FME_ubuntu18_ros_melodic.txt" />
+	<param name="AkpLocalPlanner/results_filename_Zanlungo" value="name_file.txt" /> 
+      <param name="AkpLocalPlanner/robot" value="ana"/>
+      <param name="AkpLocalPlanner/person_goal_id"  value="200"/> 
+      <param name="AkpLocalPlanner/speed_k"  value="1"/> 
+      <param name="AkpLocalPlanner/person_radi_amp"  value="0.2"/> 
+      <param name="AkpLocalPlanner/change_treshold_distance_between_steps"  value="0.3"/> 
+	<!-- for SIM-->
+ 	<param name="AkpLocalPlanner/change_sim"  value="False"/> 
+ 	<param name="AkpLocalPlanner/sim_target_per"  value="False"/> 
+        <param name="AkpLocalPlanner/frame_robot_footprint"  value="ana/base_link"/> 
+    </node>
+
+<!-- node states companion -->
+  <node pkg ="iri_state_machine_companion"
+          type="iri_state_machine_companion"
+          name="state_mach_comp"
+	  output="screen">
+      <remap from="/ana/state_mach_comp/people_tracks"
+               to="/ana/mht/tracks" />
+      <remap from="/ana/state_mach_comp/odom"
+               to="/ana/odom" />
+      <remap from="/ana/state_mach_comp/companionState"
+               to="/ana/companionState" />
+	<remap from="/ana/state_mach_comp/tibi_akp_status"
+	to="/ana/ana_akp_tatus"/>
+     <param name="~/threshold_max_dist_between_robot_and_person_conf"   value="3.0" />
+     <param name="~/frame_map"   value="map" />
+     <param name="~/frame_robot_footprint"   value="ana/base_link" />
+     <param name="~/robot"   value="ana" />
+     <param name="terrinet_project_conf"  value="true"/>
+    </node>
+ </group>
+
+ 
+
+  <node name="dr" pkg ="rqt_reconfigure" type="rqt_reconfigure" />
+
+</launch>

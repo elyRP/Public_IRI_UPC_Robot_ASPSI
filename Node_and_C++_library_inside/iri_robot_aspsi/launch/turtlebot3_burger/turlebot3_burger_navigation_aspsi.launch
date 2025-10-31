@@ -1,0 +1,228 @@
+<launch>
+  <!-- Arguments -->
+  
+  
+ <!-- <arg name="map_file" default="$(find turtlebot3_navigation)/maps/map.yaml"/>-->
+  
+  <arg name="map_file" default="$(find iri_maps)/maps/master_big_for_turlebot3_burguer.yaml"/>
+  <arg name="model" default="$(env TURTLEBOT3_MODEL)" doc="model type [burger, waffle, waffle_pi]"/>
+  <arg name="configuration_basename" default="turtlebot3_lds_2d.lua"/>
+  <arg name="sensor_range" default="1.0"/>
+  <arg name="cmd_vel_topic" default="/cmd_vel" />
+  <arg name="odom_topic" default="odom" /> 
+  <arg name="multi_robot_name" default=""/>
+  <arg name="x_pos" default="12.5"/>
+  <arg name="y_pos" default="22.0"/>
+  <arg name="z_pos" default="0.0"/>
+  <arg name="open_rviz" default="true"/>
+  <arg name="move_forward_only" default="false"/>
+
+ <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name" value="$(find iri_gazebo_worlds)/worlds/master_big.world"/>
+    <arg name="paused" value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui" value="true"/>
+    <arg name="headless" value="false"/>
+    <arg name="debug" value="false"/>
+  </include>
+
+  <param name="robot_description" command="$(find xacro)/xacro --inorder $(find turtlebot3_description)/urdf/turtlebot3_$(arg model).urdf.xacro" />
+
+  <node pkg="gazebo_ros" type="spawn_model" name="spawn_urdf"  args="-urdf -model turtlebot3_$(arg model) -x $(arg x_pos) -y $(arg y_pos) -z $(arg z_pos) -param robot_description" />
+
+  <include file="$(find turtlebot3_bringup)/launch/includes/description.launch.xml">
+    <arg name="model" value="$(arg model)" />
+  </include>
+
+
+  
+ <!-- Turtlebot3 navigation-->
+  <include file="$(find turtlebot3_bringup)/launch/turtlebot3_remote.launch">
+    <arg name="model" value="$(arg model)" />
+  </include>
+
+  <!-- Map server -->
+  <node pkg="map_server" name="map_server" type="map_server" args="$(arg map_file)"/>
+
+  <!-- AMCL -->
+  <include file="$(find turtlebot3_navigation)/launch/amcl.launch"/>
+
+  <!-- move_base -->
+  <!-- <include file="$(find turtlebot3_navigation)/launch/move_base.launch">
+    <arg name="model" value="$(arg model)" />
+    <arg name="move_forward_only" value="$(arg move_forward_only)"/>
+  </include>-->
+
+<!-- spawn person-->
+  <include file="$(find iri_objects_description)/launch/spawn_person.launch">
+    <arg name="name" value="person1"/>
+    <arg name="type" value="person"/>
+    <arg name="x"     value="11.5"/>  <!--master_big: 11.5; adeam_empty: 1.0 --> <!-- changes the x component of the initial person1's position inside the environment (it is in map coordinates).  -->
+    <arg name="y"     value="20.0"/> <!--master_big: 20.0; adeam_empty: 1.0--> <!-- changes the y component of the initial person1's position inside the environment (it is in map coordinates)-->
+    <arg name="z"     value="0.0"/>
+    <arg name="yaw"   value="0.0"/> <!-- changes the initial person1's orientation inside the environment (it is in map coordinates)-->
+  </include>
+  
+  
+  
+  <!-- detection, map filtering y tracker -->
+  
+<!-- DETECTION AND TRACKING -->
+<!-- DETECTION AND TRACKING -->
+<!-- DETECTION AND TRACKING -->
+
+ <!-- People Tracking MHT (remap) -->
+    <!-- published topics:  /$(env ROBOT)/mht/tracks -->
+    <!-- subscribed topics: /$(env ROBOT)/detections -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_people_tracking_mht"
+        type="iri_people_tracking_mht"
+        name="mht_2"      
+        output="screen"> 
+    <remap from="/mht_2/detections"
+              to="/lpd_2/peopleMapFiltered" />         
+    <remap from="/mht_2/odom"
+              to="/odom" /> <!-- /topic-odometry-of-the-robot -->
+    <remap from="/mht_2/odom_for_medium_velocity"
+              to="/odom" /> <!-- /topic-odometry-of-the-robot -->
+              
+ <!-- People Tracking MHT parameters for outdoor environments with few false alarms-->
+  	<param name="~/frame_id"  type="string" value="map" /> <!-- tf of the map for the tracker -->
+    <param name="local_tracker"            type="bool"   value="false"/>
+    <param name="~/association_threshold"  type="double" value="1.0" />
+    <param name="~/confirmation_threshold" type="double" value="0.9" />
+    <param name="~/deletion_threshold"     type="double" value="0.4" />
+    <param name="~/laser_probability"      type="double" value="0.9" />
+    <param name="~/laser_false_alarm"      type="double" value="0.1" />
+    <param name="~/laser_new_track"        type="double" value="0.11" />
+    <param name="~/laser_no_detection"     type="double" value="0.97" />
+    <param name="~/laser_no_confirmed"     type="double" value="0.02" />
+		<param name="~/laser_no_confirmed_iteration" type="double" value="0.01" />
+ 		<param name="~/augment_covariance_track" type="double" value="0.5" />
+    <param name="~/mht_velocity_margin" type="double" value="1.0" />
+    <param name="~/covariance_no_track" type="double" value="5.0" />
+  </node>
+
+  <!-- Laser People Detector (remap) -->
+    <!-- published topics:  /$(env ROBOT)/people -->
+    <!-- subscribed topics: /$(env ROBOT)/sensors/front_laser_scan -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <!-- <node pkg ="iri_laser_people_detection"
+        type="iri_laser_people_detection"
+        name="lpd_2"
+        output="screen"
+       	>
+
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-0.07" />
+			<param name="~/personRadius"        type="double" value="0.7" />
+      
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile.txt"  />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile2.txt" />
+
+      <param name="~/selectPosesFrame"   type="bool"   value="False" />
+      <param name="~/posesFrame"         type="string" value="/scan" />  
+      <param name="~/selectScanFrame"    type="bool"   value="False" />
+      <param name="~/scanFrame"          type="string" value="/scan" /> 
+  
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.4" />
+      <param name="~/markerR"            type="double" value="0.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.5" />
+      <param name="~/markerA"            type="double" value="0.5" />
+
+      <param name="~/filterPosesMode"    type="bool"   value="False" />
+      <param name="~/filterR"            type="double" value="0.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+
+    <remap from="/lpd_2/scan"
+             to="/dabo/sensors/front_scan" /> 
+    <remap from="/lpd_2/people"
+             to="/dabo/people" />
+  </node> -->
+  
+    <node pkg ="iri_laser_people_detection"
+        type="iri_laser_people_detection"
+        name="lpd"
+        output="screen"
+       	>
+
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-0.94" />
+      <param name="~/personRadius"        type="double" value="0.7" />
+      <!-- load different trained detectors (to switch at rangeThreshold) -->
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile.txt"  />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile2.txt" />
+      <!-- transform detections to base_link frame -->
+      <param name="~/selectPosesFrame"   type="bool"   value="False" />
+      <param name="~/posesFrame"         type="string" value="/scan" />  <!-- frame where you want the poses -->
+      <param name="~/selectScanFrame"    type="bool"   value="False" />
+      <param name="~/scanFrame"          type="string" value="/scan" /> <!-- frame of the scan -->
+      <!-- visualization -->
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.4" />
+      <param name="~/markerR"            type="double" value="0.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.5" />
+      <param name="~/markerA"            type="double" value="0.5" />
+      <!-- filter detections by range/x/y -->
+      <param name="~/filterPosesMode"    type="bool"   value="False" />
+      <param name="~/filterR"            type="double" value="0.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+
+    <remap from="/lpd/scan"
+             to="/scan" /> <!-- topic: scan del robot -->
+    <remap from="/lpd/people"
+             to="/dabo/people" />
+  </node>
+  
+  
+   <!-- Laser People map Filter -->
+    <!-- published topics:  /$(env ROBOT)/peopleFiltered -->
+    <!-- subscribed topics: /$(env ROBOT)/people -->
+    <!--                    /$(env ROBOT)map -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+     <node pkg ="iri_laser_people_map_filter"
+          type="iri_laser_people_map_filter"
+          name="laser_people_map_filter">
+
+ 			<param name="~/filter"   type="bool" value="True" /> <!-- true to enable filtering when we have a map -->
+      <param name="~/neighborRadius"   type="double" value="0.3" />
+      <param name="~/markerWidth"      type="double" value="0.7" />
+      <param name="~/markerHeight"     type="double" value="1.5" />
+      <param name="~/markerR"          type="double" value="1.0" />
+      <param name="~/markerG"          type="double" value="1.0" />
+      <param name="~/markerB"          type="double" value="0.0" />
+      <param name="~/markerA"          type="double" value="0.9" />
+      <param name="~/markerLifeTime"   type="double" value="0.1" />
+      
+
+      <remap from="/laser_people_map_filter/people"
+               to="/dabo/people" />
+      <remap from="/laser_people_map_filter/people_out"
+               to="/lpd_2/peopleMapFiltered" />
+      <remap from="/laser_people_map_filter/map"
+               to="/map" /> <!-- topic of the map -->
+                          
+    </node> 
+
+
+
+
+  
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find iri_robot_aspsi)/rviz/turtlebot3_burger.rviz"/>
+ 
+ 
+</launch>

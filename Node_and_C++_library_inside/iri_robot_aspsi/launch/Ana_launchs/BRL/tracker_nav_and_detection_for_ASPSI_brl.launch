@@ -1,0 +1,191 @@
+<!-- -->
+<launch>
+
+  <arg name="rviz"                    default="true"/>
+  <arg name="rviz_file"               default="$(find iri_ana_rosnav)/rviz/ana.rviz"/>
+  <arg name="move_base_params"        default="move_base_params.yaml"/>
+  <arg name="costmap_common_params"   default="common_params.yaml"/>
+  <arg name="costmap_local_params"    default="local_params.yaml"/>
+  <arg name="costmap_global_params"   default="global_params.yaml"/>
+  <arg name="map_name"                default="master_big"/>
+  <arg name="initial_x"               default="20.5"/>
+  <arg name="initial_y"               default="39.0"/>
+  <arg name="initial_yaw"             default="0.0"/>
+  <arg name="local_planner"           default="dwa"/>
+  <arg name="global_planner"          default="global_planner"/>
+  <arg name="output"                  default="screen" />
+  <arg name="launch_prefix"           default="" />
+
+  <include file="$(find iri_rosnav)/launch/nav.launch">
+    <arg name="ns"                    value="ana"/>
+    <arg name="path"                  value="$(find iri_ana_rosnav)/params"/>
+    <arg name="move_base_params"      value="$(arg move_base_params)"/>
+    <arg name="costmap_common_params" value="$(arg costmap_common_params)"/>
+    <arg name="costmap_local_params"  value="$(arg costmap_local_params)"/>
+    <arg name="costmap_global_params" value="$(arg costmap_global_params)"/>
+    <arg name="map_frame_id"          value="map"/>
+    <arg name="odom_frame_id"         value="ana/odom"/>
+    <arg name="base_frame_id"         value="ana/base_footprint"/>
+    <arg name="map_topic"             value="/ana/map"/>
+    <arg name="map_service"           value="/ana/static_map"/>
+    <arg name="odom_topic"            value="/ana/odom"/>
+    <arg name="cmd_vel_topic"         value="/ana/navigation/cmd_vel"/>
+    <arg name="scan_topic"            value="/ana/sensors/scan"/>
+    <arg name="use_map"               value="true"/>
+    <arg name="use_map_server"        value="true"/> 
+    <arg name="map_name"              value="$(arg map_name)"/>
+    <arg name="use_amcl"              value="true"/>
+    <arg name="amcl_config"           value="$(find iri_ana_rosnav)/params/amcl_companion_test_ely2021_mapFME.yaml"/>
+    <arg name="initial_x"             value="$(arg initial_x)"/>
+    <arg name="initial_y"             value="$(arg initial_y)"/>
+    <arg name="initial_yaw"           value="$(arg initial_yaw)"/>
+    <arg name="use_fake_loc"          value="false"/>
+    <arg name="use_gmapping"          value="false"/>
+    <arg name="local_planner"         value="$(arg local_planner)"/>
+    <arg name="global_planner"        value="$(arg global_planner)"/>
+    <arg name="output"                value="$(arg output)" />
+    <arg name="launch_prefix"         value="$(arg launch_prefix)" />
+  </include>
+  
+  <include file="$(find iri_rosnav)/launch/include/pointcloud_to_laserscan.launch">
+    <arg name="ns"             value="ana"/>
+    <arg name="node_name"      value="pcl_to_laserscan"/>
+    <arg name="scan_topic"     value="/ana/sensors/scan"/>
+    <arg name="cloud_topic"    value="/ana/sensors/velodyne_points"/>
+    <arg name="config_file"    value="$(find iri_ana_rosnav)/params/pointcloud_to_laserscan.yaml" />
+    <arg name="output"         value="$(arg output)" />
+    <arg name="launch_prefix"  value="$(arg launch_prefix)" />
+  </include>
+
+<group ns="$(optenv ROBOT ana)"> 
+ <!-- People Tracking MHT (remap) -->
+    <!-- published topics:  /$(env ROBOT)/mht/tracks -->
+    <!-- subscribed topics: /$(env ROBOT)/detections -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_people_tracking_mht"
+        type="iri_people_tracking_mht"
+        name="mht"      
+        output="screen"> 
+    <remap from="/ana/mht/detections"
+              to="/ana/lpd/peopleMapFiltered" />         
+    <remap from="/ana/mht/odom"
+              to="/ana/odom" /> <!-- /topic-odometry-of-the-robot -->
+    <remap from="/ana/mht/odom_for_medium_velocity"
+              to="/ana/odom" /> <!-- /topic-odometry-of-the-robot -->
+              
+ <!-- People Tracking MHT parameters for outdoor environments with few false alarms-->
+  	<param name="~/frame_id"  type="string" value="map" /> <!-- tf of the map for the tracker -->
+    <param name="local_tracker"            type="bool"   value="false"/>
+    <param name="~/association_threshold"  type="double" value="1.0" />
+    <param name="~/confirmation_threshold" type="double" value="0.9" />
+    <param name="~/deletion_threshold"     type="double" value="0.4" />
+    <param name="~/laser_probability"      type="double" value="0.9" />
+    <param name="~/laser_false_alarm"      type="double" value="0.1" />
+    <param name="~/laser_new_track"        type="double" value="0.11" />
+    <param name="~/laser_no_detection"     type="double" value="0.97" />
+    <param name="~/laser_no_confirmed"     type="double" value="0.02" />
+   <param name="~/laser_no_confirmed_iteration" type="double" value="0.01" />
+   <param name="~/augment_covariance_track" type="double" value="0.5" />
+    <param name="~/mht_velocity_margin" type="double" value="1.0" />
+    <param name="~/covariance_no_track" type="double" value="5.0" />
+  </node>
+
+  <!-- Laser People Detector (remap) -->
+    <!-- published topics:  /$(env ROBOT)/people -->
+    <!-- subscribed topics: /$(env ROBOT)/sensors/front_laser_scan -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+  <node pkg ="iri_laser_people_detection"
+        type="iri_laser_people_detection"
+        name="lpd"
+        output="screen"
+       	>
+
+      <param name="~/rangeThreshold"     type="double" value="0.0" />
+      <param name="~/detectionThreshold" type="double" value="-0.07" />
+			<param name="~/personRadius"        type="double" value="0.7" />
+      <!-- load different trained detectors (to switch at rangeThreshold) -->
+      <param name="~/boostFilePath"      type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile.txt"  />
+      <param name="~/boostFilePath2"     type="string" value="/usr/local/include/iri/laser_people_detection/boostData/boostFile2.txt" />
+      <!-- transform detections to base_link frame -->
+      <param name="~/selectPosesFrame"   type="bool"   value="False" />
+      <param name="~/posesFrame"         type="string" value="/scan" />  <!-- frame where you want the poses -->
+      <param name="~/selectScanFrame"    type="bool"   value="False" />
+      <param name="~/scanFrame"          type="string" value="/scan" /> <!-- frame of the scan -->
+      <!-- visualization -->
+      <param name="~/markerWidth"        type="double" value="0.7" />
+      <param name="~/markerHeight"       type="double" value="0.4" />
+      <param name="~/markerR"            type="double" value="0.0" />
+      <param name="~/markerG"            type="double" value="0.0" />
+      <param name="~/markerB"            type="double" value="0.5" />
+      <param name="~/markerA"            type="double" value="0.5" />
+      <!-- filter detections by range/x/y -->
+      <param name="~/filterPosesMode"    type="bool"   value="False" />
+      <param name="~/filterR"            type="double" value="0.0" />
+      <param name="~/filterX"            type="double" value="0.0" />
+      <param name="~/filterY"            type="double" value="0.0" />
+
+    <remap from="/ana/lpd/scan"
+             to="/ana/sensors/scan" /> <!-- topic: scan del robot -->
+    <remap from="/ana/lpd/people"
+             to="/ana/lpd/people" />
+  </node>
+  
+   
+  
+   <!-- Laser People map Filter -->
+    <!-- published topics:  /$(env ROBOT)/peopleFiltered -->
+    <!-- subscribed topics: /$(env ROBOT)/people -->
+    <!--                    /$(env ROBOT)map -->
+    <!-- service clients: -->
+    <!-- service servers: -->
+    <!-- action clients: -->
+    <!-- action servers: -->
+     <node pkg ="iri_laser_people_map_filter"
+          type="iri_laser_people_map_filter"
+          name="lpmf">
+
+ 			<param name="~/filter"   type="bool" value="True" /> <!-- true to enable filtering when we have a map -->
+      <param name="~/neighborRadius"   type="double" value="0.3" />
+      <param name="~/markerWidth"      type="double" value="0.7" />
+      <param name="~/markerHeight"     type="double" value="1.5" />
+      <param name="~/markerR"          type="double" value="1.0" />
+      <param name="~/markerG"          type="double" value="1.0" />
+      <param name="~/markerB"          type="double" value="0.0" />
+      <param name="~/markerA"          type="double" value="0.9" />
+      <param name="~/markerLifeTime"   type="double" value="0.1" />
+      
+
+      <remap from="/ana/lpmf/people"
+               to="/ana/lpd/people" />
+      <remap from="/ana/lpmf/people_out"
+               to="/ana/lpd/peopleMapFiltered" />
+      <remap from="/ana/lpmf/map"
+               to="/ana/map" /> <!-- topic of the map -->
+                          
+    </node> 
+ </group>
+
+   <!-- Ini Navigation Companion Nodes -->
+
+ 
+
+ <!--  <node name="rviz"
+        pkg="rviz"
+        type="rviz"
+        if="$(arg rviz)"
+        args="-d $(arg rviz_file)">
+  </node>-->
+
+<node name="rviz"
+        pkg="rviz"
+        type="rviz"
+        if="$(arg rviz)"
+         args="-d $(find iri_robot_aspsi)/rviz/ana.rviz">
+  </node>
+</launch>
