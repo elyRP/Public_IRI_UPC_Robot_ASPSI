@@ -1,5 +1,5 @@
 /*
- * test_Cperson.cpp
+ * test_geometry.cpp
  *
  * TODO complete the test, it was done after the designe of the Cpersons classes
  *
