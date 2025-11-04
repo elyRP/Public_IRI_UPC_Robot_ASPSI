@@ -1,5 +1,5 @@
 /*
- * test_Cperson.cpp
+ * test_scene.cpp
  *
  * A test for the scene type elements. TODO
  *
